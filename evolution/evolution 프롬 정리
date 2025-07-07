@@ -1,0 +1,819 @@
+"""
+genetic tree를 구현해줘. 아래의 명세를 모두 반영해야 한다.
+- 해당 GA tree의 목적은 자동 트레이딩을 위한 코드이다.
+- tree의 분기는 무조건 비교 구문으로 구성된다.
+-- tree의 분기는 무조건 2개의 형식으로 구분된다.
+--- 하나의 노드의 자식 노드는 여러개가 될 수 있다. (자식 노드 제한 존재 - argument로 입력 예정)
+--- feature >< number or feature1 >< feature2
+--- 형식의 feature는 미리 지정해준다.
+
+--- ex)   feature_num     = ['RSI', 'ATR', 'WR'] 
+  feature_pair    = ['SMA', 'EMA', 'BB_upper','BB_lower']
+--- 즉, 숫자와 비교하는 feature와 feature끼리 비교하는 feature들의 그룹을 미리 지정해줄 예정이다.
+--- feature_num의 경우, 해당 데이터의 최대 및 최소 값도 같이 주어질 예정이다.
+--- GA의 변이는 tree의 분기를 늘리거나 줄이거나 해당 분기를 위의 조건에 맞는 한에서 변경한다.
+-- 트리의 root 바로 아래 노드는 3개의 노드가 존재하며, 각각 현재 포지션이 ['LONG', 'HOLD', 'SHORT']인지 구분한다.
+--- crossover는 기존 트리에서 일정 부분의 branch 전체를 선택해서 crossover를 진행한다.
+--- crossover되는 branch에 하위 branch가 존재한다면, 통째로 crossover가 된다.
+--- 자식 노드가 여러개일 경우에는, 하나의 자식 노드만 충족해도 해당 자식 노드들의 모든 경우를 탐색한다.
+---- 예를 들어 자식 노드 1, 2, 3이 있을 경우 1과 3의 경우가 충족되었다면, 1과 3의 tree로 진행한다.
+--- 진행한 트리의 node가 해당 조건을 충족하지 않고, 멈춘다면, 행동은 hold이다.
+--- 자식 노드로 Action 노드를 가지고 있는 경우, 무조건 하나의 자식 노드, 즉, 해당 Action 노드만 가지고 있어야 한다
+--- 자식 노드에는 결정 노드와 행동 노드가 혼재되어 있으면 안된다. 결정 노드는 무조건 중간에 존재하는 노드이며, 행동노드는 무조건 마지막에만 존재하는 노드이다.
+예시) - Decision A -- Action B and Action C --> 불가 Action node는 무조건 하나만 존재해야 함
+ - - Decision A -- Action B and Decision C and Decision B -> 행동과 결정 노드가 자식 노드에서 혼재하는 것은 불가
+
+
+--- 마지막 결과값은 진입 포지션(long, short), 진입 비중(0 ~ 1의 실수), 레버리지 배수(0 ~ 100의 정수) 값들이 나와야 한다.
+--- 여러 leaf 노드에서 조건이 만족했다면, 가장 먼저 탐색을 완료한 결과로 진행한다.
+--- 마지막 결과값도 변이가 가능하다.
+
+--- 해당 노드들은 무조건 고정된 노드들이며, 변이되지 않는다. 즉, 가장 위의 노드들은 변경되어서는 안된다.
+
+CUDA 및 C 코드에서도 쉽게 동작할 수 있어야 한다.
+즉, 해당 TREE의 연산이 C 및 CUDA에서도 이루어질 수 있도록 작성해줘.
+그 이유는 ga를 학습시키기 위해서 CUDA를 활용할 계획이다.
+나의 계획에 대해 간략하게 설명하자면,
+만약 수천 수만개의 TREE가 POP_SIZE로 존재할 경우, 이것을 CPU로 연산하기에는 매우 오래 걸린다.
+따라서, CUDA를 활용하여, 스레드 하나마다 TREE를 배정하여, 병렬 연산을 진행하여 추론을 진행할 예정이다.
+따라서, 해당 상황에서도 적절하게 동작할 수 있는 모델을 작성해야 한다.
+Tree에는 max_node와 max_depth가 존재해야 한다.
+Tree에는 추가로 2가지 기능이 추가되어야 한다. 처음 Tree를 생성할 때, 조건에 맞는 랜덤 Tree 생성
+그리고 load() method를 통해 저장된 Tree weight? node?를 불러올 수 있는 함수도 작성해줘.
+
+GATree의 노드는 2가지 받을 수 있도록 한다. GATree 하나만을 사용할 수 있도록 기존 Tensor를 Tree Class내에 선언하는 경우, (값으로 존재)
+GATreePop에서 선언한 Tensor를 주소형태(torch.view 사용)로 일부만 가져와서 존재.
+-> 해당 형태로 구현한 이유에 대해서도 너가 추측해서 설명해봐
+
+비교 연산은 3가지만 존재한다. > < =
+
+
+강조하는 것은 여기서 말하는 cuda 및 C 호환의 의미는 Model 자체를 Cuda로 만드는 것이 목적이 아니다.
+예를 들어 GATree와 그것을 인구단위로 묶은 GATreePop이라는 python Class를 만들었을 때, GATreePop 자체가 c와 cuda에 입력으로 들어와 연산을 하는 것이 목적이다.
+즉, c에서 담당할 부분은 python으로 들어온 객체를 cuda kernel에 넣을 수 있는 형태로 변환하는 기능
+cuda에서 담당할 부분은 병렬적으로 모든 Tree의 추론을 진행.
+이를 위해서는 미리 Tree의 데이터 정보들을 GPU에 올려놓을 수 있도록 Torch.Tensor를 사용하자(grad는 필요없으므로 False)
+
+가장 대표적인 예시로 python Torch에서 선언된 Tensor를 setup 및 커스텀 c와 cuda 함수를 통해 연산을 하는 방식이라고 보면된다.
+load에는 2가지 입력을 받을 수 있다. 파일 경로 혹은 torch의 state_dict
+따라서 저장 역시 torch의 state_dict 형식으로 저장하고, 해당 tree의 모든 정보를 저장해야 한다.
+
+처음 GATree 및 GATreePop 생성시 Node 등 초기화하지 않고, __init___tree()라는 method를 사용해야 Node 등 Tree를 초기화하도록 해.
+가장 중요하고 중요한 점은 Tree 초기화시 지금까지 설명한 제약 사항 및 구현 사항들을 모두 고려해야 한다.
+따라서 어떻게 초기화를 하고, 어떤 제약 사항 및 구현사항들을 고려해서 초기화 방법을 설정했는지도 매우 자세하게 설명해줘.
+
+매우 많은 요구사항이기 때문에, 빠짐없이, 매우 자세하게 분석 후 정리해야 한다.
+너가 이해한 내용을 정리해서 작성해봐
+예시로 임시의 Tree를 만들어서 설명해봐.
+
+코드 작성하지 말고, 매우 길고 자세하고 정교한 분석 설명해줘
+"""
+
+
+현재 위의 해당 요구사항에 맞춰 GATree 및  GATreePop 모델은 코드로 작성하였다. 아래가 모델 코드이다.
+''' Python model.py
+import torch
+import random
+import os
+import webbrowser
+import networkx as nx
+
+# pyvis 라이브러리 가용성 확인
+try:
+    from pyvis.network import Network
+    PYVIS_AVAILABLE = True
+except ImportError:
+    PYVIS_AVAILABLE = False
+
+# -------------------------------------
+# --- 상수 정의 (C/C++ 연동을 위해 중요)
+# -------------------------------------
+
+# Tensor Column Indices
+COL_NODE_TYPE = 0
+COL_PARENT_IDX = 1
+COL_DEPTH = 2
+COL_PARAM_1 = 3
+COL_PARAM_2 = 4
+COL_PARAM_3 = 5
+COL_PARAM_4 = 6
+NODE_INFO_DIM = 7  # 총 컬럼 수
+
+# Node Types
+NODE_TYPE_UNUSED = 0
+NODE_TYPE_ROOT_BRANCH = 1
+NODE_TYPE_DECISION = 2
+NODE_TYPE_ACTION = 3
+
+# Root Branch Types
+ROOT_BRANCH_LONG = 0
+ROOT_BRANCH_HOLD = 1
+ROOT_BRANCH_SHORT = 2
+
+# Decision Node: Comparison Types
+COMP_TYPE_FEAT_NUM = 0  # Feature vs Number
+COMP_TYPE_FEAT_FEAT = 1 # Feature vs Feature
+
+# Decision Node: Operators
+OP_GT = 0  # >
+OP_LT = 1  # <
+OP_EQ = 2  # =
+
+# Action Node: Position Types
+POS_TYPE_LONG = 0
+POS_TYPE_SHORT = 1
+
+# --- 예시 Feature 및 설정 (실제 사용 시 변경) ---
+FEATURE_NUM = {'RSI': (0, 100), 'ATR': (0, 1), 'WR': (-100, 0), 'STOCH_K':(0, 100)}
+FEATURE_PAIR = ['SMA_5', 'SMA_20', 'EMA_10', 'EMA_30', 'BB_upper', 'BB_lower']
+ALL_FEATURES = list(FEATURE_NUM.keys()) + FEATURE_PAIR
+
+# --- Helper 딕셔너리 (시각화 및 디버깅용) ---
+NODE_TYPE_MAP = {
+    NODE_TYPE_UNUSED: "UNUSED",
+    NODE_TYPE_ROOT_BRANCH: "ROOT_BRANCH",
+    NODE_TYPE_DECISION: "DECISION",
+    NODE_TYPE_ACTION: "ACTION",
+}
+ROOT_BRANCH_MAP = {ROOT_BRANCH_LONG: "IF_POS_IS_LONG", ROOT_BRANCH_HOLD: "IF_POS_IS_HOLD", ROOT_BRANCH_SHORT: "IF_POS_IS_SHORT"}
+OPERATOR_MAP = {OP_GT: ">", OP_LT: "<", OP_EQ: "="}
+POS_TYPE_MAP = {POS_TYPE_LONG: "LONG", POS_TYPE_SHORT: "SHORT"}
+
+class GATree:
+    """
+    하나의 유전 알고리즘 트리를 나타내는 클래스.
+    이 클래스의 데이터는 C++/CUDA에서 직접 처리할 수 있는 torch.Tensor 형식으로 저장됩니다.
+    """
+    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_pair, data_tensor=None):
+        """
+        GATree 초기화.
+
+        Args:
+            max_nodes (int): 트리가 가질 수 있는 최대 노드 수.
+            max_depth (int): 트리의 최대 깊이.
+            max_children (int): Decision 노드가 가질 수 있는 최대 자식 노드 수.
+            feature_num (dict): 숫자와 비교할 피쳐와 (min, max) 범위.
+            feature_pair (list): 피쳐끼리 비교할 피쳐 리스트.
+            data_tensor (torch.Tensor, optional): 외부에서 생성된 텐서의 view. 
+                                                  None이면 자체적으로 텐서를 생성합니다.
+        """
+        self.max_nodes = max_nodes
+        self.max_depth = max_depth
+        self.max_children = max_children
+        self.feature_num = feature_num
+        self.feature_pair = feature_pair
+        self.all_features = list(feature_num.keys()) + feature_pair
+        
+        self.initialized = False
+        self.next_idx = 0
+
+        # GATree가 텐서를 직접 소유할지, 외부 텐서의 view를 참조할지 결정
+        if data_tensor is None:
+            # 독립적인 텐서 생성 (단일 트리 테스트용)
+            self.data = torch.zeros((self.max_nodes, NODE_INFO_DIM), dtype=torch.float32)
+        else:
+            # 외부 텐서(GATreePop의 텐서)의 view를 참조 (메모리 효율성)
+            if data_tensor.shape != (self.max_nodes, NODE_INFO_DIM):
+                raise ValueError("Provided data_tensor has incorrect shape")
+            self.data = data_tensor
+
+    def make_tree(self):
+        """
+        요구사항에 맞는 랜덤 트리를 생성하고 현재 객체를 초기화합니다.
+        """
+        # 1. 초기화
+        self.data.zero_()
+        self.initialized = False
+        self.next_idx = 0
+        
+        # 2. 고정된 루트 분기 3개 생성
+        root_branches = [ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT]
+        root_branch_ids = []
+        for branch_type in root_branches:
+            idx = self._get_next_idx()
+            self.data[idx, COL_NODE_TYPE] = NODE_TYPE_ROOT_BRANCH
+            self.data[idx, COL_PARENT_IDX] = -1 # Root
+            self.data[idx, COL_DEPTH] = 0
+            self.data[idx, COL_PARAM_1] = branch_type
+            root_branch_ids.append(idx)
+        
+        # 3. 노드 예산 분배
+        # 최소 노드 수를 보장하고, max_nodes 내에서 랜덤하게 결정
+        min_total_nodes = 3 + 3 * self.max_children # 루트 3개 + 각 분기별 최소 자식
+        total_nodes = random.randint(min_total_nodes, self.max_nodes)
+        
+        node_budget = total_nodes - 3 # 루트 분기 3개 제외
+        nodes_per_branch = node_budget // 3
+        budgets = [nodes_per_branch] * 3
+        # 남은 예산을 랜덤하게 분배
+        for i in range(node_budget % 3):
+            budgets[random.randint(0, 2)] += 1
+
+        # 4. 각 분기별로 트리 생성
+        for i, branch_id in enumerate(root_branch_ids):
+            self._grow_branch(branch_id, budgets[i])
+            
+        self.initialized = True
+        print(f"Tree created with {self.next_idx} nodes.")
+
+    def _grow_branch(self, branch_root_id, budget):
+        """한 분기(LONG/HOLD/SHORT) 아래의 트리를 성장시키는 내부 함수"""
+        if budget <= 0:
+            # 예산이 없으면 최소한의 Action 노드 하나만 생성
+            self._create_action_node(branch_root_id)
+            return
+
+        # 열린 노드 리스트: 자식을 추가해야 할 Decision 노드들의 ID를 관리
+        open_list = [branch_root_id]
+        
+        nodes_to_create = budget
+        
+        while nodes_to_create > 0 and open_list:
+            # 1. 부모 노드 선택 (리스트에서 랜덤하게 선택하여 다양한 트리 구조 유도)
+            parent_id = random.choice(open_list)
+            parent_depth = int(self.data[parent_id, COL_DEPTH].item())
+            
+            # 2. 자식 타입 결정 (Action or Decision)
+            # 최대 깊이에 도달하면 무조건 Action 생성
+            create_action = (parent_depth + 1 >= self.max_depth)
+            # 또는, 확률적으로 Action 생성 (트리가 너무 깊어지는 것을 방지)
+            if not create_action:
+                # 남은 노드가 적을수록 Action 생성 확률 증가
+                prob_action = 0.2 + 0.5 * (1 - nodes_to_create / budget)
+                if random.random() < prob_action:
+                    create_action = True
+            
+            # 3. 자식 노드 생성
+            if create_action:
+                if nodes_to_create >= 1:
+                    self._create_action_node(parent_id)
+                    nodes_to_create -= 1
+                    # Action 노드를 자식으로 가졌으므로 이 부모는 닫힘
+                    open_list.remove(parent_id)
+            else:
+                # Decision 노드 생성
+                num_children = random.randint(1, self.max_children)
+                # 예산과 남은 노드 슬롯을 초과하지 않도록 조정
+                num_children = min(num_children, nodes_to_create, self.max_nodes - self.next_idx)
+                
+                if num_children > 0:
+                    for _ in range(num_children):
+                        child_id = self._create_decision_node(parent_id)
+                        open_list.append(child_id) # 새로 생긴 Decision 노드는 열린 노드
+                    nodes_to_create -= num_children
+                    # 자식을 할당했으므로 이 부모는 닫힘
+                    open_list.remove(parent_id)
+                else: # 생성할 자식이 없으면 닫음
+                    open_list.remove(parent_id)
+
+        # 4. 후처리: 루프가 끝났는데도 열려있는 노드가 있다면, 강제로 Action 노드 할당
+        for parent_id in open_list:
+            if self.next_idx < self.max_nodes:
+                 self._create_action_node(parent_id)
+
+    def _create_action_node(self, parent_id):
+        """Action 노드 하나를 생성하고 Tensor에 기록"""
+        idx = self._get_next_idx()
+        if idx is None: return None
+        
+        self.data[idx, COL_NODE_TYPE] = NODE_TYPE_ACTION
+        self.data[idx, COL_PARENT_IDX] = parent_id
+        self.data[idx, COL_DEPTH] = self.data[parent_id, COL_DEPTH] + 1
+        
+        # 랜덤 파라미터 생성
+        self.data[idx, COL_PARAM_1] = random.choice([POS_TYPE_LONG, POS_TYPE_SHORT])
+        self.data[idx, COL_PARAM_2] = random.random() # 진입 비중 (0~1)
+        self.data[idx, COL_PARAM_3] = random.randint(1, 100) # 레버리지 (1~100)
+        return idx
+
+    def _create_decision_node(self, parent_id):
+        """Decision 노드 하나를 생성하고 Tensor에 기록"""
+        idx = self._get_next_idx()
+        if idx is None: return None
+
+        self.data[idx, COL_NODE_TYPE] = NODE_TYPE_DECISION
+        self.data[idx, COL_PARENT_IDX] = parent_id
+        self.data[idx, COL_DEPTH] = self.data[parent_id, COL_DEPTH] + 1
+        
+        # 랜덤 비교 구문 생성
+        comp_type = random.choice([COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT])
+        self.data[idx, COL_PARAM_3] = comp_type
+        self.data[idx, COL_PARAM_2] = random.choice([OP_GT, OP_LT, OP_EQ]) # Operator
+
+        if comp_type == COMP_TYPE_FEAT_NUM:
+            feat_name = random.choice(list(self.feature_num.keys()))
+            feat_idx = self.all_features.index(feat_name)
+            min_val, max_val = self.feature_num[feat_name]
+            comp_val = random.uniform(min_val, max_val)
+            
+            self.data[idx, COL_PARAM_1] = feat_idx
+            self.data[idx, COL_PARAM_4] = comp_val
+        else: # COMP_TYPE_FEAT_FEAT
+            feat1_name, feat2_name = random.sample(self.feature_pair, 2)
+            feat1_idx = self.all_features.index(feat1_name)
+            feat2_idx = self.all_features.index(feat2_name)
+            
+            self.data[idx, COL_PARAM_1] = feat1_idx
+            self.data[idx, COL_PARAM_4] = feat2_idx
+
+        return idx
+
+    def _get_next_idx(self):
+        """사용 가능한 다음 노드 인덱스를 반환"""
+        if self.next_idx < self.max_nodes:
+            idx = self.next_idx
+            self.next_idx += 1
+            return idx
+        return None
+
+    def save(self, filepath):
+        """트리의 상태를 파일로 저장합니다."""
+        if not self.initialized:
+            print("Warning: Saving uninitialized tree.")
+        
+        state = {
+            'data': self.data,
+            'next_idx': self.next_idx,
+            'max_nodes': self.max_nodes,
+            'max_depth': self.max_depth,
+            'max_children': self.max_children,
+            'feature_num': self.feature_num,
+            'feature_pair': self.feature_pair
+        }
+        torch.save(state, filepath)
+        print(f"Tree saved to {filepath}")
+
+    def load(self, source):
+        """파일 또는 state_dict로부터 트리 상태를 로드합니다."""
+        if isinstance(source, str): # 파일 경로인 경우
+            if not os.path.exists(source):
+                raise FileNotFoundError(f"File not found: {source}")
+            state = torch.load(source)
+        elif isinstance(source, dict): # state_dict인 경우
+            state = source
+        else:
+            raise TypeError("source must be a filepath string or a state_dict")
+
+        self.__init__(
+            state['max_nodes'], state['max_depth'], state['max_children'],
+            state['feature_num'], state['feature_pair']
+        )
+        self.data.copy_(state['data'])
+        self.next_idx = state['next_idx']
+        self.initialized = True
+        print(f"Tree loaded successfully.")
+    
+    def _node_label_color(self, idx):
+        """시각화를 위한 노드의 레이블과 색상을 생성합니다."""
+        node = self.data[idx]
+        node_type = int(node[COL_NODE_TYPE].item())
+        
+        label = f"ID: {idx}\n"
+        color = "grey"
+
+        if node_type == NODE_TYPE_ROOT_BRANCH:
+            branch_type = int(node[COL_PARAM_1].item())
+            label += f"START\n{ROOT_BRANCH_MAP.get(branch_type, 'UNKNOWN')}"
+            color = "#FFD700" # Gold
+        elif node_type == NODE_TYPE_DECISION:
+            feat1_idx = int(node[COL_PARAM_1].item())
+            op = OPERATOR_MAP.get(int(node[COL_PARAM_2].item()))
+            comp_type = int(node[COL_PARAM_3].item())
+            
+            feat1_name = self.all_features[feat1_idx]
+            
+            if comp_type == COMP_TYPE_FEAT_NUM:
+                val = node[COL_PARAM_4].item()
+                label += f"IF {feat1_name} {op} {val:.2f}"
+            else:
+                feat2_idx = int(node[COL_PARAM_4].item())
+                feat2_name = self.all_features[feat2_idx]
+                label += f"IF {feat1_name} {op} {feat2_name}"
+            color = "#1E90FF" # DodgerBlue
+        elif node_type == NODE_TYPE_ACTION:
+            pos = POS_TYPE_MAP.get(int(node[COL_PARAM_1].item()))
+            size = node[COL_PARAM_2].item()
+            lev = int(node[COL_PARAM_3].item())
+            label += f"ACTION: {pos}\nSize: {size:.2f}, Lev: {lev}x"
+            color = "#32CD32" # LimeGreen
+        else:
+            label += "UNUSED"
+
+        return label, color
+
+    # ───── graph visualization ─────
+    def visualize_graph(self, file="ga_tree.html", open_browser=True):
+        if not PYVIS_AVAILABLE:
+            print("Install `networkx pyvis` for graph view")
+            return
+        if not self.initialized:
+            print("Tree not initialized. Call make_tree() first.")
+            return
+        
+        g = nx.DiGraph()
+        
+        for idx in range(int(self.next_idx)):
+            node_type = int(self.data[idx, COL_NODE_TYPE].item())
+            if node_type == NODE_TYPE_UNUSED:
+                continue
+            
+            label, color = self._node_label_color(idx)
+            g.add_node(idx, label=label, color=color, title=label.replace("\n", "<br>"), shape='box')
+
+            parent_id = int(self.data[idx, COL_PARENT_IDX].item())
+            if parent_id != -1:
+                if int(self.data[parent_id, COL_NODE_TYPE].item()) != NODE_TYPE_UNUSED:
+                    g.add_edge(parent_id, idx)
+
+        if not g.nodes:
+            print("No nodes to visualize.")
+            return
+
+        net = Network(height="800px", width="100%", directed=True, notebook=False, cdn_resources='remote')
+        
+        net.from_nx(g)
+        
+        try:
+            # 계층적 레이아웃 옵션 적용
+            net.set_options("""
+            var options = {
+              "layout": {
+                "hierarchical": {
+                  "enabled": true,
+                  "levelSeparation": 200,
+                  "nodeSpacing": 150,
+                  "treeSpacing": 250,
+                  "direction": "UD",
+                  "sortMethod": "directed"
+                }
+              },
+              "physics": { "enabled": false }
+            }
+            """)
+        except Exception as e:
+            print(f"Pyvis options error: {e}. Using default layout.")
+
+        try:
+            net.save_graph(file)
+            print(f"Graph saved -> {file}")
+            if open_browser:
+                # 절대 경로로 파일 열기
+                webbrowser.open("file://" + os.path.realpath(file))
+        except Exception as e:
+            print(f"Error saving or opening graph: {e}")
+
+class GATreePop:
+    """
+    GATree의 집단(Population)을 관리하는 클래스.
+    모든 트리의 데이터를 하나의 거대한 텐서로 관리하여 CUDA 연산에 최적화합니다.
+    """
+    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_pair):
+        self.pop_size = pop_size
+        self.max_nodes = max_nodes
+        self.max_depth = max_depth
+        self.max_children = max_children
+        self.feature_num = feature_num
+        self.feature_pair = feature_pair
+        
+        self.initialized = False
+        # 모든 개체의 데이터를 담을 거대한 3D 텐서
+        self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
+        # 각 GATree 객체를 담을 리스트
+        self.population = []
+
+    def make_population(self):
+        """
+        설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다.
+        """
+        self.population = []
+        for i in range(self.pop_size):
+            print(f"--- Creating Tree {i+1}/{self.pop_size} ---")
+            # population_tensor의 일부(view)를 GATree에 전달
+            tree_data_view = self.population_tensor[i]
+            tree = GATree(
+                self.max_nodes, self.max_depth, self.max_children,
+                self.feature_num, self.feature_pair,
+                data_tensor=tree_data_view
+            )
+            tree.make_tree()
+            self.population.append(tree)
+        self.initialized = True
+        print("\nPopulation created successfully.")
+    
+    def save(self, filepath):
+        """집단 전체의 상태를 파일로 저장합니다."""
+        if not self.initialized:
+            print("Warning: Saving uninitialized population.")
+        
+        state = {
+            'population_tensor': self.population_tensor,
+            'pop_size': self.pop_size,
+            'max_nodes': self.max_nodes,
+            'max_depth': self.max_depth,
+            'max_children': self.max_children,
+            'feature_num': self.feature_num,
+            'feature_pair': self.feature_pair
+        }
+        torch.save(state, filepath)
+        print(f"Population saved to {filepath}")
+
+    def load(self, filepath):
+        """파일로부터 집단 전체의 상태를 로드합니다."""
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"File not found: {filepath}")
+        state = torch.load(filepath)
+
+        self.__init__(
+            state['pop_size'], state['max_nodes'], state['max_depth'],
+            state['max_children'], state['feature_num'], state['feature_pair']
+        )
+        # 텐서 데이터 복사
+        self.population_tensor.copy_(state['population_tensor'])
+        
+        # 로드된 텐서로부터 GATree 객체 리스트를 재생성
+        self.population = []
+        for i in range(self.pop_size):
+            tree_data_view = self.population_tensor[i]
+            tree = GATree(
+                self.max_nodes, self.max_depth, self.max_children,
+                self.feature_num, self.feature_pair,
+                data_tensor=tree_data_view
+            )
+            # 로드된 데이터로부터 next_idx를 복원해야 시각화 등이 올바르게 동작
+            # UNUSED가 아닌 노드의 수를 세어 next_idx 추정
+            tree.next_idx = (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item()
+            tree.initialized = True
+            self.population.append(tree)
+
+        self.initialized = True
+        print(f"Population loaded successfully from {filepath}")
+
+
+if __name__ == '__main__':
+    # --- 시뮬레이션 파라미터 ---
+    MAX_NODES = 1024
+    MAX_DEPTH = 10
+    MAX_CHILDREN = 5
+    POP_SIZE = 5
+
+    # =======================================================
+    # === 1. 단일 GATree 생성, 시각화, 저장 및 로드 테스트 ===
+    # =======================================================
+    print("===== [Phase 1] Single GATree Demo =====")
+    
+    # GATree가 자체 텐서를 소유하는 경우
+    print("\n1. Creating a standalone GATree...")
+    tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    tree1.make_tree()
+    
+    # 생성된 트리 시각화
+    tree1.visualize_graph(file="single_tree_generated.html")
+    
+    # 트리 저장
+    tree1.save("single_tree.pth")
+    
+    # 새로운 객체에 트리 로드
+    print("\n2. Loading the tree into a new GATree object...")
+    tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    tree2.load("single_tree.pth")
+    
+    # 로드된 트리 시각화 (결과가 동일한지 확인)
+    tree2.visualize_graph(file="single_tree_loaded.html")
+
+    # 데이터가 동일한지 확인
+    assert torch.equal(tree1.data, tree2.data), "Saved and Loaded trees are not identical!"
+    print("\nStandalone GATree save/load test PASSED.")
+
+
+    # =====================================================
+    # === 2. GATreePop 생성, 시각화, 저장 및 로드 테스트 ===
+    # =====================================================
+    print("\n\n===== [Phase 2] GATreePop Demo =====")
+    
+    # GATree가 GATreePop의 텐서 view를 참조하는 경우
+    print("\n1. Creating a population of GATrees...")
+    population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    population1.make_population()
+
+    # 집단의 첫 번째 트리 시각화
+    print("\nVisualizing the first tree from the population...")
+    first_tree_from_pop = population1.population[0]
+    first_tree_from_pop.visualize_graph(file="population_tree_generated.html")
+
+    # 집단 저장
+    population1.save("population.pth")
+    
+    # 새로운 객체에 집단 로드
+    print("\n2. Loading the population into a new GATreePop object...")
+    population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    population2.load("population.pth")
+
+    # 로드된 집단의 첫 번째 트리 시각화 (결과가 동일한지 확인)
+    print("\nVisualizing the first tree from the loaded population...")
+    first_tree_from_loaded_pop = population2.population[0]
+    first_tree_from_loaded_pop.visualize_graph(file="population_tree_loaded.html")
+    
+    # 데이터가 동일한지 확인
+    assert torch.equal(population1.population_tensor, population2.population_tensor), "Saved and Loaded populations are not identical!"
+    print("\nGATreePop save/load test PASSED.")
+    
+    # population1의 첫번째 트리 데이터와 population2의 첫번째 트리 데이터가 동일한지 확인
+    # 이는 GATree 객체들이 텐서의 view를 올바르게 참조하고 있음을 증명
+    assert torch.equal(population1.population[0].data, population2.population[0].data)
+    print("Memory view reference in loaded population confirmed.")
+'''
+
+이제 Evolution 코드 설계를 작성해줘 -> 코드 작성 X, 일단 어떻게 방법론을 구현할지 자세하게 설명해줘
+내가 허락을 내리면 그 때, 코드를 작성하게 할거야.
+
+해당 모델 코드를 변이하는 코드를 제작해줘. 이 때, 구현의 구체적인 명세를 만들어줄게
+Evolution이라는 Class가 변이를 총 동작시킨다.
+그리고 각각의 Selection, Crossover, Mutation 등등 모두 Class로 구성되며, 각각 BaseClass를 작성 후, 상속받도록 한다. (Evolution에서 검사)
+또한 각각 chain class도 작성해야 한다. chain class에 대한 예시는 아래의 코드에 추가하겠다.
+Evolution에는 선언된 selection, crossover, mutation class들을 받되 위처럼 상속 검사를 진행한다.
+일단, selection과 crossover, muation 등은 구체적인 코드를 작성하기 보다는 일단, 구조부터 생성한다고 생각하고 작성해줘.
+Evolution은 비슷한 프로젝트에서 진행한 코드를 보여줄게 해당 코드를 참조해
+
+''' Python Evolution.py
+class Evolution:
+    def __init__(self, prescriptor, selection, crossover, mutation):
+        self.prescriptor = prescriptor
+        self.selection = selection
+        self.crossover = crossover
+        self.mutation = mutation
+        
+        self.chromosome_size = len(self.prescriptor.layers)
+        self.num_parents = self.crossover.get_num_parents()
+
+        self.check_model_shape()
+
+    # def check_model_shape(self):
+    #     device = next(self.prescriptor.parameters()).device
+    #     self.prescriptor.cpu()
+    #     self.shape_each_layer = []
+    #     self.num_each_layer = []
+    #     for name, param in self.prescriptor.layers[0].named_parameters():
+    #         size = list(param.size())
+    #         self.shape_each_layer.append(size)
+    #         layer_param = 1
+    #         for idx, item in enumerate(size):
+    #             layer_param *= item
+    #         self.num_each_layer.append(layer_param)
+
+    #     self.prescriptor = self.prescriptor.to(device)
+    
+    def check_model_shape(self):
+        device = next(self.prescriptor.parameters()).device
+        self.prescriptor.cpu()
+        # Base layers
+        self.shape_each_layer = []
+        self.num_each_layer = []
+        for name, param in self.prescriptor.layers[0].named_parameters():
+            size = list(param.size())
+            self.shape_each_layer.append(size)
+            self.num_each_layer.append(param.numel())
+
+        # After layers
+        self.after_shape_each_layer = []
+        self.after_num_each_layer = []
+        for name, param in self.prescriptor.after_layers.named_parameters():
+            size = list(param.size())
+            self.after_shape_each_layer.append(size)
+            self.after_num_each_layer.append(param.numel())
+
+        self.prescriptor = self.prescriptor.to(device)
+    
+    def update_chromosomes(self, chromosomes, base_shape, after_shape, device='cpu'):
+        chromosomes_size = len(chromosomes)
+        base_chromosomes = chromosomes[:, :base_shape[1]]
+        after_chromosomes = chromosomes[:, base_shape[1]:]
+        with torch.no_grad():
+            # Update base layers
+            for idx, old_chromo in enumerate(self.prescriptor.layers.cpu()):
+                new_chromo = base_chromosomes[idx]
+                sd = old_chromo.state_dict()
+                split_base = 0
+                for idx_sd, param_name in enumerate(sd):
+                    sd_shape = sd[param_name].shape
+                    split_margin = split_base + len(sd[param_name].flatten())
+                    param = new_chromo[split_base:split_margin].reshape(sd_shape)
+                    sd[param_name] = param
+                    split_base = split_margin
+                old_chromo.load_state_dict(sd)
+
+            sd = self.prescriptor.after_layers.state_dict()
+            split_base = 0
+            for idx_sd, param_name in enumerate(sd):
+                split_margin = split_base + self.after_num_each_layer[idx_sd] // chromosomes_size
+                param = after_chromosomes[:, split_base:split_margin].reshape(self.after_shape_each_layer[idx_sd])
+                sd[param_name] = param
+                split_base = split_margin
+            self.prescriptor.after_layers.load_state_dict(sd)
+        self.prescriptor.to(device)
+
+
+    def flatten_chromosomes(self):
+        base_chromosomes, device = self.base_flatten_chromosomes()
+        after_chromosomes, _ = self.after_flatten_chromosomes()
+
+        base_ch_shape = base_chromosomes.shape
+        after_ch_shape = after_chromosomes.shape
+        chromosomes = torch.cat([base_chromosomes, after_chromosomes], dim=1)
+        return chromosomes.cpu(), base_ch_shape, after_ch_shape, device
+
+    def base_flatten_chromosomes(self,):
+        device = next(self.prescriptor.parameters()).device
+        self.prescriptor.cpu()
+        with torch.no_grad():
+            chromosomes = []
+            for ch in self.prescriptor.layers.cpu():
+                sd = ch.state_dict()
+                chromosome = []
+                for idx_sd, param_name in enumerate(sd):
+                    chromosome.append(sd[param_name].flatten())
+
+                chromosomes.append(torch.concat(chromosome).unsqueeze(dim=0))
+        return torch.concat(chromosomes), device
+
+    
+    def after_flatten_chromosomes(self, ):
+        device = next(self.prescriptor.parameters()).device
+        chromosomes_size = self.prescriptor.num_blcoks
+        self.prescriptor.cpu()
+        with torch.no_grad():
+            chromosomes = []
+            ch = self.prescriptor.after_layers
+            for name, param in ch.named_parameters():
+                param = param.flatten().reshape(chromosomes_size, -1)
+                chromosomes.append(param)
+            chromosomes = torch.concat(chromosomes, dim=1)
+        return chromosomes, device
+    
+
+
+    def verify_parameters(self):
+        original_params = []
+        for param in self.prescriptor.after_layers.parameters():
+            original_params.append(param.clone())
+
+        # Flatten and reload chromosomes
+        chromosomes, base_ch_shape, after_ch_shape, device = self.flatten_chromosomes()
+        self.update_chromosomes(chromosomes, base_ch_shape, after_ch_shape, device)
+
+        # Check if parameters are the same
+        for original_param, param in zip(original_params, self.prescriptor.after_layers.parameters()):
+            if not torch.allclose(original_param, param):
+                print("Parameters do not match after reload.")
+                return False
+        print("Parameters match after reload.")
+        return True
+
+    
+    def select_elite(self, fitness: torch.Tensor, chromosomes: torch.Tensor, num_elite_chromosomes: int):
+        self.selection.select(fitness)
+        elite_idx = self.selection.sort_idx()[:num_elite_chromosomes] # for single
+        # elite_idx = self.selection.sort_idx(fitness, num_elite_chromosomes).long() # for multi
+        elite_chromosomes = chromosomes[elite_idx]
+                
+        return elite_idx, elite_chromosomes
+
+
+    def evolve(self, fitness: torch.Tensor):
+        # chromosomes = self.prescriptor.chromosomes.cpu()
+        chromosomes, base_ch_shape, after_ch_shape, device = self.flatten_chromosomes()
+        
+        self.selection.select(fitness)
+        elite_idx = self.selection.elite_idx()
+        elite_chromosomes = deepcopy(chromosomes[elite_idx])
+        offspring_size = self.chromosome_size - len(elite_idx)
+        select_parents_idx = self.selection.pick_parents(self.num_parents, offspring_size)
+        parents = chromosomes[select_parents_idx]
+        
+        offspring = self.crossover(parents)
+        offspring = self.mutation(offspring)
+
+        chromosomes = torch.concat([elite_chromosomes, offspring])
+        self.update_chromosomes(chromosomes, base_ch_shape, after_ch_shape, device)
+'''
+
+해당 코드에 대해서 설명을 하자면, NN을 GA로 학습할 때 사용한 것이다. 따라서 NN을 변동시키기 위한 코드들이 있는 것을 확인할 수 있다.
+
+""" Python ChainMutation 예시
+class ChainMutation(BaseMutation):
+    """여러 mutation 들을 순차적으로 진행할 때 사용하는 클래스"""
+    
+    def __init__(self, mutations: List[BaseMutation]):
+        self.mutations = mutations
+    
+    def __call__(self, chromosome: torch.Tensor) -> torch.Tensor:
+        # mutant = deepcopy(chromosome)
+        mutant = chromosome
+        
+        for mut_ops in self.mutations:
+            mutant = mut_ops(mutant)
+        
+        return mutant
+"""
+
+
+다시 한번더 강조하지만, 이미 GATree 및 GATreePop은 이미 구현 완료되었으며, 해당 코드는 내가 너에게 보여주었다. 이것을 바탕으로 Evolution 설계 및 구현을 진행하자는 의미이다.
