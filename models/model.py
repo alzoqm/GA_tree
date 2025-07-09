@@ -252,6 +252,122 @@ class GATree:
             return idx
         return None
 
+# GATree 클래스 내에 아래 메소드들을 추가합니다.
+
+    def _evaluate_node(self, node_idx, feature_values):
+        """
+        주어진 Decision 노드의 조건을 평가하여 참/거짓을 반환합니다.
+        이 로직은 C/CUDA에서 간단한 산술/비교 연산으로 변환될 수 있습니다.
+
+        Args:
+            node_idx (int): 평가할 노드의 인덱스.
+            feature_values (dict): 현재 피쳐 값들이 담긴 딕셔너리.
+
+        Returns:
+            bool: 조건 평가 결과.
+        """
+        node_info = self.data[node_idx]
+        
+        op = int(node_info[COL_PARAM_2].item())
+        comp_type = int(node_info[COL_PARAM_3].item())
+        
+        feat1_idx = int(node_info[COL_PARAM_1].item())
+        feat1_name = self.all_features[feat1_idx]
+        
+        if feat1_name not in feature_values:
+            # 필요한 피쳐 값이 없으면 해당 경로는 실패로 간주
+            # print(f"Warning: Feature '{feat1_name}' not found in input data.")
+            return False
+            
+        val1 = feature_values[feat1_name]
+
+        if comp_type == COMP_TYPE_FEAT_NUM:
+            val2 = node_info[COL_PARAM_4].item()
+        else: # COMP_TYPE_FEAT_FEAT
+            feat2_idx = int(node_info[COL_PARAM_4].item())
+            feat2_name = self.all_features[feat2_idx]
+            if feat2_name not in feature_values:
+                # print(f"Warning: Feature '{feat2_name}' not found in input data.")
+                return False
+            val2 = feature_values[feat2_name]
+
+        if op == OP_GT: return val1 > val2
+        if op == OP_LT: return val1 < val2
+        if op == OP_EQ: return val1 == val2 # 부동소수점 비교는 주의 필요
+        
+        return False
+
+    def predict(self, feature_values, current_position):
+        """
+        주어진 피쳐 값과 현재 포지션을 기반으로 트리를 순회하여 최종 행동을 결정합니다.
+        이 메소드는 재귀 호출 대신 스택(stack)을 사용한 반복적 깊이 우선 탐색(Iterative DFS)으로
+        구현되어 C/CUDA 환경에서의 변환 및 실행에 최적화되었습니다.
+
+        Args:
+            feature_values (dict): {'RSI': 70, 'SMA_5': 100, ...} 형태의 피쳐 값.
+            current_position (str): 'LONG', 'SHORT', 'HOLD' 중 하나.
+
+        Returns:
+            tuple: ('포지션', 비중, 레버리지) 형태의 행동. 예: ('LONG', 0.5, 10).
+                   결정된 행동이 없으면 ('HOLD', 0.0, 0)을 반환.
+        """
+        if not self.initialized:
+            raise RuntimeError("Tree is not initialized. Call make_tree() or load() first.")
+
+        # 1. 시작 노드 찾기
+        pos_map = {'LONG': ROOT_BRANCH_LONG, 'HOLD': ROOT_BRANCH_HOLD, 'SHORT': ROOT_BRANCH_SHORT}
+        if current_position not in pos_map:
+            raise ValueError(f"Invalid current_position: {current_position}")
+        target_branch_type = pos_map[current_position]
+
+        start_node_idx = -1
+        for i in range(3): # Root Branch는 항상 0, 1, 2 인덱스
+            if self.data[i, COL_NODE_TYPE] == NODE_TYPE_ROOT_BRANCH and \
+               self.data[i, COL_PARAM_1] == target_branch_type:
+                start_node_idx = i
+                break
+        
+        if start_node_idx == -1:
+            # 이론적으로 발생하면 안되는 오류
+            return ('HOLD', 0.0, 0)
+
+        # 2. 반복적 깊이 우선 탐색 (Iterative DFS)을 위한 스택 준비
+        # 재귀를 사용하지 않는 것이 C/CUDA 변환에 핵심적입니다.
+        node_stack = [start_node_idx]
+
+        # 3. 스택이 빌 때까지 탐색
+        while node_stack:
+            current_node_idx = node_stack.pop()
+            
+            # 자식 노드들을 찾아서 조건을 평가하고, 성공한 자식들을 스택에 추가
+            # 이 방식은 C/CUDA에서 포인터 연산과 루프로 쉽게 구현 가능
+            successful_children = []
+            for child_idx in range(int(self.next_idx)):
+                if self.data[child_idx, COL_PARENT_IDX] == current_node_idx:
+                    child_node_type = int(self.data[child_idx, COL_NODE_TYPE].item())
+
+                    # 4-1. 자식이 Action 노드인 경우 (경로의 끝)
+                    # 요구사항: Action 노드는 유일한 자식이어야 함
+                    if child_node_type == NODE_TYPE_ACTION:
+                        pos_type = POS_TYPE_MAP.get(int(self.data[child_idx, COL_PARAM_1].item()))
+                        size = self.data[child_idx, COL_PARAM_2].item()
+                        leverage = int(self.data[child_idx, COL_PARAM_3].item())
+                        # 첫 번째로 발견된 Action이 최종 결과
+                        return (pos_type, size, leverage)
+                    
+                    # 4-2. 자식이 Decision 노드인 경우
+                    elif child_node_type == NODE_TYPE_DECISION:
+                        if self._evaluate_node(child_idx, feature_values):
+                            successful_children.append(child_idx)
+            
+            # 성공한 자식들을 스택에 추가 (DFS 순서를 위해 역순으로 추가)
+            # 이렇게 하면 낮은 인덱스의 자식을 먼저 탐색하게 됨
+            for child_idx in reversed(successful_children):
+                node_stack.append(child_idx)
+
+        # 5. 스택이 모두 비었는데 Action 노드를 만나지 못한 경우
+        return ('HOLD', 0.0, 0)
+
     def save(self, filepath):
         """트리의 상태를 파일로 저장합니다."""
         if not self.initialized:
