@@ -1,0 +1,321 @@
+<html>
+    <head>
+        <meta charset="utf-8">
+        
+            <script>function neighbourhoodHighlight(params) {
+  // console.log("in nieghbourhoodhighlight");
+  allNodes = nodes.get({ returnType: "Object" });
+  // originalNodes = JSON.parse(JSON.stringify(allNodes));
+  // if something is selected:
+  if (params.nodes.length > 0) {
+    highlightActive = true;
+    var i, j;
+    var selectedNode = params.nodes[0];
+    var degrees = 2;
+
+    // mark all nodes as hard to read.
+    for (let nodeId in allNodes) {
+      // nodeColors[nodeId] = allNodes[nodeId].color;
+      allNodes[nodeId].color = "rgba(200,200,200,0.5)";
+      if (allNodes[nodeId].hiddenLabel === undefined) {
+        allNodes[nodeId].hiddenLabel = allNodes[nodeId].label;
+        allNodes[nodeId].label = undefined;
+      }
+    }
+    var connectedNodes = network.getConnectedNodes(selectedNode);
+    var allConnectedNodes = [];
+
+    // get the second degree nodes
+    for (i = 1; i < degrees; i++) {
+      for (j = 0; j < connectedNodes.length; j++) {
+        allConnectedNodes = allConnectedNodes.concat(
+          network.getConnectedNodes(connectedNodes[j])
+        );
+      }
+    }
+
+    // all second degree nodes get a different color and their label back
+    for (i = 0; i < allConnectedNodes.length; i++) {
+      // allNodes[allConnectedNodes[i]].color = "pink";
+      allNodes[allConnectedNodes[i]].color = "rgba(150,150,150,0.75)";
+      if (allNodes[allConnectedNodes[i]].hiddenLabel !== undefined) {
+        allNodes[allConnectedNodes[i]].label =
+          allNodes[allConnectedNodes[i]].hiddenLabel;
+        allNodes[allConnectedNodes[i]].hiddenLabel = undefined;
+      }
+    }
+
+    // all first degree nodes get their own color and their label back
+    for (i = 0; i < connectedNodes.length; i++) {
+      // allNodes[connectedNodes[i]].color = undefined;
+      allNodes[connectedNodes[i]].color = nodeColors[connectedNodes[i]];
+      if (allNodes[connectedNodes[i]].hiddenLabel !== undefined) {
+        allNodes[connectedNodes[i]].label =
+          allNodes[connectedNodes[i]].hiddenLabel;
+        allNodes[connectedNodes[i]].hiddenLabel = undefined;
+      }
+    }
+
+    // the main node gets its own color and its label back.
+    // allNodes[selectedNode].color = undefined;
+    allNodes[selectedNode].color = nodeColors[selectedNode];
+    if (allNodes[selectedNode].hiddenLabel !== undefined) {
+      allNodes[selectedNode].label = allNodes[selectedNode].hiddenLabel;
+      allNodes[selectedNode].hiddenLabel = undefined;
+    }
+  } else if (highlightActive === true) {
+    // console.log("highlightActive was true");
+    // reset all nodes
+    for (let nodeId in allNodes) {
+      // allNodes[nodeId].color = "purple";
+      allNodes[nodeId].color = nodeColors[nodeId];
+      // delete allNodes[nodeId].color;
+      if (allNodes[nodeId].hiddenLabel !== undefined) {
+        allNodes[nodeId].label = allNodes[nodeId].hiddenLabel;
+        allNodes[nodeId].hiddenLabel = undefined;
+      }
+    }
+    highlightActive = false;
+  }
+
+  // transform the object into an array
+  var updateArray = [];
+  if (params.nodes.length > 0) {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        // console.log(allNodes[nodeId]);
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  } else {
+    // console.log("Nothing was selected");
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        // console.log(allNodes[nodeId]);
+        // allNodes[nodeId].color = {};
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  }
+}
+
+function filterHighlight(params) {
+  allNodes = nodes.get({ returnType: "Object" });
+  // if something is selected:
+  if (params.nodes.length > 0) {
+    filterActive = true;
+    let selectedNodes = params.nodes;
+
+    // hiding all nodes and saving the label
+    for (let nodeId in allNodes) {
+      allNodes[nodeId].hidden = true;
+      if (allNodes[nodeId].savedLabel === undefined) {
+        allNodes[nodeId].savedLabel = allNodes[nodeId].label;
+        allNodes[nodeId].label = undefined;
+      }
+    }
+
+    for (let i=0; i < selectedNodes.length; i++) {
+      allNodes[selectedNodes[i]].hidden = false;
+      if (allNodes[selectedNodes[i]].savedLabel !== undefined) {
+        allNodes[selectedNodes[i]].label = allNodes[selectedNodes[i]].savedLabel;
+        allNodes[selectedNodes[i]].savedLabel = undefined;
+      }
+    }
+
+  } else if (filterActive === true) {
+    // reset all nodes
+    for (let nodeId in allNodes) {
+      allNodes[nodeId].hidden = false;
+      if (allNodes[nodeId].savedLabel !== undefined) {
+        allNodes[nodeId].label = allNodes[nodeId].savedLabel;
+        allNodes[nodeId].savedLabel = undefined;
+      }
+    }
+    filterActive = false;
+  }
+
+  // transform the object into an array
+  var updateArray = [];
+  if (params.nodes.length > 0) {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  } else {
+    for (let nodeId in allNodes) {
+      if (allNodes.hasOwnProperty(nodeId)) {
+        updateArray.push(allNodes[nodeId]);
+      }
+    }
+    nodes.update(updateArray);
+  }
+}
+
+function selectNode(nodes) {
+  network.selectNodes(nodes);
+  neighbourhoodHighlight({ nodes: nodes });
+  return nodes;
+}
+
+function selectNodes(nodes) {
+  network.selectNodes(nodes);
+  filterHighlight({nodes: nodes});
+  return nodes;
+}
+
+function highlightFilter(filter) {
+  let selectedNodes = []
+  let selectedProp = filter['property']
+  if (filter['item'] === 'node') {
+    let allNodes = nodes.get({ returnType: "Object" });
+    for (let nodeId in allNodes) {
+      if (allNodes[nodeId][selectedProp] && filter['value'].includes((allNodes[nodeId][selectedProp]).toString())) {
+        selectedNodes.push(nodeId)
+      }
+    }
+  }
+  else if (filter['item'] === 'edge'){
+    let allEdges = edges.get({returnType: 'object'});
+    // check if the selected property exists for selected edge and select the nodes connected to the edge
+    for (let edge in allEdges) {
+      if (allEdges[edge][selectedProp] && filter['value'].includes((allEdges[edge][selectedProp]).toString())) {
+        selectedNodes.push(allEdges[edge]['from'])
+        selectedNodes.push(allEdges[edge]['to'])
+      }
+    }
+  }
+  selectNodes(selectedNodes)
+}</script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+            
+            
+            
+            
+            
+            
+
+        
+<center>
+<h1></h1>
+</center>
+
+<!-- <link rel="stylesheet" href="../node_modules/vis/dist/vis.min.css" type="text/css" />
+<script type="text/javascript" src="../node_modules/vis/dist/vis.js"> </script>-->
+        <link
+          href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/css/bootstrap.min.css"
+          rel="stylesheet"
+          integrity="sha384-eOJMYsd53ii+scO/bJGFsiCZc+5NDVN2yr8+0RDqr0Ql0h+rP48ckxlpbzKgwra6"
+          crossorigin="anonymous"
+        />
+        <script
+          src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta3/dist/js/bootstrap.bundle.min.js"
+          integrity="sha384-JEW9xMcG8R+pH31jmWH6WWP0WintQrMb4s7ZOdauHnUtxwoG2vI5DkLtS3qm9Ekf"
+          crossorigin="anonymous"
+        ></script>
+
+
+        <center>
+          <h1></h1>
+        </center>
+        <style type="text/css">
+
+             #mynetwork {
+                 width: 100%;
+                 height: 800px;
+                 background-color: #ffffff;
+                 border: 1px solid lightgray;
+                 position: relative;
+                 float: left;
+             }
+
+             
+
+             
+
+             
+        </style>
+    </head>
+
+
+    <body>
+        <div class="card" style="width: 100%">
+            
+            
+            <div id="mynetwork" class="card-body"></div>
+        </div>
+
+        
+        
+
+        <script type="text/javascript">
+
+              // initialize global variables.
+              var edges;
+              var nodes;
+              var allNodes;
+              var allEdges;
+              var nodeColors;
+              var originalNodes;
+              var network;
+              var container;
+              var options, data;
+              var filter = {
+                  item : '',
+                  property : '',
+                  value : []
+              };
+
+              
+
+              
+
+              // This method is responsible for drawing the graph, returns the drawn network
+              function drawGraph() {
+                  var container = document.getElementById('mynetwork');
+
+                  
+
+                  // parsing and collecting nodes and edges from the python
+                  nodes = new vis.DataSet([{"color": "#FFD700", "id": 0, "label": "ID: 0\nSTART\nIF_POS_IS_LONG", "shape": "box", "size": 10, "title": "ID: 0\u003cbr\u003eSTART\u003cbr\u003eIF_POS_IS_LONG"}, {"color": "#1E90FF", "id": 3, "label": "ID: 3\nIF STOCH_K = 28.78", "shape": "box", "size": 10, "title": "ID: 3\u003cbr\u003eIF STOCH_K = 28.78"}, {"color": "#FFD700", "id": 1, "label": "ID: 1\nSTART\nIF_POS_IS_HOLD", "shape": "box", "size": 10, "title": "ID: 1\u003cbr\u003eSTART\u003cbr\u003eIF_POS_IS_HOLD"}, {"color": "#1E90FF", "id": 9, "label": "ID: 9\nIF BB_upper \u003c EMA_30", "shape": "box", "size": 10, "title": "ID: 9\u003cbr\u003eIF BB_upper \u003c EMA_30"}, {"color": "#1E90FF", "id": 10, "label": "ID: 10\nIF BB_upper \u003c SMA_5", "shape": "box", "size": 10, "title": "ID: 10\u003cbr\u003eIF BB_upper \u003c SMA_5"}, {"color": "#1E90FF", "id": 11, "label": "ID: 11\nIF WR \u003e -77.14", "shape": "box", "size": 10, "title": "ID: 11\u003cbr\u003eIF WR \u003e -77.14"}, {"color": "#FFD700", "id": 2, "label": "ID: 2\nSTART\nIF_POS_IS_SHORT", "shape": "box", "size": 10, "title": "ID: 2\u003cbr\u003eSTART\u003cbr\u003eIF_POS_IS_SHORT"}, {"color": "#32CD32", "id": 43, "label": "ID: 43\nACTION: SHORT\nSize: 0.05, Lev: 58x", "shape": "box", "size": 10, "title": "ID: 43\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.05, Lev: 58x"}, {"color": "#1E90FF", "id": 4, "label": "ID: 4\nIF RSI \u003c 1.54", "shape": "box", "size": 10, "title": "ID: 4\u003cbr\u003eIF RSI \u003c 1.54"}, {"color": "#1E90FF", "id": 5, "label": "ID: 5\nIF RSI \u003c 70.16", "shape": "box", "size": 10, "title": "ID: 5\u003cbr\u003eIF RSI \u003c 70.16"}, {"color": "#1E90FF", "id": 6, "label": "ID: 6\nIF RSI \u003c 62.90", "shape": "box", "size": 10, "title": "ID: 6\u003cbr\u003eIF RSI \u003c 62.90"}, {"color": "#1E90FF", "id": 7, "label": "ID: 7\nIF STOCH_K = 81.90", "shape": "box", "size": 10, "title": "ID: 7\u003cbr\u003eIF STOCH_K = 81.90"}, {"color": "#32CD32", "id": 8, "label": "ID: 8\nACTION: LONG\nSize: 0.07, Lev: 75x", "shape": "box", "size": 10, "title": "ID: 8\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.07, Lev: 75x"}, {"color": "#1E90FF", "id": 12, "label": "ID: 12\nIF BB_upper \u003e BB_lower", "shape": "box", "size": 10, "title": "ID: 12\u003cbr\u003eIF BB_upper \u003e BB_lower"}, {"color": "#1E90FF", "id": 13, "label": "ID: 13\nIF RSI = 33.21", "shape": "box", "size": 10, "title": "ID: 13\u003cbr\u003eIF RSI = 33.21"}, {"color": "#1E90FF", "id": 14, "label": "ID: 14\nIF SMA_20 \u003c BB_lower", "shape": "box", "size": 10, "title": "ID: 14\u003cbr\u003eIF SMA_20 \u003c BB_lower"}, {"color": "#1E90FF", "id": 24, "label": "ID: 24\nIF STOCH_K = 83.17", "shape": "box", "size": 10, "title": "ID: 24\u003cbr\u003eIF STOCH_K = 83.17"}, {"color": "#1E90FF", "id": 21, "label": "ID: 21\nIF WR \u003e -83.21", "shape": "box", "size": 10, "title": "ID: 21\u003cbr\u003eIF WR \u003e -83.21"}, {"color": "#1E90FF", "id": 22, "label": "ID: 22\nIF EMA_30 = SMA_5", "shape": "box", "size": 10, "title": "ID: 22\u003cbr\u003eIF EMA_30 = SMA_5"}, {"color": "#1E90FF", "id": 23, "label": "ID: 23\nIF EMA_10 = BB_lower", "shape": "box", "size": 10, "title": "ID: 23\u003cbr\u003eIF EMA_10 = BB_lower"}, {"color": "#1E90FF", "id": 16, "label": "ID: 16\nIF BB_lower \u003e SMA_5", "shape": "box", "size": 10, "title": "ID: 16\u003cbr\u003eIF BB_lower \u003e SMA_5"}, {"color": "#1E90FF", "id": 17, "label": "ID: 17\nIF STOCH_K \u003c 60.33", "shape": "box", "size": 10, "title": "ID: 17\u003cbr\u003eIF STOCH_K \u003c 60.33"}, {"color": "#1E90FF", "id": 15, "label": "ID: 15\nIF WR \u003c -11.92", "shape": "box", "size": 10, "title": "ID: 15\u003cbr\u003eIF WR \u003c -11.92"}, {"color": "#32CD32", "id": 30, "label": "ID: 30\nACTION: SHORT\nSize: 0.02, Lev: 85x", "shape": "box", "size": 10, "title": "ID: 30\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.02, Lev: 85x"}, {"color": "#1E90FF", "id": 18, "label": "ID: 18\nIF ATR = 0.65", "shape": "box", "size": 10, "title": "ID: 18\u003cbr\u003eIF ATR = 0.65"}, {"color": "#1E90FF", "id": 19, "label": "ID: 19\nIF BB_lower = SMA_20", "shape": "box", "size": 10, "title": "ID: 19\u003cbr\u003eIF BB_lower = SMA_20"}, {"color": "#1E90FF", "id": 20, "label": "ID: 20\nIF STOCH_K \u003e 58.39", "shape": "box", "size": 10, "title": "ID: 20\u003cbr\u003eIF STOCH_K \u003e 58.39"}, {"color": "#1E90FF", "id": 32, "label": "ID: 32\nIF BB_upper \u003e EMA_10", "shape": "box", "size": 10, "title": "ID: 32\u003cbr\u003eIF BB_upper \u003e EMA_10"}, {"color": "#1E90FF", "id": 33, "label": "ID: 33\nIF SMA_20 = EMA_10", "shape": "box", "size": 10, "title": "ID: 33\u003cbr\u003eIF SMA_20 = EMA_10"}, {"color": "#32CD32", "id": 31, "label": "ID: 31\nACTION: LONG\nSize: 0.19, Lev: 17x", "shape": "box", "size": 10, "title": "ID: 31\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.19, Lev: 17x"}, {"color": "#32CD32", "id": 34, "label": "ID: 34\nACTION: SHORT\nSize: 0.30, Lev: 67x", "shape": "box", "size": 10, "title": "ID: 34\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.30, Lev: 67x"}, {"color": "#1E90FF", "id": 27, "label": "ID: 27\nIF ATR \u003e 0.81", "shape": "box", "size": 10, "title": "ID: 27\u003cbr\u003eIF ATR \u003e 0.81"}, {"color": "#1E90FF", "id": 28, "label": "ID: 28\nIF EMA_30 \u003c SMA_5", "shape": "box", "size": 10, "title": "ID: 28\u003cbr\u003eIF EMA_30 \u003c SMA_5"}, {"color": "#32CD32", "id": 35, "label": "ID: 35\nACTION: LONG\nSize: 0.04, Lev: 65x", "shape": "box", "size": 10, "title": "ID: 35\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.04, Lev: 65x"}, {"color": "#32CD32", "id": 26, "label": "ID: 26\nACTION: SHORT\nSize: 0.08, Lev: 32x", "shape": "box", "size": 10, "title": "ID: 26\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.08, Lev: 32x"}, {"color": "#32CD32", "id": 36, "label": "ID: 36\nACTION: LONG\nSize: 0.17, Lev: 13x", "shape": "box", "size": 10, "title": "ID: 36\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.17, Lev: 13x"}, {"color": "#32CD32", "id": 37, "label": "ID: 37\nACTION: LONG\nSize: 0.39, Lev: 86x", "shape": "box", "size": 10, "title": "ID: 37\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.39, Lev: 86x"}, {"color": "#1E90FF", "id": 25, "label": "ID: 25\nIF BB_upper \u003e SMA_5", "shape": "box", "size": 10, "title": "ID: 25\u003cbr\u003eIF BB_upper \u003e SMA_5"}, {"color": "#1E90FF", "id": 29, "label": "ID: 29\nIF RSI \u003e 58.09", "shape": "box", "size": 10, "title": "ID: 29\u003cbr\u003eIF RSI \u003e 58.09"}, {"color": "#32CD32", "id": 38, "label": "ID: 38\nACTION: SHORT\nSize: 0.20, Lev: 58x", "shape": "box", "size": 10, "title": "ID: 38\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.20, Lev: 58x"}, {"color": "#32CD32", "id": 39, "label": "ID: 39\nACTION: LONG\nSize: 0.84, Lev: 76x", "shape": "box", "size": 10, "title": "ID: 39\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.84, Lev: 76x"}, {"color": "#32CD32", "id": 40, "label": "ID: 40\nACTION: SHORT\nSize: 0.83, Lev: 60x", "shape": "box", "size": 10, "title": "ID: 40\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.83, Lev: 60x"}, {"color": "#32CD32", "id": 41, "label": "ID: 41\nACTION: SHORT\nSize: 0.75, Lev: 37x", "shape": "box", "size": 10, "title": "ID: 41\u003cbr\u003eACTION: SHORT\u003cbr\u003eSize: 0.75, Lev: 37x"}, {"color": "#32CD32", "id": 42, "label": "ID: 42\nACTION: LONG\nSize: 0.26, Lev: 47x", "shape": "box", "size": 10, "title": "ID: 42\u003cbr\u003eACTION: LONG\u003cbr\u003eSize: 0.26, Lev: 47x"}]);
+                  edges = new vis.DataSet([{"arrows": "to", "from": 0, "to": 3, "width": 1}, {"arrows": "to", "from": 1, "to": 9, "width": 1}, {"arrows": "to", "from": 1, "to": 10, "width": 1}, {"arrows": "to", "from": 1, "to": 11, "width": 1}, {"arrows": "to", "from": 2, "to": 43, "width": 1}, {"arrows": "to", "from": 3, "to": 4, "width": 1}, {"arrows": "to", "from": 4, "to": 5, "width": 1}, {"arrows": "to", "from": 5, "to": 6, "width": 1}, {"arrows": "to", "from": 6, "to": 7, "width": 1}, {"arrows": "to", "from": 7, "to": 8, "width": 1}, {"arrows": "to", "from": 9, "to": 12, "width": 1}, {"arrows": "to", "from": 9, "to": 13, "width": 1}, {"arrows": "to", "from": 9, "to": 14, "width": 1}, {"arrows": "to", "from": 10, "to": 24, "width": 1}, {"arrows": "to", "from": 11, "to": 21, "width": 1}, {"arrows": "to", "from": 11, "to": 22, "width": 1}, {"arrows": "to", "from": 11, "to": 23, "width": 1}, {"arrows": "to", "from": 12, "to": 16, "width": 1}, {"arrows": "to", "from": 12, "to": 17, "width": 1}, {"arrows": "to", "from": 13, "to": 15, "width": 1}, {"arrows": "to", "from": 14, "to": 30, "width": 1}, {"arrows": "to", "from": 15, "to": 18, "width": 1}, {"arrows": "to", "from": 15, "to": 19, "width": 1}, {"arrows": "to", "from": 15, "to": 20, "width": 1}, {"arrows": "to", "from": 16, "to": 32, "width": 1}, {"arrows": "to", "from": 16, "to": 33, "width": 1}, {"arrows": "to", "from": 17, "to": 31, "width": 1}, {"arrows": "to", "from": 18, "to": 34, "width": 1}, {"arrows": "to", "from": 19, "to": 27, "width": 1}, {"arrows": "to", "from": 19, "to": 28, "width": 1}, {"arrows": "to", "from": 20, "to": 35, "width": 1}, {"arrows": "to", "from": 21, "to": 26, "width": 1}, {"arrows": "to", "from": 22, "to": 36, "width": 1}, {"arrows": "to", "from": 23, "to": 37, "width": 1}, {"arrows": "to", "from": 24, "to": 25, "width": 1}, {"arrows": "to", "from": 25, "to": 29, "width": 1}, {"arrows": "to", "from": 27, "to": 38, "width": 1}, {"arrows": "to", "from": 28, "to": 39, "width": 1}, {"arrows": "to", "from": 29, "to": 40, "width": 1}, {"arrows": "to", "from": 32, "to": 41, "width": 1}, {"arrows": "to", "from": 33, "to": 42, "width": 1}]);
+
+                  nodeColors = {};
+                  allNodes = nodes.get({ returnType: "Object" });
+                  for (nodeId in allNodes) {
+                    nodeColors[nodeId] = allNodes[nodeId].color;
+                  }
+                  allEdges = edges.get({ returnType: "Object" });
+                  // adding nodes and edges to the graph
+                  data = {nodes: nodes, edges: edges};
+
+                  var options = {"layout": {"hierarchical": {"enabled": true, "levelSeparation": 200, "nodeSpacing": 150, "treeSpacing": 250, "direction": "UD", "sortMethod": "directed"}}, "physics": {"enabled": false}};
+
+                  
+
+
+                  
+
+                  network = new vis.Network(container, data, options);
+
+                  
+
+                  
+
+                  
+
+
+                  
+
+                  return network;
+
+              }
+              drawGraph();
+        </script>
+    </body>
+</html>
