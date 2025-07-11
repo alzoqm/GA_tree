@@ -6,6 +6,9 @@ import os
 # 프로젝트 루트에서 실행한다고 가정합니다.
 from models.model import GATree, GATreePop, NODE_TYPE_UNUSED, FEATURE_NUM, FEATURE_PAIR
 from evolution.Crossover.subtree import SubtreeCrossover
+from evolution.Crossover.node import NodeCrossover
+from evolution.Crossover.root_branch import RootBranchCrossover
+from evolution.Crossover.chain import ChainCrossover
 
 # ----------------------------------------------------
 # --- 테스트 환경 설정 ---
@@ -85,14 +88,28 @@ if __name__ == '__main__':
 
     # 4. SubtreeCrossover 실행
     print("\n[3] SubtreeCrossover 연산을 수행합니다...")
-    crossover = SubtreeCrossover(
+    # # 1. SubtreeCrossover
+    # crossover = SubtreeCrossover(
+    #     rate=CROSSOVER_RATE,
+    #     max_nodes=MAX_NODES,
+    #     max_depth=MAX_DEPTH,
+    #     max_retries=MAX_RETRIES,
+    #     mode='context'
+    # )
+
+    # 2. NodeCrossover
+    crossover = NodeCrossover(
         rate=CROSSOVER_RATE,
-        max_nodes=MAX_NODES,
-        max_depth=MAX_DEPTH,
-        max_retries=MAX_RETRIES,
         mode='context'
     )
-    
+
+    # # 3. RootBranchCrossover
+    # crossover = RootBranchCrossover(
+    #     rate=CROSSOVER_RATE,
+    #     max_nodes=MAX_NODES,
+    # )
+
+
     # crossover.__call__은 (num_parents, ...) -> (num_offspring, ...) 형태입니다.
     # 부모 2명을 넣으면 자식 1명이 나옵니다.
     children_tensor = crossover(parents_tensor)

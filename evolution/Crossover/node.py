@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 # 프로젝트 구조에 따라 model.py에서 상수 임포트
 from models.model import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_PARAM_1, NODE_TYPE_UNUSED, 
+    NODE_TYPE_ROOT_BRANCH,  # <--- [수정 1] 누락된 상수 추가
     NODE_TYPE_DECISION, NODE_TYPE_ACTION, ROOT_BRANCH_LONG, 
     ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
 )
@@ -42,7 +43,6 @@ class NodeCrossover(BaseCrossover):
 
         for i, (p1, p2) in enumerate(parent_pairs):
             if torch.rand(1).item() < self.rate:
-                # self.mode에 따라 교차 수행
                 child1, child2 = self._perform_crossover_pair(p1, p2)
                 children[i] = child1 if torch.rand(1).item() < 0.5 else child2
             else:
@@ -54,7 +54,6 @@ class NodeCrossover(BaseCrossover):
         """두 부모에 대해 노드 파라미터 교환을 수행합니다."""
         child1, child2 = p1.clone(), p2.clone()
 
-        # Decision 노드와 Action 노드에 대해 별도로 교환 수행
         for node_type in [self.NODE_TYPE_DECISION, self.NODE_TYPE_ACTION]:
             if self.mode == 'free':
                 p1_mask = (p1[:, self.COL_NODE_TYPE] == node_type)
@@ -64,7 +63,8 @@ class NodeCrossover(BaseCrossover):
                 for branch_type in self.BRANCH_TYPES:
                     p1_context_mask = self._get_contextual_mask(p1, node_type, branch_type)
                     p2_context_mask = self._get_contextual_mask(p2, node_type, branch_type)
-                    self._swap_node_params(child1, child2, p1_context_mask, p2_context_mask)
+                    if p1_context_mask.any() and p2_context_mask.any():
+                        self._swap_node_params(child1, child2, p1_context_mask, p2_context_mask)
 
         return child1, child2
 
@@ -77,19 +77,17 @@ class NodeCrossover(BaseCrossover):
         if p1_indices.numel() == 0 or p2_indices.numel() == 0:
             return
 
-        # 교환할 노드 수 결정
         max_swaps = min(p1_indices.numel(), p2_indices.numel())
         if max_swaps == 0: return
         
-        # 최소 1개, 최대 절반까지 교환
-        k = torch.randint(1, max_swaps // 2 + 2, (1,)).item()
-        k = min(k, max_swaps) # k가 max_swaps를 넘지 않도록 보장
+        # 최소 1개, 최대 절반까지 교환하도록 수정 (k가 1이 되는 것을 보장)
+        k_upper_bound = max(1, max_swaps // 2) 
+        k = torch.randint(1, k_upper_bound + 1, (1,)).item()
+        k = min(k, max_swaps)
 
-        # 교환할 인덱스 무작위 선택
         p1_swap_indices = p1_indices[torch.randperm(p1_indices.numel())[:k]]
         p2_swap_indices = p2_indices[torch.randperm(p2_indices.numel())[:k]]
 
-        # 파라미터 부분만 임시 저장 후 교환 (구조는 그대로)
         p1_params = c1[p1_swap_indices, self.COL_PARAM_1:].clone()
         p2_params = c2[p2_swap_indices, self.COL_PARAM_1:].clone()
         
@@ -114,22 +112,16 @@ class NodeCrossover(BaseCrossover):
             return torch.zeros_like(type_mask)
 
         final_mask = torch.zeros_like(type_mask)
-        final_mask[context_indices] = True
+        final_mask[torch.tensor(context_indices, device=tree.device)] = True
         return final_mask
 
     def _get_root_branch_type(self, tree: torch.Tensor, node_idx: int) -> int:
+        # <--- [수정 2] 함수 로직을 더 간결하고 명확하게 개선
         """주어진 노드의 최상위 조상(루트 분기)의 타입을 반환합니다."""
         current_idx = node_idx
-        while True:
-            parent_idx = int(tree[current_idx, self.COL_PARENT_IDX].item())
-            # 루트 분기 노드(parent_idx가 -1)를 만나면 그 타입을 반환
-            if parent_idx == -1:
-                # 이 노드가 루트 분기 노드여야 함
-                return int(tree[current_idx, self.COL_PARAM_1].item())
-            
-            # 부모가 루트 분기 노드인 경우
-            parent_type = tree[parent_idx, self.COL_NODE_TYPE].item()
-            if parent_type == NODE_TYPE_ROOT_BRANCH:
-                 return int(tree[parent_idx, self.COL_PARAM_1].item())
-
-            current_idx = parent_idx
+        # 부모 인덱스가 -1이 될 때까지 (즉, 최상위 노드에 도달할 때까지) 거슬러 올라감
+        while int(tree[current_idx, self.COL_PARENT_IDX].item()) != -1:
+            current_idx = int(tree[current_idx, self.COL_PARENT_IDX].item())
+        
+        # 이제 current_idx는 루트 분기 노드를 가리키므로, 그 타입을 반환
+        return int(tree[current_idx, self.COL_PARAM_1].item())
