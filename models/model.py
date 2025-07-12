@@ -48,6 +48,10 @@ OP_EQ = 2  # =
 # Action Node: Position Types
 POS_TYPE_LONG = 0
 POS_TYPE_SHORT = 1
+POS_TYPE_HOLD = 2  # [수정] 명시적인 HOLD 포지션 타입 추가
+
+# [수정] 부동소수점 비교를 위한 Epsilon 값
+EPSILON = 1e-6
 
 # --- 예시 Feature 및 설정 (실제 사용 시 변경) ---
 FEATURE_NUM = {'RSI': (0, 100), 'ATR': (0, 1), 'WR': (-100, 0), 'STOCH_K':(0, 100)}
@@ -63,7 +67,8 @@ NODE_TYPE_MAP = {
 }
 ROOT_BRANCH_MAP = {ROOT_BRANCH_LONG: "IF_POS_IS_LONG", ROOT_BRANCH_HOLD: "IF_POS_IS_HOLD", ROOT_BRANCH_SHORT: "IF_POS_IS_SHORT"}
 OPERATOR_MAP = {OP_GT: ">", OP_LT: "<", OP_EQ: "="}
-POS_TYPE_MAP = {POS_TYPE_LONG: "LONG", POS_TYPE_SHORT: "SHORT"}
+# [수정] POS_TYPE_MAP에 HOLD 추가
+POS_TYPE_MAP = {POS_TYPE_LONG: "LONG", POS_TYPE_SHORT: "SHORT", POS_TYPE_HOLD: "HOLD"}
 
 class GATree:
     """
@@ -293,7 +298,8 @@ class GATree:
 
         if op == OP_GT: return val1 > val2
         if op == OP_LT: return val1 < val2
-        if op == OP_EQ: return val1 == val2 # 부동소수점 비교는 주의 필요
+        # [수정] Epsilon을 사용한 안전한 부동소수점 비교
+        if op == OP_EQ: return abs(val1 - val2) < EPSILON
         
         return False
 

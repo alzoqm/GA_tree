@@ -1,5 +1,6 @@
 // csrc/predict_kernel.cu
 #include <cuda_runtime.h>
+#include <cmath> // [수정] fabs 사용을 위해 추가
 #include "constants.h"
 
 // --- Device-level Helper Function ---
@@ -25,7 +26,8 @@ __device__ bool evaluate_node_device(
     switch(op) {
         case OP_GT: return val1 > val2;
         case OP_LT: return val1 < val2;
-        case OP_EQ: return val1 == val2;
+        // [수정] Epsilon을 사용한 안전한 부동소수점 비교
+        case OP_EQ: return fabs(val1 - val2) < EPSILON;
     }
     return false;
 }
@@ -37,6 +39,7 @@ __global__ void predict_kernel(
     const float* population_ptr,
     const float* features_ptr,
     const long* positions_ptr,
+    const int* next_indices_ptr, // [수정] 각 트리의 실제 노드 수를 담은 포인터
     float* results_ptr,
     int pop_size,
     int max_nodes,
@@ -48,10 +51,13 @@ __global__ void predict_kernel(
         return;
     }
 
-    // 2. Setup pointers for the current tree
+    // 2. Setup pointers and variables for the current tree
     const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
     const float* features = features_ptr + tree_idx * num_features;
     float* result_out = results_ptr + tree_idx * 3; // 3 = pos, size, leverage
+    // [수정] 해당 트리의 실제 노드 수를 가져옴
+    const int next_idx = next_indices_ptr[tree_idx];
+
 
     // 3. Find the starting node (root branch)
     long start_pos_type = positions_ptr[tree_idx];
@@ -66,15 +72,16 @@ __global__ void predict_kernel(
     }
 
     if (start_node_idx == -1) {
-        // Should not happen for a valid tree. Default to HOLD.
-        result_out[0] = POS_TYPE_SHORT; // Represent HOLD as action with 0 size
+        // [수정] 명확한 HOLD 타입으로 기본값 설정
+        result_out[0] = POS_TYPE_HOLD;
         result_out[1] = 0.0f;
         result_out[2] = 0.0f;
         return;
     }
 
     // 4. Iterative DFS using a local stack
-    constexpr int STACK_SIZE = 128; // Max tree depth is much smaller
+    // [수정] MAX_DEPTH 기반의 안전한 스택 크기 설정
+    constexpr int STACK_SIZE = MAX_DEPTH + 5; 
     int node_stack[STACK_SIZE];
     int stack_top = -1;
 
@@ -90,7 +97,8 @@ __global__ void predict_kernel(
         int success_count = 0;
 
         // Find all children of the current node
-        for (int child_idx = 0; child_idx < max_nodes; ++child_idx) {
+        // [수정] 탐색 범위를 max_nodes에서 next_idx로 최적화
+        for (int child_idx = 0; child_idx < next_idx; ++child_idx) {
             const float* child_node_data = tree_data + child_idx * NODE_INFO_DIM;
             if (static_cast<int>(child_node_data[COL_PARENT_IDX]) == current_node_idx) {
                 int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
@@ -127,7 +135,8 @@ __global__ void predict_kernel(
 
     // 5. If no action was found after traversing, default to HOLD
     if (!found_action) {
-        result_out[0] = POS_TYPE_SHORT;
+        // [수정] 명확한 HOLD 타입으로 기본값 설정
+        result_out[0] = POS_TYPE_HOLD;
         result_out[1] = 0.0f;
         result_out[2] = 0.0f;
     }
@@ -139,6 +148,7 @@ void launch_predict_kernel(
     const float* population_ptr,
     const float* features_ptr,
     const long* positions_ptr,
+    const int* next_indices_ptr, // [수정] 파라미터 추가
     float* results_ptr,
     int pop_size,
     int max_nodes,
@@ -153,6 +163,7 @@ void launch_predict_kernel(
         population_ptr,
         features_ptr,
         positions_ptr,
+        next_indices_ptr, // [수정] 인자 전달
         results_ptr,
         pop_size,
         max_nodes,

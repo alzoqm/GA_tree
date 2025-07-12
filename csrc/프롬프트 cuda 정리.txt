@@ -1,0 +1,438 @@
+genetic tree를 구현해줘. 아래의 명세를 모두 반영해야 한다.
+- 해당 GA tree의 목적은 자동 트레이딩을 위한 코드이다.
+- tree의 분기는 무조건 비교 구문으로 구성된다.
+-- tree의 분기는 무조건 2개의 형식으로 구분된다.
+--- 하나의 노드의 자식 노드는 여러개가 될 수 있다. (제한 없음)
+--- feature >< number or feature1 >< feature2
+--- 형식의 feature는 미리 지정해준다.
+--- ex)   feature_num     = ['RSI', 'ATR', 'WR'] 
+  feature_pair    = ['SMA', 'EMA', 'BB_upper','BB_lower']
+--- 즉, 숫자와 비교하는 feature와 feature끼리 비교하는 feature들의 그룹을 미리 지정해줄 예정이다.
+--- feature_num의 경우, 해당 데이터의 최대 및 최소 값도 같이 주어질 예정이다.
+--- GA의 변이는 tree의 분기를 늘리거나 줄이거나 해당 분기를 위의 조건에 맞는 한에서 변경한다.
+-- 트리의 root 바로 아래 노드는 3개의 노드가 존재하며, 각각 현재 포지션이 ['LONG', 'HOLD', 'SHORT']인지 구분한다.
+--- crossover는 기존 트리에서 일정 부분의 branch 전체를 선택해서 crossover를 진행한다.
+--- crossover되는 branch에 하위 branch가 존재한다면, 통째로 crossover가 된다.
+--- 자식 노드가 여러개일 경우에는, 하나의 자식 노드만 충족해도 해당 자식 노드들의 모든 경우를 탐색한다.
+---- 예를 들어 자식 노드 1, 2, 3이 있을 경우 1과 3의 경우가 충족되었다면, 1과 3의 tree로 진행한다.
+--- 진행한 트리의 node가 해당 조건을 충족하지 않고, 멈춘다면, 행동은 hold이다.
+
+--- 마지막 결과값은 진입 포지션(long, short), 진입 비중(0 ~ 1의 실수), 레버리지 배수(0 ~ 100의 정수) 값들이 나와야 한다.
+--- 여러 leaf 노드에서 조건이 만족했다면, 가장 먼저 탐색을 완료한 결과로 진행한다.
+--- 마지막 결과값도 변이가 가능하다.
+
+--- 해당 노드들은 무조건 고정된 노드들이며, 변이되지 않는다. 즉, 가장 위의 노드들은 변경되어서는 안된다.
+
+너가 이해한 내용을 정리해서 작성해봐
+
+---------
+
+좋아 정확하게 이해했어. 이제 해당 방법의 TREE를 코드로 작성하되, CUDA 및 C 코드에서도 쉽게 동작할 수 있는 코드로 작성해줘.
+즉, 해당 TREE의 연산이 C 및 CUDA에서도 이루어질 수 있도록 작성해줘.
+그 이유는 ga를 학습시키기 위해서 CUDA를 활용할 계획이다.
+나의 계획에 대해 간략하게 설명하자면,
+만약 수천 수만개의 TREE가 POP_SIZE로 존재할 경우, 이것을 CPU로 연산하기에는 매우 오래 걸린다.
+따라서, CUDA를 활용하여, 스레드 하나마다 TREE를 배정하여, 병렬 연산을 진행하여 추론을 진행할 예정이다.
+따라서, 해당 상황에서도 적절하게 동작할 수 있는 모델을 작성해야 한다.
+아직, CROSSOVER 등 작성할 필요는 없고, 모델 부분만 작성을 해줘.
+Tree에는 max_node와 max_depth가 존재해야 한다.
+Tree에는 추가로 2가지 기능이 추가되어야 한다. 처음 Tree를 생성할 때, 조건에 맞는 랜덤 Tree 생성
+그리고 load() method를 통해 저장된 Tree weight? node?를 불러올 수 있는 함수도 작성해줘.
+
+비교 연산은 3가지만 존재한다. > < =
+
+
+강조하는 것은 여기서 말하는 cuda 및 C 호환의 의미는 Model 자체를 Cuda로 만드는 것이 목적이 아니다.
+예를 들어 GATree와 그것을 인구단위로 묶은 GATreePop이라는 python Class를 만들었을 때, GATreePop 자체가 c와 cuda에 입력으로 들어와 연산을 하는 것이 목적이다.
+즉, c에서 담당할 부분은 python으로 들어온 객체를 cuda kernel에 넣을 수 있는 형태로 변환하는 기능
+cuda에서 담당할 부분은 병렬적으로 모든 Tree의 추론을 진행.
+이를 위해서는 미리 Tree의 데이터 정보들을 GPU에 올려놓을 수 있도록 Torch.Tensor를 사용하자(grad는 필요없으므로 False)
+
+가장 대표적인 예시로 python Torch에서 선언된 Tensor를 setup 및 커스텀 c와 cuda 함수를 통해 연산을 하는 방식이라고 보면된다.
+load에는 2가지 입력을 받을 수 있다. 파일 경로 혹은 torch의 state_dict
+따라서 저장 역시 torch의 state_dict 형식으로 저장하고, 해당 tree의 모든 정보를 저장해야 한다.
+
+일단 코드 작성하지 말고 너가 이해한 내용을 먼저 정리해봐.
+매우 많은 요구사항이기 때문에, 빠짐없이, 매우 자세하게 분석 후 정리해야 한다.
+
+---------------------------------------------------------------------------------------------------------------_
+요구사항
+"""
+genetic tree를 구현해줘. 아래의 명세를 모두 반영해야 한다.
+- 해당 GA tree의 목적은 자동 트레이딩을 위한 코드이다.
+- tree의 분기는 무조건 비교 구문으로 구성된다.
+-- tree의 분기는 무조건 2개의 형식으로 구분된다.
+--- 하나의 노드의 자식 노드는 여러개가 될 수 있다. (자식 노드 제한 존재 - argument로 입력 예정)
+--- feature >< number or feature1 >< feature2
+--- 형식의 feature는 미리 지정해준다.
+
+--- ex)   feature_num     = ['RSI', 'ATR', 'WR'] 
+  feature_pair    = ['SMA', 'EMA', 'BB_upper','BB_lower']
+--- 즉, 숫자와 비교하는 feature와 feature끼리 비교하는 feature들의 그룹을 미리 지정해줄 예정이다.
+--- feature_num의 경우, 해당 데이터의 최대 및 최소 값도 같이 주어질 예정이다.
+--- GA의 변이는 tree의 분기를 늘리거나 줄이거나 해당 분기를 위의 조건에 맞는 한에서 변경한다.
+-- 트리의 root 바로 아래 노드는 3개의 노드가 존재하며, 각각 현재 포지션이 ['LONG', 'HOLD', 'SHORT']인지 구분한다.
+--- crossover는 기존 트리에서 일정 부분의 branch 전체를 선택해서 crossover를 진행한다.
+--- crossover되는 branch에 하위 branch가 존재한다면, 통째로 crossover가 된다.
+--- 자식 노드가 여러개일 경우에는, 하나의 자식 노드만 충족해도 해당 자식 노드들의 모든 경우를 탐색한다.
+---- 예를 들어 자식 노드 1, 2, 3이 있을 경우 1과 3의 경우가 충족되었다면, 1과 3의 tree로 진행한다.
+--- 진행한 트리의 node가 해당 조건을 충족하지 않고, 멈춘다면, 행동은 hold이다.
+--- 자식 노드로 Action 노드를 가지고 있는 경우, 무조건 하나의 자식 노드, 즉, 해당 Action 노드만 가지고 있어야 한다
+--- 자식 노드에는 결정 노드와 행동 노드가 혼재되어 있으면 안된다. 결정 노드는 무조건 중간에 존재하는 노드이며, 행동노드는 무조건 마지막에만 존재하는 노드이다.
+예시) - Decision A -- Action B and Action C --> 불가 Action node는 무조건 하나만 존재해야 함
+ - - Decision A -- Action B and Decision C and Decision B -> 행동과 결정 노드가 자식 노드에서 혼재하는 것은 불가
+
+
+--- 마지막 결과값은 진입 포지션(long, short), 진입 비중(0 ~ 1의 실수), 레버리지 배수(0 ~ 100의 정수) 값들이 나와야 한다.
+--- 여러 leaf 노드에서 조건이 만족했다면, 가장 먼저 탐색을 완료한 결과로 진행한다.
+--- 마지막 결과값도 변이가 가능하다.
+
+--- 해당 노드들은 무조건 고정된 노드들이며, 변이되지 않는다. 즉, 가장 위의 노드들은 변경되어서는 안된다.
+
+CUDA 및 C 코드에서도 쉽게 동작할 수 있어야 한다.
+즉, 해당 TREE의 연산이 C 및 CUDA에서도 이루어질 수 있도록 작성해줘.
+그 이유는 ga를 학습시키기 위해서 CUDA를 활용할 계획이다.
+나의 계획에 대해 간략하게 설명하자면,
+만약 수천 수만개의 TREE가 POP_SIZE로 존재할 경우, 이것을 CPU로 연산하기에는 매우 오래 걸린다.
+따라서, CUDA를 활용하여, 스레드 하나마다 TREE를 배정하여, 병렬 연산을 진행하여 추론을 진행할 예정이다.
+따라서, 해당 상황에서도 적절하게 동작할 수 있는 모델을 작성해야 한다.
+Tree에는 max_node와 max_depth가 존재해야 한다.
+Tree에는 추가로 2가지 기능이 추가되어야 한다. 처음 Tree를 생성할 때, 조건에 맞는 랜덤 Tree 생성
+그리고 load() method를 통해 저장된 Tree weight? node?를 불러올 수 있는 함수도 작성해줘.
+
+GATree의 노드는 2가지 받을 수 있도록 한다. GATree 하나만을 사용할 수 있도록 기존 Tensor를 Tree Class내에 선언하는 경우, (값으로 존재)
+GATreePop에서 선언한 Tensor를 주소형태(torch.view 사용)로 일부만 가져와서 존재.
+-> 해당 형태로 구현한 이유에 대해서도 너가 추측해서 설명해봐
+
+비교 연산은 3가지만 존재한다. > < =
+
+
+강조하는 것은 여기서 말하는 cuda 및 C 호환의 의미는 Model 자체를 Cuda로 만드는 것이 목적이 아니다.
+예를 들어 GATree와 그것을 인구단위로 묶은 GATreePop이라는 python Class를 만들었을 때, GATreePop 자체가 c와 cuda에 입력으로 들어와 연산을 하는 것이 목적이다.
+즉, c에서 담당할 부분은 python으로 들어온 객체를 cuda kernel에 넣을 수 있는 형태로 변환하는 기능
+cuda에서 담당할 부분은 병렬적으로 모든 Tree의 추론을 진행.
+이를 위해서는 미리 Tree의 데이터 정보들을 GPU에 올려놓을 수 있도록 Torch.Tensor를 사용하자(grad는 필요없으므로 False)
+
+가장 대표적인 예시로 python Torch에서 선언된 Tensor를 setup 및 커스텀 c와 cuda 함수를 통해 연산을 하는 방식이라고 보면된다.
+load에는 2가지 입력을 받을 수 있다. 파일 경로 혹은 torch의 state_dict
+따라서 저장 역시 torch의 state_dict 형식으로 저장하고, 해당 tree의 모든 정보를 저장해야 한다.
+
+처음 GATree 및 GATreePop 생성시 Node 등 초기화하지 않고, __init___tree()라는 method를 사용해야 Node 등 Tree를 초기화하도록 해.
+가장 중요하고 중요한 점은 Tree 초기화시 지금까지 설명한 제약 사항 및 구현 사항들을 모두 고려해야 한다.
+따라서 어떻게 초기화를 하고, 어떤 제약 사항 및 구현사항들을 고려해서 초기화 방법을 설정했는지도 매우 자세하게 설명해줘.
+
+매우 많은 요구사항이기 때문에, 빠짐없이, 매우 자세하게 분석 후 정리해야 한다.
+너가 이해한 내용을 정리해서 작성해봐
+예시로 임시의 Tree를 만들어서 설명해봐.
+
+코드 작성하지 말고, 매우 길고 자세하고 정교한 분석 설명해줘
+"""
+-------------------------------------_
+
+cuda code
+"""
+// csrc/constants.h
+#pragma once
+
+// 이 파일은 python/model.py 의 상수들과 100% 일치해야 합니다.
+
+// --- Tensor Column Indices ---
+constexpr int COL_NODE_TYPE = 0;
+constexpr int COL_PARENT_IDX = 1;
+constexpr int COL_DEPTH = 2;
+constexpr int COL_PARAM_1 = 3;
+constexpr int COL_PARAM_2 = 4;
+constexpr int COL_PARAM_3 = 5;
+constexpr int COL_PARAM_4 = 6;
+constexpr int NODE_INFO_DIM = 7;
+
+// --- Node Types ---
+constexpr int NODE_TYPE_UNUSED = 0;
+constexpr int NODE_TYPE_ROOT_BRANCH = 1;
+constexpr int NODE_TYPE_DECISION = 2;
+constexpr int NODE_TYPE_ACTION = 3;
+
+// --- Root Branch Types ---
+constexpr int ROOT_BRANCH_LONG = 0;
+constexpr int ROOT_BRANCH_HOLD = 1;
+constexpr int ROOT_BRANCH_SHORT = 2;
+
+// --- Decision Node: Comparison Types ---
+constexpr int COMP_TYPE_FEAT_NUM = 0;
+constexpr int COMP_TYPE_FEAT_FEAT = 1;
+
+// --- Decision Node: Operators ---
+constexpr int OP_GT = 0; // >
+constexpr int OP_LT = 1; // <
+constexpr int OP_EQ = 2; // =
+
+// --- Action Node: Position Types ---
+constexpr int POS_TYPE_LONG = 0;
+constexpr int POS_TYPE_SHORT = 1;
+"""
+
+"""
+// csrc/predict_kernel.cu
+#include <cuda_runtime.h>
+#include "constants.h"
+
+// --- Device-level Helper Function ---
+// Python의 _evaluate_node와 동일한 로직
+__device__ bool evaluate_node_device(
+    const float* node_data,
+    const float* feature_values) {
+
+    int op = static_cast<int>(node_data[COL_PARAM_2]);
+    int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
+    int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
+
+    float val1 = feature_values[feat1_idx];
+    float val2;
+
+    if (comp_type == COMP_TYPE_FEAT_NUM) {
+        val2 = node_data[COL_PARAM_4];
+    } else { // COMP_TYPE_FEAT_FEAT
+        int feat2_idx = static_cast<int>(node_data[COL_PARAM_4]);
+        val2 = feature_values[feat2_idx];
+    }
+
+    switch(op) {
+        case OP_GT: return val1 > val2;
+        case OP_LT: return val1 < val2;
+        case OP_EQ: return val1 == val2;
+    }
+    return false;
+}
+
+
+// --- Main CUDA Kernel ---
+// Python의 predict 메소드와 동일한 로직
+__global__ void predict_kernel(
+    const float* population_ptr,
+    const float* features_ptr,
+    const long* positions_ptr,
+    float* results_ptr,
+    int pop_size,
+    int max_nodes,
+    int num_features) {
+
+    // 1. Thread-to-Tree Mapping
+    const int tree_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tree_idx >= pop_size) {
+        return;
+    }
+
+    // 2. Setup pointers for the current tree
+    const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
+    const float* features = features_ptr + tree_idx * num_features;
+    float* result_out = results_ptr + tree_idx * 3; // 3 = pos, size, leverage
+
+    // 3. Find the starting node (root branch)
+    long start_pos_type = positions_ptr[tree_idx];
+    int start_node_idx = -1;
+    for (int i = 0; i < 3; ++i) { // Root branches are always at indices 0, 1, 2
+        const float* node = tree_data + i * NODE_INFO_DIM;
+        if (static_cast<int>(node[COL_NODE_TYPE]) == NODE_TYPE_ROOT_BRANCH &&
+            static_cast<int>(node[COL_PARAM_1]) == start_pos_type) {
+            start_node_idx = i;
+            break;
+        }
+    }
+
+    if (start_node_idx == -1) {
+        // Should not happen for a valid tree. Default to HOLD.
+        result_out[0] = POS_TYPE_SHORT; // Represent HOLD as action with 0 size
+        result_out[1] = 0.0f;
+        result_out[2] = 0.0f;
+        return;
+    }
+
+    // 4. Iterative DFS using a local stack
+    constexpr int STACK_SIZE = 128; // Max tree depth is much smaller
+    int node_stack[STACK_SIZE];
+    int stack_top = -1;
+
+    node_stack[++stack_top] = start_node_idx; // Push start node
+
+    bool found_action = false;
+
+    while (stack_top >= 0 && !found_action) {
+        int current_node_idx = node_stack[stack_top--]; // Pop
+
+        constexpr int MAX_CHILDREN_PER_NODE = 64; // A safe upper bound
+        int successful_children[MAX_CHILDREN_PER_NODE];
+        int success_count = 0;
+
+        // Find all children of the current node
+        for (int child_idx = 0; child_idx < max_nodes; ++child_idx) {
+            const float* child_node_data = tree_data + child_idx * NODE_INFO_DIM;
+            if (static_cast<int>(child_node_data[COL_PARENT_IDX]) == current_node_idx) {
+                int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
+
+                if (child_node_type == NODE_TYPE_ACTION) {
+                    // Action found, this is the final result.
+                    result_out[0] = child_node_data[COL_PARAM_1]; // Position type
+                    result_out[1] = child_node_data[COL_PARAM_2]; // Size
+                    result_out[2] = child_node_data[COL_PARAM_3]; // Leverage
+                    found_action = true;
+                    break; // Exit the for-loop over children
+                }
+                else if (child_node_type == NODE_TYPE_DECISION) {
+                    if (evaluate_node_device(child_node_data, features)) {
+                        if (success_count < MAX_CHILDREN_PER_NODE) {
+                           successful_children[success_count++] = child_idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (found_action) {
+            break; // Exit the while-loop
+        }
+
+        // Push successful children to the stack in reverse order for correct DFS
+        for (int i = success_count - 1; i >= 0; --i) {
+            if (stack_top < STACK_SIZE - 1) {
+                node_stack[++stack_top] = successful_children[i];
+            }
+        }
+    }
+
+    // 5. If no action was found after traversing, default to HOLD
+    if (!found_action) {
+        result_out[0] = POS_TYPE_SHORT;
+        result_out[1] = 0.0f;
+        result_out[2] = 0.0f;
+    }
+}
+
+
+// --- Kernel Launcher ---
+void launch_predict_kernel(
+    const float* population_ptr,
+    const float* features_ptr,
+    const long* positions_ptr,
+    float* results_ptr,
+    int pop_size,
+    int max_nodes,
+    int num_features) {
+
+    if (pop_size == 0) return;
+
+    const int threads_per_block = 256;
+    const int num_blocks = (pop_size + threads_per_block - 1) / threads_per_block;
+
+    predict_kernel<<<num_blocks, threads_per_block>>>(
+        population_ptr,
+        features_ptr,
+        positions_ptr,
+        results_ptr,
+        pop_size,
+        max_nodes,
+        num_features
+    );
+}
+"""
+
+"""
+// csrc/predict_kernel.cuh
+#pragma once
+
+#include <torch/extension.h>
+
+void launch_predict_kernel(
+    const float* population_ptr,
+    const float* features_ptr,
+    const long* positions_ptr,
+    float* results_ptr,
+    int pop_size,
+    int max_nodes,
+    int num_features
+);
+"""
+
+"""
+// csrc/predict.cpp
+#include <torch/extension.h>
+#include "predict_kernel.cuh"
+#include "constants.h"
+
+// --- Input Validation and Tensor Checks ---
+void check_tensors(
+    const torch::Tensor& population,
+    const torch::Tensor& features,
+    const torch::Tensor& positions,
+    const torch::Tensor& results) { // results 텐서 체크 추가
+
+    // Device check
+    TORCH_CHECK(population.device().is_cuda(), "Population tensor must be on a CUDA device");
+    TORCH_CHECK(features.device().is_cuda(), "Features tensor must be on a CUDA device");
+    TORCH_CHECK(positions.device().is_cuda(), "Positions tensor must be on a CUDA device");
+    TORCH_CHECK(results.device().is_cuda(), "Results tensor must be on a CUDA device"); // 추가
+
+    // Datatype check
+    TORCH_CHECK(population.scalar_type() == torch::kFloat32, "Population tensor must be of type float32");
+    TORCH_CHECK(features.scalar_type() == torch::kFloat32, "Features tensor must be of type float32");
+    TORCH_CHECK(positions.scalar_type() == torch::kInt64, "Positions tensor must be of type int64 (long)");
+    TORCH_CHECK(results.scalar_type() == torch::kFloat32, "Results tensor must be of type float32"); // 추가
+
+    // Contiguity check
+    TORCH_CHECK(population.is_contiguous(), "Population tensor must be contiguous");
+    TORCH_CHECK(features.is_contiguous(), "Features tensor must be contiguous");
+    TORCH_CHECK(positions.is_contiguous(), "Positions tensor must be contiguous");
+    TORCH_CHECK(results.is_contiguous(), "Results tensor must be contiguous"); // 추가
+
+    // Dimension check
+    TORCH_CHECK(population.dim() == 3, "Population tensor must be 3D");
+    TORCH_CHECK(features.dim() == 2, "Features tensor must be 2D");
+    TORCH_CHECK(positions.dim() == 1, "Positions tensor must be 1D");
+    TORCH_CHECK(results.dim() == 2, "Results tensor must be 2D"); // 추가
+
+    // Size consistency check
+    int pop_size = population.size(0);
+    TORCH_CHECK(features.size(0) == pop_size, "Features tensor pop_size mismatch");
+    TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
+    TORCH_CHECK(results.size(0) == pop_size, "Results tensor pop_size mismatch"); // 추가
+    TORCH_CHECK(population.size(2) == NODE_INFO_DIM, "Population tensor node_dim mismatch");
+    TORCH_CHECK(results.size(1) == 3, "Results tensor must have 3 columns"); // 추가
+}
+
+
+// --- C++ Wrapper for the CUDA Kernel ---
+// 이제 반환 타입이 void 이고, results_tensor를 인자로 받습니다.
+void predict_cuda(
+    torch::Tensor population_tensor,
+    torch::Tensor features_tensor,
+    torch::Tensor positions_tensor,
+    torch::Tensor results_tensor) { // results_tensor 추가
+
+    check_tensors(population_tensor, features_tensor, positions_tensor, results_tensor);
+
+    int pop_size = population_tensor.size(0);
+    int max_nodes = population_tensor.size(1);
+    int num_features = features_tensor.size(1);
+
+    // 출력 텐서 생성 로직 제거
+
+    // Launch the CUDA kernel
+    launch_predict_kernel(
+        population_tensor.data_ptr<float>(),
+        features_tensor.data_ptr<float>(),
+        positions_tensor.data_ptr<long>(),
+        results_tensor.data_ptr<float>(), // 전달받은 텐서의 포인터 사용
+        pop_size,
+        max_nodes,
+        num_features
+    );
+}
+
+// --- Pybind11 Module Definition ---
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("predict", &predict_cuda, "GATree Prediction on CUDA for a population (in-place)");
+}
+"""
+
+--------------------------------------
+
+첨부된 코드들은 위의 요구사항에 맞춰 작성된 코드들이다(cuda 코드는 첨부가 안되어 직접 복사하여 추가함). 이 코드들 중 실제로 crossover(subtree.py)가 잘 동작하는지 확인하고 싶어. 테스트할 수 있는 코드와 해당 기능을 테스트할 수 있는 예시를 만들어줘
