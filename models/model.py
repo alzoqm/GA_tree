@@ -252,6 +252,86 @@ class GATree:
             return idx
         return None
 
+    # GATree 클래스 내부에 아래 메소드들을 추가하세요.
+    # model.py의 NODE_TYPE_UNUSED, COL_NODE_TYPE, COL_PARENT_IDX 상수가 필요합니다.
+
+    def reorganize_nodes(self):
+        """
+        텐서 내의 노드들을 재조직하여 빈 공간(단편화)을 제거합니다.
+        모든 활성 노드를 텐서의 앞쪽으로 압축하고, 부모-자식 관계를 재설정하며,
+        next_idx를 업데이트합니다.
+        """
+        if not self.initialized:
+            print("Warning: Reorganizing an uninitialized tree.")
+            return
+
+        # 1. 활성 노드의 '구' 인덱스와 실제 데이터 추출
+        active_mask = self.data[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED
+        active_indices = active_mask.nonzero(as_tuple=True)[0]
+        
+        # 활성 노드가 없으면 아무것도 할 필요가 없음
+        if len(active_indices) == 0:
+            self.data.zero_()
+            self.next_idx = 0
+            return
+            
+        active_node_data = self.data[active_indices]
+        num_active_nodes = len(active_indices)
+
+        # 2. '구 인덱스' -> '신 인덱스' 매핑 테이블 생성
+        # 예: {3: 0, 5: 1, 8: 2, ...} (구 3번 인덱스는 신 0번으로 이동)
+        old_to_new_map = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(active_indices)}
+
+        # 3. 새로운 압축 텐서 준비
+        new_data = torch.zeros_like(self.data)
+        new_data[:num_active_nodes] = active_node_data
+
+        # 4. 부모-자식 관계 재연결 (가장 핵심적인 부분)
+        # 새로 압축된 텐서를 순회하며 '구' 부모 인덱스를 '신' 부모 인덱스로 교체
+        for i in range(num_active_nodes):
+            old_parent_idx = int(new_data[i, COL_PARENT_IDX].item())
+            
+            # 부모가 있는 노드만 처리 (-1은 루트의 부모이므로 제외)
+            if old_parent_idx != -1:
+                if old_parent_idx in old_to_new_map:
+                    new_parent_idx = old_to_new_map[old_parent_idx]
+                    new_data[i, COL_PARENT_IDX] = new_parent_idx
+                else:
+                    # 이 경우는 이론적으로 발생해서는 안 되지만, 방어 코드를 추가합니다.
+                    # (활성 노드의 부모가 UNUSED인 경우 -> 고아 노드)
+                    # 이 노드를 UNUSED 처리하여 오류 전파를 막습니다.
+                    new_data[i].zero_() 
+                    new_data[i, COL_NODE_TYPE] = NODE_TYPE_UNUSED
+
+
+        # 5. GATree 상태 최종 업데이트
+        self.data.copy_(new_data)
+        self.next_idx = num_active_nodes
+
+    def set_next_idx(self):
+        """
+        현재 텐서 상태를 기반으로 next_idx 값을 재설정합니다.
+        이 메소드는 노드들이 이미 정리되었거나, 로드 직후 next_idx를
+        정확하게 설정하고 싶을 때 사용합니다.
+        """
+        if not self.initialized:
+            # 초기화되지 않은 트리의 next_idx는 0이 맞습니다.
+            self.next_idx = 0
+            return
+            
+        # UNUSED가 아닌 모든 노드의 수를 계산하여 next_idx로 설정
+        num_active_nodes = (self.data[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item()
+        self.next_idx = num_active_nodes
+
+    def return_next_idx(self) -> int:
+        """
+        현재 트리의 next_idx 값을 반환합니다.
+
+        Returns:
+            int: 다음에 노드가 추가될 인덱스 또는 현재 활성 노드의 수.
+        """
+        return self.next_idx
+
 # GATree 클래스 내에 아래 메소드들을 추가합니다.
 
     def _evaluate_node(self, node_idx, feature_values):
@@ -541,7 +621,48 @@ class GATreePop:
             self.population.append(tree)
         self.initialized = True
         print("\nPopulation created successfully.")
-    
+        
+    # GATreePop 클래스 내부에 아래 메소드들을 추가하세요.
+
+    def reorganize_nodes(self):
+        """
+        집단 내의 모든 GATree 개체에 대해 노드 재조직을 수행합니다.
+        """
+        if not self.initialized:
+            print("Warning: Reorganizing an uninitialized population.")
+            return
+            
+        print(f"Reorganizing all {self.pop_size} trees in the population...")
+        for i, tree in enumerate(self.population):
+            tree.reorganize_nodes()
+        print("Population reorganization complete.")
+
+
+    def set_next_idx(self):
+        """
+        집단 내의 모든 GATree 개체에 대해 next_idx를 재설정합니다.
+        주로 집단 상태를 파일에서 로드한 후 호출하여 각 트리의 상태를
+        정확하게 복원할 때 유용합니다.
+        """
+        if not self.initialized:
+            print("Warning: Setting next_idx for an uninitialized population.")
+            return
+            
+        for tree in self.population:
+            tree.set_next_idx()
+
+    def return_next_idx(self) -> list[int]:
+        """
+        집단 내 모든 GATree 개체의 next_idx 값을 리스트로 반환합니다.
+
+        Returns:
+            list[int]: 각 트리의 next_idx 값이 담긴 리스트.
+        """
+        if not self.initialized:
+            return [0] * self.pop_size
+            
+        return [tree.return_next_idx() for tree in self.population]
+
     def save(self, filepath):
         """집단 전체의 상태를 파일로 저장합니다."""
         if not self.initialized:
