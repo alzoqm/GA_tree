@@ -1,4 +1,4 @@
-# evolution/Mutation/add_node.py (수정 완료)
+# evolution/Mutation/add_node.py (버그 수정 완료)
 import torch
 import random
 from .base import BaseMutation
@@ -8,16 +8,15 @@ from typing import Dict, Any
 # model.py에서 상수 임포트
 from models.model import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH,
-    NODE_TYPE_DECISION, NODE_TYPE_ACTION
+    NODE_TYPE_DECISION
 )
 
-
-# 추가된 부모의 최대 자식 수를 확인해야 할듯
 class AddNodeMutation(BaseMutation):
     """
     트리에 새로운 Decision 노드를 삽입하는 변이. (구조 변경)
     기존 부모-자식 연결(엣지) 사이에 새 노드를 추가합니다.
     한 번의 변이 호출 당, 1개에서 max_add_nodes개 사이의 노드를 무작위로 추가합니다.
+    (버그 수정: ROOT_BRANCH 노드가 후보로 선택되는 문제 해결)
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None, max_add_nodes: int = 5):
         """
@@ -60,17 +59,28 @@ class AddNodeMutation(BaseMutation):
 
                 # 3. 삽입 가능한 엣지(자식 노드) 찾기
                 # 트리가 계속 변하므로, 매번 후보를 새로 찾아야 함
-                active_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED
-                parent_indices = tree[:, COL_PARENT_IDX].long()
                 
+                # --- 후보 선정 로직 (버그 수정 적용) ---
+                # 조건 1: 노드가 활성 상태여야 함
+                active_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED
+                
+                # 조건 2: 노드의 부모가 ROOT_BRANCH가 아니어야 함 (삽입 시 구조 꼬임 방지)
+                parent_indices = tree[:, COL_PARENT_IDX].long()
                 valid_parent_mask = parent_indices != -1
-                parent_types = torch.zeros_like(tree[:, 0], dtype=torch.long)
+                parent_types = torch.zeros_like(tree[:, 0], dtype=torch.long, device=tree.device)
                 if valid_parent_mask.any():
                     parent_types[valid_parent_mask] = tree[parent_indices[valid_parent_mask], COL_NODE_TYPE].long()
-                
                 not_root_child_mask = parent_types != NODE_TYPE_ROOT_BRANCH
                 
-                candidate_indices = (active_mask & not_root_child_mask).nonzero(as_tuple=True)[0]
+                # [!!! BUG FIX !!!]
+                # 조건 3: 노드 자체가 ROOT_BRANCH 타입이 아니어야 함.
+                # 이 조건이 누락되면 ROOT_BRANCH 노드가 삽입 위치(child_idx) 후보가 되어
+                # 트리의 근본 구조를 파괴하는 버그가 발생함.
+                is_not_root_branch_node_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_ROOT_BRANCH
+                
+                # 위 세 가지 조건을 모두 만족하는 노드만 최종 후보가 됨
+                candidate_indices = (active_mask & not_root_child_mask & is_not_root_branch_node_mask).nonzero(as_tuple=True)[0]
+                # --- 후보 선정 로직 끝 ---
                 
                 if len(candidate_indices) == 0:
                     break # 더 이상 삽입할 유효한 위치가 없으면 종료
@@ -90,7 +100,7 @@ class AddNodeMutation(BaseMutation):
                 # 기존 자식의 서브트리 최대 깊이 = get_subtree_max_depth(tree, child_idx)
                 # 새 노드가 추가되면 기존 자식의 서브트리 깊이가 1 증가하므로,
                 # 최종적으로 예상되는 최대 깊이는 (부모 깊이 + 1) + (기존 자식의 상대적 깊이)
-                if get_subtree_max_depth(tree, child_idx) + 1 > self.max_depth:
+                if get_subtree_max_depth(tree, child_idx) + 1 >= self.max_depth:
                     continue # 깊이 초과. 다른 후보를 찾아 재시도
                 
                 # 5. 변이 수행 (노드 삽입)

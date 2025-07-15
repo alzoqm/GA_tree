@@ -1,26 +1,28 @@
-# evolution/Mutation/delete_subtree.py
 import torch
 import random
 from .base import BaseMutation
-from .utils import find_subtree_nodes, create_random_node
+from .utils import find_subtree_nodes
 from typing import Dict, Any
 
 # model.py에서 상수 임포트
 from models.model import (
     COL_NODE_TYPE, COL_PARENT_IDX, NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH,
-    NODE_TYPE_DECISION, NODE_TYPE_ACTION
+    NODE_TYPE_DECISION
 )
 
 class DeleteSubtreeMutation(BaseMutation):
     """
     트리에서 서브트리(가지) 전체를 삭제하는 변이. (구조 변경)
-    삭제 후 논리적 완결성을 보장하기 위한 후처리 로직을 포함합니다.
+    삭제 후 '고아 결정 노드'가 연쇄적으로 발생하는 것을 방지하는
+    '연쇄 가지치기(Cascading Pruning)' 후처리 로직을 포함합니다.
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None):
         super().__init__(prob)
         if config is None:
-            raise ValueError("DeleteSubtreeMutation requires a 'config' dictionary for post-processing.")
-        self.config = config
+            # config는 이제 직접적으로 사용되지 않지만, 다른 모듈과의 일관성을 위해 유지합니다.
+            self.config = {}
+        else:
+            self.config = config
 
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
         mutated_chromosomes = chromosomes.clone()
@@ -57,15 +59,37 @@ class DeleteSubtreeMutation(BaseMutation):
             tree[indices_tensor].zero_()
             tree[indices_tensor, COL_NODE_TYPE] = NODE_TYPE_UNUSED
 
-            # 3. 후처리: "고아 부모" 문제 해결
-            # 삭제된 서브트리의 부모가 Decision 노드이고, 이 삭제로 인해 자식이 모두 사라졌다면,
-            # 트리의 논리적 완결성을 위해 새로운 랜덤 Action 노드를 자식으로 추가해준다.
-            if parent_idx != -1:
-                parent_type = tree[parent_idx, COL_NODE_TYPE].item()
-                children_of_parent = (tree[:, COL_PARENT_IDX] == parent_idx).sum().item()
+            # 3. 후처리: 연쇄적 고아 노드 제거 (Cascading Pruning)
+            # 삭제된 서브트리의 부모로부터 시작하여 루트 방향으로 거슬러 올라가며,
+            # 자식이 없는 Decision 노드를 연쇄적으로 정리합니다.
+            current_node_idx = parent_idx
+            while current_node_idx != -1: # 루트의 부모(-1)에 도달할 때까지 반복
+                
+                # 3-1. 현재 노드가 유효한 검사 대상인지 확인 (Decision 타입이어야 함)
+                node_type = tree[current_node_idx, COL_NODE_TYPE].item()
+                if node_type != NODE_TYPE_DECISION:
+                    # 검사 대상이 Decision 노드가 아니면 연쇄 반응은 중단됨
+                    break
 
-                if parent_type == NODE_TYPE_DECISION and children_of_parent == 0:
-                    # 새로운 Action 노드를 추가하여 경로를 완성
-                    create_random_node(tree, parent_idx, NODE_TYPE_ACTION, self.config)
+                # 3-2. 현재 노드에 활성 자식이 있는지 확인
+                children_mask = tree[:, COL_PARENT_IDX] == current_node_idx
+                active_children_mask = children_mask & (tree[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED)
+                has_active_children = active_children_mask.any().item()
+
+                # 3-3. 고아 노드 판단 및 처리
+                if not has_active_children:
+                    # 자식이 없으므로 이 노드는 고아 노드임. 삭제 처리.
+                    # 다음 검사 대상을 위해 부모 인덱스를 미리 저장
+                    parent_of_current = int(tree[current_node_idx, COL_PARENT_IDX].item())
+                    
+                    # 현재 노드 삭제
+                    tree[current_node_idx].zero_()
+                    tree[current_node_idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
+                    
+                    # 다음 검사 대상을 이 노드의 부모로 설정하여 연쇄 반응을 이어감
+                    current_node_idx = parent_of_current
+                else:
+                    # 활성 자식이 존재하므로 고아 노드가 아님. 연쇄 반응 중단.
+                    break
 
         return mutated_chromosomes

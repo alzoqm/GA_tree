@@ -21,8 +21,8 @@ from evolution.Mutation.delete_subtree import DeleteSubtreeMutation
 
 # --- 테스트 환경 설정 ---
 POP_SIZE = 1  # 하나의 트리에 집중하여 변화를 명확히 보기 위함
-MAX_NODES = 128
-MAX_DEPTH = 7
+MAX_NODES = 32
+MAX_DEPTH = 5
 MAX_CHILDREN = 3
 TEST_RESULTS_DIR = "test_results"
 
@@ -117,10 +117,9 @@ if __name__ == '__main__':
     run_mutation_test("ReinitializeNodeMutation", ReinitializeNodeMutation(prob=1.0, config=config), initial_population)
 
     # 구조 변경 변이
-    run_mutation_test("DeleteNodeMutation", DeleteNodeMutation(prob=1.0, config=config), initial_population, if_save_model=True)
-    run_mutation_test("AddNodeMutation", AddNodeMutation(prob=1.0, config=config), initial_population)
-    # run_mutation_test("DeleteNodeMutation", DeleteNodeMutation(prob=1.0, config=config), initial_population, if_save_model=True)
-    run_mutation_test("AddSubtreeMutation", AddSubtreeMutation(prob=1.0, config=config, node_count_range=(3, 6)), initial_population)
+    run_mutation_test("DeleteNodeMutation", DeleteNodeMutation(prob=1.0, config=config), initial_population, if_save_model=False)
+    run_mutation_test("AddNodeMutation", AddNodeMutation(prob=1.0, config=config), initial_population, if_save_model=True)
+    run_mutation_test("AddSubtreeMutation", AddSubtreeMutation(prob=1.0, config=config, node_count_range=(3, 6)), initial_population, if_save_model=False)
     run_mutation_test("DeleteSubtreeMutation", DeleteSubtreeMutation(prob=1.0, config=config), initial_population)
     
     # 체인 변이 테스트
