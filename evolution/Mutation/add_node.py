@@ -15,6 +15,7 @@ class AddNodeMutation(BaseMutation):
     """
     트리에 새로운 Decision 노드를 삽입하는 변이. (구조 변경)
     (수정) 깊이가 얕은 '단순한 경로'에 우선적으로 노드를 추가합니다.
+    (수정) ROOT_BRANCH 바로 아래에도 노드를 삽입할 수 있도록 허용합니다.
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None, max_add_nodes: int = 5):
         super().__init__(prob)
@@ -39,21 +40,21 @@ class AddNodeMutation(BaseMutation):
             num_to_add = random.randint(1, self.max_add_nodes)
             nodes_added = 0
             
+            # 여러 번 시도하여 가능한 많이 추가
             for _ in range(num_to_add * 5): 
                 if nodes_added >= num_to_add:
                     break
 
                 # --- 1. 삽입 가능한 엣지(자식 노드) 찾기 ---
                 active_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED
-                parent_indices = tree[:, COL_PARENT_IDX].long()
-                valid_parent_mask = parent_indices != -1
-                parent_types = torch.zeros_like(tree[:, 0], dtype=torch.long, device=tree.device)
-                if valid_parent_mask.any():
-                    parent_types[valid_parent_mask] = tree[parent_indices[valid_parent_mask], COL_NODE_TYPE].long()
-                not_root_child_mask = parent_types != NODE_TYPE_ROOT_BRANCH
+                
+                # [변경] Root Branch 노드 자체는 자식이 될 수 없으므로 제외
                 is_not_root_branch_node_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_ROOT_BRANCH
                 
-                candidate_indices = (active_mask & not_root_child_mask & is_not_root_branch_node_mask).nonzero(as_tuple=True)[0]
+                # [변경] 부모가 있는 모든 노드가 대상이 됨 (기존 not_root_child_mask 제거)
+                has_parent_mask = tree[:, COL_PARENT_IDX] != -1
+                
+                candidate_indices = (active_mask & is_not_root_branch_node_mask & has_parent_mask).nonzero(as_tuple=True)[0]
                 
                 if len(candidate_indices) == 0:
                     break 
@@ -64,7 +65,6 @@ class AddNodeMutation(BaseMutation):
                 
                 for child_idx_tensor in candidate_indices:
                     child_idx = child_idx_tensor.item()
-                    parent_idx = int(tree[child_idx, COL_PARENT_IDX].item())
                     
                     # 유효성 검사: 최대 깊이 초과 여부
                     if get_subtree_max_depth(tree, child_idx) + 1 >= self.max_depth:
@@ -73,6 +73,7 @@ class AddNodeMutation(BaseMutation):
                     valid_candidates.append(child_idx)
                     
                     # 점수 계산: 깊이가 얕을수록 높은 점수 부여 (1 / (depth + 1))
+                    parent_idx = int(tree[child_idx, COL_PARENT_IDX].item())
                     parent_depth = tree[parent_idx, COL_DEPTH].item()
                     scores.append(1.0 / (parent_depth + 1))
 

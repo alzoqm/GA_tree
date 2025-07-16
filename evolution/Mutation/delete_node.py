@@ -1,4 +1,4 @@
-# evolution/Mutation/delete_node.py (수정됨)
+# evolution/Mutation/delete_node.py (수정 완료)
 import torch
 import random
 from .base import BaseMutation
@@ -15,6 +15,7 @@ class DeleteNodeMutation(BaseMutation):
     """
     중간 Decision 노드를 제거하고 자식들을 조부모에게 연결하는 변이.
     (수정) 자식 노드를 많이 가진 '복잡한 연결점'을 우선적으로 삭제합니다.
+    (수정) ROOT_BRANCH의 직계 자식도 삭제 가능하지만, ROOT_BRANCH가 고아가 되는 것은 방지합니다.
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None, max_delete_node: int = 5):
         super().__init__(prob)
@@ -38,18 +39,9 @@ class DeleteNodeMutation(BaseMutation):
             nodes_to_delete_count = random.randint(1, self.max_delete_node)
 
             for _ in range(nodes_to_delete_count):
-                # --- 1. 삭제 가능한 노드 후보 찾기 ---
+                # --- 1. [수정] 삭제 가능한 노드 후보 찾기 (ROOT_BRANCH 자식 포함) ---
                 decision_mask = tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION
-                
-                parent_indices = tree[:, COL_PARENT_IDX].long()
-                valid_parent_mask = parent_indices != -1
-                parent_types = torch.zeros_like(tree[:, 0], dtype=torch.long)
-                if valid_parent_mask.any():
-                    parent_types[valid_parent_mask] = tree[parent_indices[valid_parent_mask], COL_NODE_TYPE].long()
-                
-                not_root_child_mask = parent_types != NODE_TYPE_ROOT_BRANCH
-                
-                candidate_indices_all = (decision_mask & not_root_child_mask).nonzero(as_tuple=True)[0]
+                candidate_indices_all = decision_mask.nonzero(as_tuple=True)[0]
                 
                 if len(candidate_indices_all) == 0:
                     break
@@ -60,6 +52,20 @@ class DeleteNodeMutation(BaseMutation):
                 for node_idx_tensor in candidate_indices_all:
                     node_idx = node_idx_tensor.item()
                     parent_idx = int(tree[node_idx, COL_PARENT_IDX].item())
+
+                    # --- [신규] 가드레일: ROOT_BRANCH가 고아가 되는 것을 방지 ---
+                    # 삭제될 노드의 부모가 ROOT_BRANCH인 경우 특별 검사를 수행합니다.
+                    if tree[parent_idx, COL_NODE_TYPE].item() == NODE_TYPE_ROOT_BRANCH:
+                        # 삭제될 노드가 ROOT_BRANCH의 유일한 자식인지 확인
+                        is_only_child = (tree[:, COL_PARENT_IDX] == parent_idx).sum().item() == 1
+                        # 삭제될 노드 자신에게 자식이 없는지 확인
+                        has_no_children = not (tree[:, COL_PARENT_IDX] == node_idx).any()
+                        
+                        # 유일한 자식이면서 자신도 자식이 없다면, 이 변이는 ROOT_BRANCH를 고아로 만듭니다.
+                        # 이런 경우, 이 노드는 삭제 후보에서 제외합니다.
+                        if is_only_child and has_no_children:
+                            continue # 다음 후보로 넘어감
+                    # --- [신규] 가드레일 끝 ---
 
                     children_of_deleted = (tree[:, COL_PARENT_IDX] == node_idx).nonzero(as_tuple=True)[0]
                     children_of_parent = (tree[:, COL_PARENT_IDX] == parent_idx).nonzero(as_tuple=True)[0]
@@ -80,7 +86,7 @@ class DeleteNodeMutation(BaseMutation):
                     scores.append(float(len(children_of_deleted)))
 
                 if not valid_candidates:
-                    continue # 유효한 삭제 후보가 없으면 다음 시도로
+                    continue 
 
                 # --- 3. [신규] 우선순위 기반 삭제 노드 선택 ---
                 scores_tensor = torch.tensor(scores, device=tree.device, dtype=torch.float)
@@ -100,6 +106,5 @@ class DeleteNodeMutation(BaseMutation):
 
                 tree[node_to_delete_idx].zero_()
                 tree[node_to_delete_idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
-                # print(f"Chromosome {i}: Deleted node {node_to_delete_idx} (Priority: High)")
 
         return mutated_chromosomes

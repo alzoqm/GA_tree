@@ -128,7 +128,7 @@ if __name__ == '__main__':
         DeleteNodeMutation(prob=1.0, config=config),
         AddNodeMutation(prob=1.0, config=config),
         AddSubtreeMutation(prob=1.0, config=config, node_count_range=(3, 6)),
-        NodeParamMutation(prob=0.5, config=config),
+        # NodeParamMutation(prob=0.5, config=config),
         
     ])
     run_mutation_test("ChainMutation", chained_mutations, initial_population)

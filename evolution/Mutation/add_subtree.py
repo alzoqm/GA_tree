@@ -7,13 +7,15 @@ from typing import Dict, Any, Tuple
 
 # model.py에서 상수 임포트
 from models.model import (
-    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, NODE_TYPE_UNUSED, NODE_TYPE_DECISION, NODE_TYPE_ACTION
+    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, NODE_TYPE_UNUSED, NODE_TYPE_DECISION, 
+    NODE_TYPE_ACTION, NODE_TYPE_ROOT_BRANCH
 )
 
 class AddSubtreeMutation(BaseMutation):
     """
     트리에 새로운 랜덤 서브트리를 추가하는 변이.
     (수정) 깊이가 얕고 자식 추가 공간이 많은 '덜 발달한' 위치를 우선적으로 선택합니다.
+    (수정) ROOT_BRANCH 노드 아래에도 직접 추가할 수 있도록 허용합니다.
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None,
                  node_count_range: Tuple[int, int] = (2, 5)):
@@ -35,10 +37,11 @@ class AddSubtreeMutation(BaseMutation):
             tree = mutated_chromosomes[i]
             
             # --- 1. 유효한 부모 찾기 및 점수 계산 ---
-            decision_mask = tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION
+            # [변경] DECISION 노드 또는 ROOT_BRANCH 노드를 부모 후보로 선택
+            parent_type_mask = (tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION) | (tree[:, COL_NODE_TYPE] == NODE_TYPE_ROOT_BRANCH)
             depth_mask = tree[:, COL_DEPTH] < self.max_depth - 1
             
-            candidate_parents_indices = (decision_mask & depth_mask).nonzero(as_tuple=True)[0]
+            candidate_parents_indices = (parent_type_mask & depth_mask).nonzero(as_tuple=True)[0]
             
             valid_parents = []
             scores = []
@@ -48,7 +51,7 @@ class AddSubtreeMutation(BaseMutation):
                 num_children = len(children_indices)
                 
                 if num_children < self.max_children:
-                    # 자식으로 Action 노드를 가지는지 확인 (Action 노드를 가지면 Decision 추가 불가)
+                    # [신규] 자식으로 Action 노드를 가지는지 확인 (Action 노드를 가지면 Decision 추가 불가)
                     if num_children > 0 and (tree[children_indices, COL_NODE_TYPE] == NODE_TYPE_ACTION).any():
                         continue
                     
