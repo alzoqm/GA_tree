@@ -142,8 +142,12 @@ class GATree:
         self.initialized = True
         print(f"Tree created with {self.next_idx} nodes.")
 
+
     def _grow_branch(self, branch_root_id, budget):
-        """한 분기(LONG/HOLD/SHORT) 아래의 트리를 성장시키는 내부 함수"""
+        """
+        한 분기(LONG/HOLD/SHORT) 아래의 트리를 성장시키는 내부 함수.
+        (수정) 자식이 없는 Decision 노드가 남지 않도록 로직을 개선했습니다.
+        """
         if budget <= 0:
             # 예산이 없으면 최소한의 Action 노드 하나만 생성
             self._create_action_node(branch_root_id)
@@ -171,31 +175,46 @@ class GATree:
             
             # 3. 자식 노드 생성
             if create_action:
+                # Action 노드를 생성하는 경우
                 if nodes_to_create >= 1:
-                    self._create_action_node(parent_id)
-                    nodes_to_create -= 1
-                    # Action 노드를 자식으로 가졌으므로 이 부모는 닫힘
-                    open_list.remove(parent_id)
+                    new_node_id = self._create_action_node(parent_id)
+                    if new_node_id is not None:
+                        nodes_to_create -= 1
+                        # Action 노드를 자식으로 가졌으므로 이 부모는 닫힘
+                        open_list.remove(parent_id)
+                    else: # 노드 생성 실패 (공간 부족)
+                        open_list.remove(parent_id) # 더 이상 시도할 수 없으므로 닫음
+                else: # 예산 부족
+                    open_list.remove(parent_id) # 더 이상 시도할 수 없으므로 닫음
+
             else:
-                # Decision 노드 생성
+                # Decision 노드를 생성하는 경우
                 num_children = random.randint(1, self.max_children)
                 # 예산과 남은 노드 슬롯을 초과하지 않도록 조정
                 num_children = min(num_children, nodes_to_create, self.max_nodes - self.next_idx)
                 
+                # --- [핵심 수정 사항] ---
+                # 자식을 성공적으로 생성한 경우에만 부모를 open_list에서 제거합니다.
                 if num_children > 0:
+                    created_count = 0
                     for _ in range(num_children):
                         child_id = self._create_decision_node(parent_id)
-                        open_list.append(child_id) # 새로 생긴 Decision 노드는 열린 노드
-                    nodes_to_create -= num_children
-                    # 자식을 할당했으므로 이 부모는 닫힘
-                    open_list.remove(parent_id)
-                else: # 생성할 자식이 없으면 닫음
-                    open_list.remove(parent_id)
-
-        # 4. 후처리: 루프가 끝났는데도 열려있는 노드가 있다면, 강제로 Action 노드 할당
+                        if child_id is not None:
+                            open_list.append(child_id) # 새로 생긴 Decision 노드는 열린 노드
+                            created_count += 1
+                    
+                    if created_count > 0:
+                        nodes_to_create -= created_count
+                        # 자식을 성공적으로 할당했으므로 이 부모는 닫힘
+                        open_list.remove(parent_id)
         for parent_id in open_list:
-            if self.next_idx < self.max_nodes:
-                 self._create_action_node(parent_id)
+            # 해당 부모에게 자식이 없는지 한번 더 확인
+            children_mask = self.data[:, COL_PARENT_IDX] == parent_id
+            active_children_mask = children_mask & (self.data[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED)
+            
+            if not active_children_mask.any():
+                if self.next_idx < self.max_nodes:
+                     self._create_action_node(parent_id)
 
     def _create_action_node(self, parent_id):
         """Action 노드 하나를 생성하고 Tensor에 기록"""
