@@ -1,9 +1,9 @@
-# evolution/Mutation/delete_subtree.py (최종 수정 완료)
+# evolution/Mutation/delete_subtree.py (수정 완료)
 import torch
 import random
 from .base import BaseMutation
 from .utils import find_subtree_nodes
-from typing import Dict, Any, Set
+from typing import Dict, Any
 
 # model.py에서 상수 임포트
 from models.model import (
@@ -21,25 +21,6 @@ class DeleteSubtreeMutation(BaseMutation):
         super().__init__(prob)
         self.config = config if config is not None else {}
 
-    def _get_protected_nodes(self, tree: torch.Tensor) -> Set[int]:
-        """
-        ROOT_BRANCH의 유일한 자식 노드를 찾아 "보호된 노드" 집합으로 반환합니다.
-        이 노드들은 서브트리 삭제의 루트가 될 수 없습니다.
-        """
-        protected = set()
-        # 모든 ROOT_BRANCH 노드를 찾습니다.
-        root_branch_indices = (tree[:, COL_NODE_TYPE] == NODE_TYPE_ROOT_BRANCH).nonzero(as_tuple=True)[0]
-        
-        for rb_idx_tensor in root_branch_indices:
-            rb_idx = rb_idx_tensor.item()
-            # 각 ROOT_BRANCH의 자식들을 찾습니다.
-            children_indices = (tree[:, COL_PARENT_IDX] == rb_idx).nonzero(as_tuple=True)[0]
-            
-            # 자식이 단 하나뿐이라면, 그 자식 노드를 보호 대상으로 추가합니다.
-            if len(children_indices) == 1:
-                protected.add(children_indices[0].item())
-        return protected
-
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
         mutated_chromosomes = chromosomes.clone()
 
@@ -49,30 +30,15 @@ class DeleteSubtreeMutation(BaseMutation):
 
             tree = mutated_chromosomes[i]
 
-            # --- 1. [수정] 보호된 노드를 제외한 삭제 후보 찾기 ---
-            
-            # 1a. [신규] 보호해야 할 노드 목록을 가져옵니다.
-            protected_nodes = self._get_protected_nodes(tree)
-
-            # 1b. 삭제 가능한 모든 잠재적 후보를 찾습니다 (ROOT_BRANCH 제외).
+            # --- 1. 삭제 가능한 서브트리의 루트 노드 후보 찾기 ---
             active_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED
             not_root_branch_mask = tree[:, COL_NODE_TYPE] != NODE_TYPE_ROOT_BRANCH
-            potential_candidates = (active_mask & not_root_branch_mask).nonzero(as_tuple=True)[0]
+            candidate_indices = (active_mask & not_root_branch_mask).nonzero(as_tuple=True)[0]
             
-            if len(potential_candidates) == 0:
+            if len(candidate_indices) == 0:
                 continue
 
-            # 1c. [신규] 잠재적 후보 중에서 보호된 노드를 필터링하여 최종 후보 목록을 만듭니다.
-            final_candidates = [
-                idx.item() for idx in potential_candidates if idx.item() not in protected_nodes
-            ]
-
-            if not final_candidates:
-                continue
-            
-            candidate_indices = torch.tensor(final_candidates, dtype=torch.long, device=tree.device)
-
-            # --- 2. 우선순위 기반 서브트리 선택 ---
+            # --- 2. [신규] 우선순위 기반 서브트리 선택 ---
             scores = torch.tensor([
                 len(find_subtree_nodes(tree, idx.item())) for idx in candidate_indices
             ], device=tree.device, dtype=torch.float)
@@ -82,11 +48,20 @@ class DeleteSubtreeMutation(BaseMutation):
                 
             winner_position = torch.multinomial(scores, num_samples=1).item()
             subtree_root_idx = candidate_indices[winner_position].item()
+            # --- 우선순위 선택 로직 끝 ---
             
-            # --- 3. 서브트리 삭제 ---
+            # --- [신규] 가드레일: ROOT_BRANCH가 고아가 되는 것을 방지 ---
             parent_idx = int(tree[subtree_root_idx, COL_PARENT_IDX].item())
+            if parent_idx != -1 and tree[parent_idx, COL_NODE_TYPE].item() == NODE_TYPE_ROOT_BRANCH:
+                # 만약 삭제하려는 서브트리의 부모가 ROOT_BRANCH이고, 
+                # 그 ROOT_BRANCH의 자식이 단 하나뿐이라면(즉, 삭제될 서브트리뿐이라면)
+                # 이 변이는 해당 분기 자체를 없애므로 건너뜁니다.
+                if (tree[:, COL_PARENT_IDX] == parent_idx).sum().item() == 1:
+                    continue # 현재 개체에 대한 변이를 건너뛰고 다음 개체로 넘어감
+            # --- [신규] 가드레일 끝 ---
+
+            # 3. 서브트리 삭제 (기존 로직과 동일)
             nodes_to_delete = find_subtree_nodes(tree, subtree_root_idx)
-            
             if not nodes_to_delete:
                 continue
 
@@ -94,7 +69,7 @@ class DeleteSubtreeMutation(BaseMutation):
             tree[indices_tensor].zero_()
             tree[indices_tensor, COL_NODE_TYPE] = NODE_TYPE_UNUSED
 
-            # --- 4. 후처리: 연쇄적 고아 노드 제거 ---
+            # 4. 후처리: 연쇄적 고아 노드 제거 (기존 로직과 동일)
             current_node_idx = parent_idx
             while current_node_idx != -1: 
                 node_type = tree[current_node_idx, COL_NODE_TYPE].item()
