@@ -26,6 +26,8 @@ MAX_DEPTH = 5
 MAX_CHILDREN = 3
 TEST_RESULTS_DIR = "test_results"
 
+# FEATURE_PAIR = []
+
 # --- 테스트에 필요한 설정(config) 딕셔너리 ---
 # 변이 연산자들이 트리의 제약조건을 알아야 하므로 config가 필요합니다.
 config = {
