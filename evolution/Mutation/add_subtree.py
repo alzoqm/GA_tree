@@ -1,4 +1,4 @@
-# evolution/Mutation/add_subtree.py (최종 수정본)
+# evolution/Mutation/add_subtree.py (수정됨)
 import torch
 import random
 from .base import BaseMutation
@@ -12,8 +12,8 @@ from models.model import (
 
 class AddSubtreeMutation(BaseMutation):
     """
-    트리에 새로운 랜덤 서브트리(가지)를 추가하는 변이.
-    (최종 수정: '자식 타입 혼재' 및 '미종결 리프 노드' 문제 완벽 해결)
+    트리에 새로운 랜덤 서브트리를 추가하는 변이.
+    (수정) 깊이가 얕고 자식 추가 공간이 많은 '덜 발달한' 위치를 우선적으로 선택합니다.
     """
     def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None,
                  node_count_range: Tuple[int, int] = (2, 5)):
@@ -34,38 +34,48 @@ class AddSubtreeMutation(BaseMutation):
                 
             tree = mutated_chromosomes[i]
             
-            # --- 1. 유효한 부모 찾기 ---
+            # --- 1. 유효한 부모 찾기 및 점수 계산 ---
             decision_mask = tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION
             depth_mask = tree[:, COL_DEPTH] < self.max_depth - 1
             
-            candidate_parents = (decision_mask & depth_mask).nonzero(as_tuple=True)[0]
+            candidate_parents_indices = (decision_mask & depth_mask).nonzero(as_tuple=True)[0]
             
             valid_parents = []
-            for p_idx_tensor in candidate_parents:
+            scores = []
+            for p_idx_tensor in candidate_parents_indices:
                 p_idx = p_idx_tensor.item()
                 children_indices = (tree[:, COL_PARENT_IDX] == p_idx).nonzero(as_tuple=True)[0]
+                num_children = len(children_indices)
                 
-                if len(children_indices) < self.max_children:
-                    has_action_child = False
-                    if len(children_indices) > 0:
-                        if (tree[children_indices, COL_NODE_TYPE] == NODE_TYPE_ACTION).any():
-                            has_action_child = True
-                    if not has_action_child:
-                        valid_parents.append(p_idx)
+                if num_children < self.max_children:
+                    # 자식으로 Action 노드를 가지는지 확인 (Action 노드를 가지면 Decision 추가 불가)
+                    if num_children > 0 and (tree[children_indices, COL_NODE_TYPE] == NODE_TYPE_ACTION).any():
+                        continue
+                    
+                    valid_parents.append(p_idx)
+                    # [신규] 점수 계산 로직
+                    # 점수 = (남은 자식 슬롯 수) / (깊이 + 1)
+                    # -> 자식 추가 공간이 많고, 깊이가 얕을수록 높은 점수를 받음
+                    parent_depth = tree[p_idx, COL_DEPTH].item()
+                    score = (self.max_children - num_children) / (parent_depth + 1.0)
+                    scores.append(score)
 
             if not valid_parents:
                 continue
 
-            parent_idx = random.choice(valid_parents)
+            # --- 2. [신규] 우선순위 기반 부모 선택 ---
+            scores_tensor = torch.tensor(scores, device=tree.device, dtype=torch.float)
+            scores_tensor += 1e-6 # 0점 방지
+            winner_position = torch.multinomial(scores_tensor, num_samples=1).item()
+            parent_idx = valid_parents[winner_position]
             
-            # --- 2. 예산 및 슬롯 확인 ---
+            # --- 3. 예산 및 슬롯 확인 ---
             budget = random.randint(*self.node_count_range)
             empty_slots = find_empty_slots(tree, budget)
             if len(empty_slots) < budget:
                 continue
 
-            # --- 3. 서브트리 성장 로직 (2단계 접근) ---
-            # 1단계: 주 성장 루프
+            # --- 4. 서브트리 성장 로직 (기존과 동일) ---
             open_list = [parent_idx]
             nodes_created = 0
             
@@ -75,32 +85,23 @@ class AddSubtreeMutation(BaseMutation):
 
                 parent_depth = int(tree[current_parent_idx, COL_DEPTH].item())
                 
-                # 3-1. 자식 타입 '전략' 결정
                 force_action = (parent_depth + 1 >= self.max_depth - 1)
                 add_action_node = force_action or (random.random() < 0.5)
 
-                # 3-2. (★★★ 최종 수정: 자격 검사 ★★★)
-                # 전략을 실행하기 전, 부모의 현재 상태와 충돌하지 않는지 확인
                 children_of_current_parent_mask = tree[:, COL_PARENT_IDX] == current_parent_idx
                 num_existing_children = children_of_current_parent_mask.sum().item()
 
                 if add_action_node:
-                    # 'ACTION 추가' 전략의 자격 검사: 부모에게 자식이 없어야만 가능
                     if num_existing_children > 0:
-                        # 자격 미달. 이 부모에 대한 시도를 포기하고 다음 루프로 넘어감.
-                        # 이 부모는 open_list에 다시 추가하지 않으므로 자연스럽게 배제됨.
                         continue
                 
-                # 'DECISION 추가' 전략은 valid_parents 선정 시 이미 자격이 검증됨.
-
-                # 3-3. 자격 검사를 통과한 후, 전략 실행
                 if add_action_node:
                     new_node_idx = create_random_node(tree, current_parent_idx, NODE_TYPE_ACTION, self.config)
                     if new_node_idx != -1:
                         nodes_created += 1
                 else:
                     max_can_add = self.max_children - num_existing_children
-                    num_children_to_add = random.randint(1, max(1, max_can_add)) # max_can_add가 0이 될 수 있으므로 max(1,...)
+                    num_children_to_add = random.randint(1, max(1, max_can_add))
                     num_children_to_add = min(num_children_to_add, budget - nodes_created)
                     
                     for _ in range(num_children_to_add):
@@ -112,7 +113,6 @@ class AddSubtreeMutation(BaseMutation):
                             nodes_created = budget
                             break
             
-            # 2단계: 필수 후처리 (미종결 리프 노드 방지)
             for dangling_parent_idx in open_list:
                 children_mask = tree[:, COL_PARENT_IDX] == dangling_parent_idx
                 if not children_mask.any():
