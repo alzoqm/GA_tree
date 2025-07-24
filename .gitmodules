@@ -1,3 +1,6 @@
 [submodule "data/candlestick-patterns"]
 	path = data/candlestick-patterns
 	url = https://github.com/SpiralDevelopment/candlestick-patterns.git
+[submodule "data/candlestick_patterns"]
+	path = data/candlestick_patterns
+	url = https://github.com/alzoqm/candlestick-patterns.git
