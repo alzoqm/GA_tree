@@ -1,14 +1,12 @@
-# evolution/Mutation/node_param.py
 import torch
 import random
 from .base import BaseMutation
 from typing import Dict, Any
 
-# model.py에서 상수 임포트
 from models.model import (
     COL_NODE_TYPE, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
-    NODE_TYPE_DECISION, NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM,
-    OP_GT, OP_LT, OP_EQ, POS_TYPE_LONG, POS_TYPE_SHORT
+    NODE_TYPE_DECISION, NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_BOOL,
+    OP_GTE, OP_LTE, POS_TYPE_LONG, POS_TYPE_SHORT
 )
 
 class NodeParamMutation(BaseMutation):
@@ -31,61 +29,59 @@ class NodeParamMutation(BaseMutation):
         self.config = config
         self.noise_ratio = noise_ratio
         self.leverage_change = leverage_change
-        self.operators = [OP_GT, OP_LT, OP_EQ]
+        self.operators = [OP_GTE, OP_LTE]
 
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
         """
-        벡터화된 연산을 사용하여 효율적으로 파라미터 변이를 적용합니다.
+        [수정] 벡터화된 연산을 사용하여 효율적으로 파라미터 변이를 적용합니다.
         """
         mutated_chromosomes = chromosomes.clone()
         pop_size, max_nodes, _ = chromosomes.shape
         
-        # 1. 변이 대상 노드 마스크 생성
         types = chromosomes[:, :, COL_NODE_TYPE]
-        # 변이 가능한 노드 타입: Decision 또는 Action
         mutable_type_mask = (types == NODE_TYPE_DECISION) | (types == NODE_TYPE_ACTION)
-        # 각 노드에 대한 확률적 마스크
         prob_mask = torch.rand(pop_size, max_nodes, device=chromosomes.device) < self.prob
-        # 최종 변이 대상 마스크
         mutation_mask = mutable_type_mask & prob_mask
         
-        # 변이 대상이 없으면 조기 종료
         if not mutation_mask.any():
             return mutated_chromosomes
 
-        # 2. 변이 대상 인덱스 추출
-        mutation_indices = mutation_mask.nonzero() # shape: (N, 2)
+        mutation_indices = mutation_mask.nonzero()
         
-        # 3. 선택적 순회를 통한 변이 적용
         for chrom_idx, node_idx in mutation_indices:
             node = mutated_chromosomes[chrom_idx, node_idx]
             node_type = int(node[COL_NODE_TYPE].item())
 
             if node_type == NODE_TYPE_ACTION:
                 param_to_mutate = random.randint(1, 3)
-                if param_to_mutate == 1: # 포지션 토글
+                if param_to_mutate == 1:
                     node[COL_PARAM_1] = POS_TYPE_SHORT if node[COL_PARAM_1] == POS_TYPE_LONG else POS_TYPE_LONG
-                elif param_to_mutate == 2: # 비중
+                elif param_to_mutate == 2:
                     noise = (torch.randn(1) * 0.1).item()
                     node[COL_PARAM_2] = torch.clamp(node[COL_PARAM_2] + noise, 0.0, 1.0)
-                else: # 레버리지
+                else:
                     change = random.randint(-self.leverage_change, self.leverage_change)
                     node[COL_PARAM_3] = torch.clamp(node[COL_PARAM_3] + change, 1, 100)
 
             elif node_type == NODE_TYPE_DECISION:
-                param_to_mutate = random.randint(1, 2)
-                if param_to_mutate == 1: # 연산자 변경
-                    current_op = int(node[COL_PARAM_2].item())
-                    new_op = random.choice([op for op in self.operators if op != current_op])
-                    node[COL_PARAM_2] = new_op
-                else: # 값/피처 변경
-                    comp_type = int(node[COL_PARAM_3].item())
-                    if comp_type == COMP_TYPE_FEAT_NUM:
-                        # 숫자 값 변경
-                        feat_idx = int(node[COL_PARAM_1].item())
-                        feat_name = self.config['all_features'][feat_idx]
-                        min_val, max_val = self.config['feature_num'][feat_name]
-                        noise = (random.uniform(-1, 1) * self.noise_ratio * (max_val - min_val))
-                        node[COL_PARAM_4] = torch.clamp(node[COL_PARAM_4] + noise, min_val, max_val)
+                comp_type = int(node[COL_PARAM_3].item())
+                
+                if comp_type == COMP_TYPE_FEAT_BOOL:
+                    node[COL_PARAM_4] = 1.0 - node[COL_PARAM_4]
+                else:
+                    param_to_mutate = random.randint(1, 2)
+                    if param_to_mutate == 1:
+                        current_op = int(node[COL_PARAM_2].item())
+                        current_op_idx = self.operators.index(current_op)
+                        new_op = self.operators[1 - current_op_idx]
+                        node[COL_PARAM_2] = new_op
+                    else:
+                        if comp_type == COMP_TYPE_FEAT_NUM:
+                            feat_idx = int(node[COL_PARAM_1].item())
+                            feat_name = self.config['all_features'][feat_idx]
+                            min_val, max_val = self.config['feature_num'][feat_name]
+                            noise_range = (max_val - min_val) * self.noise_ratio
+                            noise = random.uniform(-noise_range, noise_range)
+                            node[COL_PARAM_4] = torch.clamp(node[COL_PARAM_4] + noise, min_val, max_val)
         
         return mutated_chromosomes

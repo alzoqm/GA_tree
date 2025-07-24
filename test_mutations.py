@@ -5,7 +5,8 @@ import shutil
 # --- 제공해주신 코드의 클래스들을 임포트합니다 ---
 
 # 모델 관련
-from models.model import (GATree, GATreePop, FEATURE_NUM, FEATURE_PAIR, ALL_FEATURES,
+# [수정] FEATURE_BOOL 임포트 추가
+from models.model import (GATree, GATreePop, FEATURE_NUM, FEATURE_PAIR, FEATURE_BOOL, 
                    COL_NODE_TYPE, NODE_TYPE_UNUSED)
 
 # 변이 연산자 관련
@@ -26,9 +27,10 @@ MAX_DEPTH = 5
 MAX_CHILDREN = 3
 TEST_RESULTS_DIR = "test_results"
 
-# FEATURE_PAIR = []
+# [수정] 테스트에 사용될 전체 피처 목록 업데이트
+ALL_FEATURES_TEST = list(FEATURE_NUM.keys()) + FEATURE_PAIR + FEATURE_BOOL
 
-# --- 테스트에 필요한 설정(config) 딕셔너리 ---
+# --- [수정] 테스트에 필요한 설정(config) 딕셔너리 ---
 # 변이 연산자들이 트리의 제약조건을 알아야 하므로 config가 필요합니다.
 config = {
     'max_nodes': MAX_NODES,
@@ -36,7 +38,8 @@ config = {
     'max_children': MAX_CHILDREN,
     'feature_num': FEATURE_NUM,
     'feature_pair': FEATURE_PAIR,
-    'all_features': ALL_FEATURES,
+    'feature_bool': FEATURE_BOOL,     # feature_bool 추가
+    'all_features': ALL_FEATURES_TEST, # 업데이트된 전체 피처 목록 사용
 }
 
 def run_mutation_test(name: str, mutation_op: BaseMutation, population: GATreePop, if_save_model=False):
@@ -53,8 +56,8 @@ def run_mutation_test(name: str, mutation_op: BaseMutation, population: GATreePo
     # 1. 테스트 전 상태 저장 (깊은 복사)
     original_tensor = population.population_tensor.clone()
     
-    # 원본 GATree 객체 생성 (시각화용)
-    tree_before = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR,
+    # [수정] 원본 GATree 객체 생성 (시각화용) - feature_bool 인자 추가
+    tree_before = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR, FEATURE_BOOL,
                          data_tensor=original_tensor[0])
 
     # 로드된 텐서로부터 next_idx 복원
@@ -71,12 +74,12 @@ def run_mutation_test(name: str, mutation_op: BaseMutation, population: GATreePo
     mutated_tensor = mutation_op(original_tensor)
 
     # 3. 변이 후 결과 확인
-    # 변이 후 GATree 객체 생성 (시각화용)
-    tree_after = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR,
+    # [수정] 변이 후 GATree 객체 생성 (시각화용) - feature_bool 인자 추가
+    tree_after = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR, FEATURE_BOOL,
                         data_tensor=mutated_tensor[0])
     tree_after.initialized = True
-    tree_after.reorganize_nodes()
-    tree_after.set_next_idx()
+    tree_after.reorganize_nodes() # 변이로 인해 생긴 빈 공간 정리
+    # tree_after.set_next_idx() # reorganize_nodes가 next_idx를 설정하므로 중복 호출 불필요
     
 
     print(f"Nodes after mutation:  {tree_after.next_idx}")
@@ -102,7 +105,8 @@ if __name__ == '__main__':
 
     # 1. 테스트를 위한 초기 집단 생성
     print("===== [Setup] Creating initial GATree population... =====")
-    initial_population = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    # [수정] GATreePop 생성자에 feature_bool 인자 추가
+    initial_population = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR, FEATURE_BOOL)
     initial_population.make_population()
     print("Population created successfully.")
     
@@ -119,18 +123,18 @@ if __name__ == '__main__':
     run_mutation_test("ReinitializeNodeMutation", ReinitializeNodeMutation(prob=1.0, config=config), initial_population)
 
     # 구조 변경 변이
-    run_mutation_test("DeleteNodeMutation", DeleteNodeMutation(prob=1.0, config=config), initial_population, if_save_model=False)
-    run_mutation_test("AddNodeMutation", AddNodeMutation(prob=1.0, config=config), initial_population, if_save_model=True)
-    run_mutation_test("AddSubtreeMutation", AddSubtreeMutation(prob=1.0, config=config, node_count_range=(3, 6)), initial_population, if_save_model=False)
+    run_mutation_test("DeleteNodeMutation", DeleteNodeMutation(prob=1.0, config=config, max_delete_node=1), initial_population, if_save_model=False)
+    run_mutation_test("AddNodeMutation", AddNodeMutation(prob=1.0, config=config, max_add_nodes=1), initial_population, if_save_model=True)
+    run_mutation_test("AddSubtreeMutation", AddSubtreeMutation(prob=1.0, config=config, node_count_range=(2, 4)), initial_population, if_save_model=False)
     run_mutation_test("DeleteSubtreeMutation", DeleteSubtreeMutation(prob=1.0, config=config), initial_population)
     
     # 체인 변이 테스트
     chained_mutations = ChainMutation(mutations=[
         DeleteSubtreeMutation(prob=1.0, config=config),
-        DeleteNodeMutation(prob=1.0, config=config),
-        AddNodeMutation(prob=1.0, config=config),
-        AddSubtreeMutation(prob=1.0, config=config, node_count_range=(3, 6)),
-        # NodeParamMutation(prob=0.5, config=config),
+        DeleteNodeMutation(prob=1.0, config=config, max_delete_node=1),
+        AddNodeMutation(prob=1.0, config=config, max_add_nodes=1),
+        AddSubtreeMutation(prob=1.0, config=config, node_count_range=(2, 4)),
+        NodeParamMutation(prob=1.0, config=config),
         
     ])
     run_mutation_test("ChainMutation", chained_mutations, initial_population)

@@ -1,14 +1,12 @@
-# evolution/Mutation/utils.py
 import torch
 import random
 from typing import List, Dict, Any
 
-# model.py에서 상수 임포트
 from models.model import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1, COL_PARAM_2,
     COL_PARAM_3, COL_PARAM_4, NODE_TYPE_UNUSED, NODE_TYPE_DECISION,
-    NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT, OP_GT, OP_LT,
-    OP_EQ, POS_TYPE_LONG, POS_TYPE_SHORT
+    NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT, COMP_TYPE_FEAT_BOOL,
+    OP_GTE, OP_LTE, POS_TYPE_LONG, POS_TYPE_SHORT
 )
 
 def find_subtree_nodes(tree_tensor: torch.Tensor, root_idx: int) -> List[int]:
@@ -69,16 +67,23 @@ def find_empty_slots(tree_tensor: torch.Tensor, count: int = 1) -> List[int]:
 def _create_random_action_params(tree_tensor: torch.Tensor, node_idx: int):
     """주어진 Action 노드에 랜덤 파라미터를 채웁니다."""
     tree_tensor[node_idx, COL_PARAM_1] = random.choice([POS_TYPE_LONG, POS_TYPE_SHORT])
-    tree_tensor[node_idx, COL_PARAM_2] = random.random()  # 진입 비중 (0~1)
-    tree_tensor[node_idx, COL_PARAM_3] = random.randint(1, 100)  # 레버리지 (1~100)
+    tree_tensor[node_idx, COL_PARAM_2] = random.random()
+    tree_tensor[node_idx, COL_PARAM_3] = random.randint(1, 100)
 
 def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, config: Dict[str, Any]):
-    """주어진 Decision 노드에 랜덤 파라미터를 채웁니다."""
-    comp_type = random.choice([COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT])
+    """[수정] 주어진 Decision 노드에 랜덤 파라미터를 채웁니다."""
+    comp_type_choices = [COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT]
+    if config.get('feature_bool'):
+        comp_type_choices.append(COMP_TYPE_FEAT_BOOL)
+
+    comp_type = random.choice(comp_type_choices)
     tree_tensor[node_idx, COL_PARAM_3] = comp_type
-    tree_tensor[node_idx, COL_PARAM_2] = random.choice([OP_GT, OP_LT, OP_EQ]) # Operator
+
+    if comp_type == COMP_TYPE_FEAT_NUM or comp_type == COMP_TYPE_FEAT_FEAT:
+        tree_tensor[node_idx, COL_PARAM_2] = random.choice([OP_GTE, OP_LTE])
 
     all_features = config['all_features']
+
     if comp_type == COMP_TYPE_FEAT_NUM:
         feature_num = config['feature_num']
         feat_name = random.choice(list(feature_num.keys()))
@@ -88,7 +93,8 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
         
         tree_tensor[node_idx, COL_PARAM_1] = feat_idx
         tree_tensor[node_idx, COL_PARAM_4] = comp_val
-    else: # COMP_TYPE_FEAT_FEAT
+        
+    elif comp_type == COMP_TYPE_FEAT_FEAT:
         feature_pair = config['feature_pair']
         feat1_name, feat2_name = random.sample(feature_pair, 2)
         feat1_idx = all_features.index(feat1_name)
@@ -97,10 +103,18 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
         tree_tensor[node_idx, COL_PARAM_1] = feat1_idx
         tree_tensor[node_idx, COL_PARAM_4] = feat2_idx
 
+    elif comp_type == COMP_TYPE_FEAT_BOOL:
+        feature_bool = config['feature_bool']
+        feat_name = random.choice(feature_bool)
+        feat_idx = all_features.index(feat_name)
+        comp_val = random.choice([0.0, 1.0])
+
+        tree_tensor[node_idx, COL_PARAM_1] = feat_idx
+        tree_tensor[node_idx, COL_PARAM_4] = comp_val
+
 def create_random_node(tree_tensor: torch.Tensor, parent_idx: int, node_type: int, config: Dict[str, Any]) -> int:
     """
     지정된 부모 아래에 특정 타입의 랜덤 노드를 생성하고 새 노드의 인덱스를 반환합니다.
-    실패 시 -1을 반환합니다.
     """
     empty_slots = find_empty_slots(tree_tensor, 1)
     if not empty_slots:
@@ -109,12 +123,10 @@ def create_random_node(tree_tensor: torch.Tensor, parent_idx: int, node_type: in
     
     parent_depth = tree_tensor[parent_idx, COL_DEPTH].item()
     
-    # 기본 정보 설정
     tree_tensor[new_node_idx, COL_NODE_TYPE] = node_type
     tree_tensor[new_node_idx, COL_PARENT_IDX] = parent_idx
     tree_tensor[new_node_idx, COL_DEPTH] = parent_depth + 1
     
-    # 타입별 파라미터 설정
     if node_type == NODE_TYPE_ACTION:
         _create_random_action_params(tree_tensor, new_node_idx)
     elif node_type == NODE_TYPE_DECISION:
