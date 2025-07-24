@@ -1,0 +1,3 @@
+[submodule "data/candlestick-patterns"]
+	path = data/candlestick-patterns
+	url = https://github.com/SpiralDevelopment/candlestick-patterns.git
