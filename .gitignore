@@ -3,3 +3,8 @@
 *.ipynb
 .DS_store
 *.txt
+*.env
+.env
+*.npy
+*.npz
+*.pth
