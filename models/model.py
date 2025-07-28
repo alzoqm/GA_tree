@@ -36,12 +36,12 @@ ROOT_BRANCH_LONG = 0
 ROOT_BRANCH_HOLD = 1
 ROOT_BRANCH_SHORT = 2
 
-# --- [수정] Decision Node: Comparison Types ---
+# Decision Node: Comparison Types
 COMP_TYPE_FEAT_NUM = 0  # Feature vs Number
 COMP_TYPE_FEAT_FEAT = 1 # Feature vs Feature
 COMP_TYPE_FEAT_BOOL = 2 # Feature vs Boolean
 
-# --- [수정] Decision Node: Operators ---
+# Decision Node: Operators
 OP_GTE = 0  # >= (Greater Than or Equal)
 OP_LTE = 1  # <= (Less Than or Equal)
 
@@ -51,11 +51,29 @@ POS_TYPE_SHORT = 1
 
 # --- [수정] 예시 Feature 및 설정 (실제 사용 시 변경) ---
 FEATURE_NUM = {'RSI': (0, 100), 'ATR': (0, 1), 'WR': (-100, 0), 'STOCH_K':(0, 100)}
-FEATURE_PAIR = ['SMA_5', 'SMA_20', 'EMA_10', 'EMA_30', 'BB_upper', 'BB_lower']
-FEATURE_BOOL = ['IsBullishMarket', 'IsHighVolatility'] # 새로운 Boolean 피처
-ALL_FEATURES = list(FEATURE_NUM.keys()) + FEATURE_PAIR + FEATURE_BOOL
+FEATURE_BOOL = ['IsBullishMarket', 'IsHighVolatility']
 
-# --- [수정] Helper 딕셔너리 (시각화 및 디버깅용) ---
+# [수정] 기존 feature_pair를 feature_comparison_map으로 대체
+FEATURE_COMPARISON_MAP = {
+    'SMA_5': ['SMA_20', 'EMA_10', 'EMA_30'],
+    'SMA_20': ['SMA_5', 'EMA_10', 'EMA_30'],
+    'EMA_10': ['SMA_5', 'SMA_20', 'BB_upper', 'BB_lower'],
+    'EMA_30': ['SMA_5', 'SMA_20'],
+    'BB_upper': ['EMA_10', 'BB_lower'],
+    'BB_lower': ['EMA_10', 'BB_upper']
+}
+
+# [수정] ALL_FEATURES 생성 로직 변경
+def get_all_features(feature_num, feature_map, feature_bool):
+    comp_features = set(feature_map.keys())
+    for v_list in feature_map.values():
+        comp_features.update(v_list)
+    return list(feature_num.keys()) + sorted(list(comp_features)) + feature_bool
+
+ALL_FEATURES = get_all_features(FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
+
+
+# --- Helper 딕셔너리 (시각화 및 디버깅용) ---
 NODE_TYPE_MAP = {
     NODE_TYPE_UNUSED: "UNUSED",
     NODE_TYPE_ROOT_BRANCH: "ROOT_BRANCH",
@@ -63,7 +81,7 @@ NODE_TYPE_MAP = {
     NODE_TYPE_ACTION: "ACTION",
 }
 ROOT_BRANCH_MAP = {ROOT_BRANCH_LONG: "IF_POS_IS_LONG", ROOT_BRANCH_HOLD: "IF_POS_IS_HOLD", ROOT_BRANCH_SHORT: "IF_POS_IS_SHORT"}
-OPERATOR_MAP = {OP_GTE: ">=", OP_LTE: "<="} # 수정된 연산자 맵
+OPERATOR_MAP = {OP_GTE: ">=", OP_LTE: "<="}
 POS_TYPE_MAP = {POS_TYPE_LONG: "LONG", POS_TYPE_SHORT: "SHORT"}
 
 class GATree:
@@ -71,7 +89,7 @@ class GATree:
     하나의 유전 알고리즘 트리를 나타내는 클래스.
     이 클래스의 데이터는 C++/CUDA에서 직접 처리할 수 있는 torch.Tensor 형식으로 저장됩니다.
     """
-    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_pair, feature_bool, data_tensor=None):
+    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, data_tensor=None): # [수정]
         """
         GATree 초기화.
 
@@ -80,8 +98,8 @@ class GATree:
             max_depth (int): 트리의 최대 깊이.
             max_children (int): Decision 노드가 가질 수 있는 최대 자식 노드 수.
             feature_num (dict): 숫자와 비교할 피쳐와 (min, max) 범위.
-            feature_pair (list): 피쳐끼리 비교할 피쳐 리스트.
-            feature_bool (list): [신규] Boolean과 비교할 피쳐 리스트.
+            feature_comparison_map (dict): [신규] 피처 간 비교 규칙을 정의한 맵.
+            feature_bool (list): Boolean과 비교할 피쳐 리스트.
             data_tensor (torch.Tensor, optional): 외부에서 생성된 텐서의 view. 
                                                   None이면 자체적으로 텐서를 생성합니다.
         """
@@ -89,9 +107,14 @@ class GATree:
         self.max_depth = max_depth
         self.max_children = max_children
         self.feature_num = feature_num
-        self.feature_pair = feature_pair
+        self.feature_comparison_map = feature_comparison_map # [수정]
         self.feature_bool = feature_bool
-        self.all_features = list(feature_num.keys()) + feature_pair + feature_bool
+        
+        # [수정] all_features 생성 로직 변경
+        comp_features = set(self.feature_comparison_map.keys())
+        for v_list in self.feature_comparison_map.values():
+            comp_features.update(v_list)
+        self.all_features = list(feature_num.keys()) + sorted(list(comp_features)) + feature_bool
         
         self.initialized = False
         self.next_idx = 0
@@ -212,7 +235,9 @@ class GATree:
         self.data[idx, COL_PARENT_IDX] = parent_id
         self.data[idx, COL_DEPTH] = self.data[parent_id, COL_DEPTH] + 1
         
-        comp_type_choices = [COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT]
+        comp_type_choices = [COMP_TYPE_FEAT_NUM]
+        if self.feature_comparison_map: # [수정]
+            comp_type_choices.append(COMP_TYPE_FEAT_FEAT)
         if self.feature_bool:
             comp_type_choices.append(COMP_TYPE_FEAT_BOOL)
             
@@ -232,7 +257,16 @@ class GATree:
             self.data[idx, COL_PARAM_4] = comp_val
             
         elif comp_type == COMP_TYPE_FEAT_FEAT:
-            feat1_name, feat2_name = random.sample(self.feature_pair, 2)
+            # [수정] feature_comparison_map 기반으로 피처 쌍 선택
+            possible_feat1 = [k for k, v in self.feature_comparison_map.items() if v]
+            if not possible_feat1: # 유효한 쌍이 없는 경우, 이 노드를 UNUSED로 만들고 종료
+                self.data[idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
+                self.next_idx -= 1 # 반납
+                return None
+                
+            feat1_name = random.choice(possible_feat1)
+            feat2_name = random.choice(self.feature_comparison_map[feat1_name])
+            
             feat1_idx = self.all_features.index(feat1_name)
             feat2_idx = self.all_features.index(feat2_name)
             
@@ -313,7 +347,7 @@ class GATree:
         return self.next_idx
 
     def _evaluate_node(self, node_idx, feature_values):
-        """[수정] 주어진 Decision 노드의 조건을 평가하여 참/거짓을 반환합니다."""
+        """주어진 Decision 노드의 조건을 평가하여 참/거짓을 반환합니다."""
         node_info = self.data[node_idx]
         
         comp_type = int(node_info[COL_PARAM_3].item())
@@ -405,7 +439,7 @@ class GATree:
             'max_depth': self.max_depth,
             'max_children': self.max_children,
             'feature_num': self.feature_num,
-            'feature_pair': self.feature_pair,
+            'feature_comparison_map': self.feature_comparison_map, # [수정]
             'feature_bool': self.feature_bool,
         }
         torch.save(state, filepath)
@@ -422,11 +456,17 @@ class GATree:
         else:
             raise TypeError("source must be a filepath string or a state_dict")
 
+        # [수정] 하위 호환성을 위해 feature_comparison_map 또는 feature_pair를 로드
+        feature_comparison_map = state.get('feature_comparison_map', {})
+        if not feature_comparison_map and 'feature_pair' in state:
+            # 아주 오래된 모델을 위한 임시 변환 로직 (필요 시 더 정교하게 구현)
+            print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
+
         feature_bool = state.get('feature_bool', []) 
 
         self.__init__(
             state['max_nodes'], state['max_depth'], state['max_children'],
-            state['feature_num'], state['feature_pair'], feature_bool
+            state['feature_num'], feature_comparison_map, feature_bool # [수정]
         )
         self.data.copy_(state['data'])
         self.next_idx = state['next_idx']
@@ -536,14 +576,14 @@ class GATreePop:
     """
     GATree의 집단(Population)을 관리하는 클래스.
     """
-    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_pair, feature_bool):
+    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool): # [수정]
         """[수정] GATreePop 초기화"""
         self.pop_size = pop_size
         self.max_nodes = max_nodes
         self.max_depth = max_depth
         self.max_children = max_children
         self.feature_num = feature_num
-        self.feature_pair = feature_pair
+        self.feature_comparison_map = feature_comparison_map # [수정]
         self.feature_bool = feature_bool
 
         self.initialized = False
@@ -558,7 +598,7 @@ class GATreePop:
             tree_data_view = self.population_tensor[i]
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
-                self.feature_num, self.feature_pair, self.feature_bool,
+                self.feature_num, self.feature_comparison_map, self.feature_bool, # [수정]
                 data_tensor=tree_data_view
             )
             tree.make_tree()
@@ -611,7 +651,7 @@ class GATreePop:
             'max_depth': self.max_depth,
             'max_children': self.max_children,
             'feature_num': self.feature_num,
-            'feature_pair': self.feature_pair,
+            'feature_comparison_map': self.feature_comparison_map, # [수정]
             'feature_bool': self.feature_bool,
         }
         torch.save(state, filepath)
@@ -623,11 +663,16 @@ class GATreePop:
             raise FileNotFoundError(f"File not found: {filepath}")
         state = torch.load(filepath)
 
+        # [수정] 하위 호환성 처리
+        feature_comparison_map = state.get('feature_comparison_map', {})
+        if not feature_comparison_map and 'feature_pair' in state:
+             print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
+        
         feature_bool = state.get('feature_bool', [])
 
         self.__init__(
             state['pop_size'], state['max_nodes'], state['max_depth'],
-            state['max_children'], state['feature_num'], state['feature_pair'],
+            state['max_children'], state['feature_num'], feature_comparison_map, # [수정]
             feature_bool
         )
         self.population_tensor.copy_(state['population_tensor'])
@@ -637,7 +682,7 @@ class GATreePop:
             tree_data_view = self.population_tensor[i]
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
-                self.feature_num, self.feature_pair, self.feature_bool,
+                self.feature_num, self.feature_comparison_map, self.feature_bool, # [수정]
                 data_tensor=tree_data_view
             )
             tree.next_idx = (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item()
@@ -662,7 +707,8 @@ if __name__ == '__main__':
     
     # GATree가 자체 텐서를 소유하는 경우
     print("\n1. Creating a standalone GATree...")
-    tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    # [수정] FEATURE_COMPARISON_MAP 사용
+    tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     tree1.make_tree()
     
     # 생성된 트리 시각화
@@ -673,7 +719,8 @@ if __name__ == '__main__':
     
     # 새로운 객체에 트리 로드
     print("\n2. Loading the tree into a new GATree object...")
-    tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    # [수정] FEATURE_COMPARISON_MAP 사용
+    tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     tree2.load("single_tree.pth")
     
     # 로드된 트리 시각화 (결과가 동일한지 확인)
@@ -691,7 +738,8 @@ if __name__ == '__main__':
     
     # GATree가 GATreePop의 텐서 view를 참조하는 경우
     print("\n1. Creating a population of GATrees...")
-    population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    # [수정] FEATURE_COMPARISON_MAP 사용
+    population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     population1.make_population()
 
     # 집단의 첫 번째 트리 시각화
@@ -704,7 +752,8 @@ if __name__ == '__main__':
     
     # 새로운 객체에 집단 로드
     print("\n2. Loading the population into a new GATreePop object...")
-    population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_PAIR)
+    # [수정] FEATURE_COMPARISON_MAP 사용
+    population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     population2.load("population.pth")
 
     # 로드된 집단의 첫 번째 트리 시각화 (결과가 동일한지 확인)
