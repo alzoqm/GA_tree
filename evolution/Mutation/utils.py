@@ -72,7 +72,10 @@ def _create_random_action_params(tree_tensor: torch.Tensor, node_idx: int):
 
 def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, config: Dict[str, Any]):
     """[수정] 주어진 Decision 노드에 랜덤 파라미터를 채웁니다."""
-    comp_type_choices = [COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT]
+    comp_type_choices = [COMP_TYPE_FEAT_NUM]
+    # [수정] config에서 feature_comparison_map의 존재 여부를 확인
+    if config.get('feature_comparison_map'):
+        comp_type_choices.append(COMP_TYPE_FEAT_FEAT)
     if config.get('feature_bool'):
         comp_type_choices.append(COMP_TYPE_FEAT_BOOL)
 
@@ -95,8 +98,25 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
         tree_tensor[node_idx, COL_PARAM_4] = comp_val
         
     elif comp_type == COMP_TYPE_FEAT_FEAT:
-        feature_pair = config['feature_pair']
-        feat1_name, feat2_name = random.sample(feature_pair, 2)
+        # [수정] config에서 feature_comparison_map을 가져와 사용
+        feature_comparison_map = config['feature_comparison_map']
+        possible_feat1 = [k for k, v in feature_comparison_map.items() if v]
+        
+        # 만약 유효한 비교 쌍이 없다면, FEAT_NUM 타입으로 대체하여 노드를 생성 (안정성)
+        if not possible_feat1:
+            tree_tensor[node_idx, COL_PARAM_3] = COMP_TYPE_FEAT_NUM
+            feature_num = config['feature_num']
+            feat_name = random.choice(list(feature_num.keys()))
+            feat_idx = all_features.index(feat_name)
+            min_val, max_val = feature_num[feat_name]
+            comp_val = random.uniform(min_val, max_val)
+            tree_tensor[node_idx, COL_PARAM_1] = feat_idx
+            tree_tensor[node_idx, COL_PARAM_4] = comp_val
+            return
+
+        feat1_name = random.choice(possible_feat1)
+        feat2_name = random.choice(feature_comparison_map[feat1_name])
+        
         feat1_idx = all_features.index(feat1_name)
         feat2_idx = all_features.index(feat2_name)
         
