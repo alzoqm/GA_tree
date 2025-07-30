@@ -1,3 +1,5 @@
+# --- START OF FILE evolution/Mutation/node_param.py ---
+
 import torch
 import random
 from .base import BaseMutation
@@ -6,7 +8,10 @@ from typing import Dict, Any
 from models.model import (
     COL_NODE_TYPE, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
     NODE_TYPE_DECISION, NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_BOOL,
-    OP_GTE, OP_LTE, POS_TYPE_LONG, POS_TYPE_SHORT
+    OP_GTE, OP_LTE, 
+    # [신규] 새로운 Action 상수 임포트
+    ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_PARTIAL, 
+    ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
 
 class NodeParamMutation(BaseMutation):
@@ -34,6 +39,7 @@ class NodeParamMutation(BaseMutation):
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
         """
         [수정] 벡터화된 연산을 사용하여 효율적으로 파라미터 변이를 적용합니다.
+        Action 노드 변이 로직이 새로운 Action 체계에 맞게 수정되었습니다.
         """
         mutated_chromosomes = chromosomes.clone()
         pop_size, max_nodes, _ = chromosomes.shape
@@ -53,15 +59,25 @@ class NodeParamMutation(BaseMutation):
             node_type = int(node[COL_NODE_TYPE].item())
 
             if node_type == NODE_TYPE_ACTION:
-                param_to_mutate = random.randint(1, 3)
-                if param_to_mutate == 1:
-                    node[COL_PARAM_1] = POS_TYPE_SHORT if node[COL_PARAM_1] == POS_TYPE_LONG else POS_TYPE_LONG
-                elif param_to_mutate == 2:
+                # [수정] Action Type에 따라 유효한 파라미터만 변경
+                action_type = int(node[COL_PARAM_1].item())
+
+                if action_type in [ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_FLIP_POSITION]:
+                    # Size(비중) 또는 Leverage 변경
+                    param_to_mutate = random.choice([2, 3])
+                    if param_to_mutate == 2: # Size
+                        noise = (torch.randn(1) * 0.1).item()
+                        node[COL_PARAM_2] = torch.clamp(node[COL_PARAM_2] + noise, 0.0, 1.0)
+                    else: # Leverage
+                        change = random.randint(-self.leverage_change, self.leverage_change)
+                        node[COL_PARAM_3] = torch.clamp(node[COL_PARAM_3] + change, 1, 100)
+                
+                elif action_type in [ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION]:
+                    # Ratio 또는 Add Size 변경 (PARAM_2만 유효)
                     noise = (torch.randn(1) * 0.1).item()
                     node[COL_PARAM_2] = torch.clamp(node[COL_PARAM_2] + noise, 0.0, 1.0)
-                else:
-                    change = random.randint(-self.leverage_change, self.leverage_change)
-                    node[COL_PARAM_3] = torch.clamp(node[COL_PARAM_3] + change, 1, 100)
+                
+                # ACTION_CLOSE_ALL은 변경할 파라미터가 없으므로 아무것도 하지 않음
 
             elif node_type == NODE_TYPE_DECISION:
                 comp_type = int(node[COL_PARAM_3].item())
