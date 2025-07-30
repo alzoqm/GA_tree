@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-import ta_lib_feature_generator as talib_feat
+import yaml
+import data.ta_lib_feature_generator as talib_feat
 
 def generate_multi_timeframe_features(
     df: pd.DataFrame,
@@ -104,6 +105,69 @@ def generate_multi_timeframe_features(
     print("\n최종 피처 생성 및 통합이 완료되었습니다.")
     return final_df, sorted(list(set(all_new_columns)))
 
+
+def run_feature_generation_from_yaml(
+    df: pd.DataFrame,
+    timestamp_col: str,
+    target_timeframes: list,
+    yaml_config_path: str='/feature_config.yaml'
+):
+    """
+    YAML 설정 파일을 기반으로 Multi-Timeframe 피처 생성을 실행하는 래퍼 함수입니다.
+
+    이 함수는 YAML 파일 경로를 받아 내부적으로 파라미터를 파싱하고,
+    기존의 `generate_multi_timeframe_features` 함수를 호출하여 피처 생성을 수행합니다.
+
+    Args:
+        df (pd.DataFrame): 'Open', 'High', 'Low', 'Close', 'Volume' 및 타임스탬프 컬럼을 포함하는 원본 데이터프레임.
+        timestamp_col (str): 데이터프레임 내의 타임스탬프 컬럼명.
+        target_timeframes (list): 피처를 생성할 시간 단위 목록 (예: ['5m', '1h', '1d']).
+                                  이 목록에 있는 타임프레임에 대한 설정만 YAML 파일에서 사용됩니다.
+        yaml_config_path (str): 피처 생성 파라미터를 정의한 .yaml 파일의 경로.
+
+    Returns:
+        pd.DataFrame: 모든 시간 단위의 피처가 통합된 최종 데이터프레임.
+                      오류 발생 시 None을 반환합니다.
+        list: 새로 추가된 모든 피처 컬럼명의 리스트.
+              오류 발생 시 None을 반환합니다.
+    """
+    # 1. YAML 설정 파일 로드
+    print(f"'{yaml_config_path}' 에서 피처 생성 설정을 로드합니다.")
+    try:
+        with open(yaml_config_path, 'r', encoding='utf-8') as file:
+            full_config = yaml.safe_load(file)
+    except FileNotFoundError:
+        print(f"오류: 설정 파일 '{yaml_config_path}'을(를) 찾을 수 없습니다.")
+        return None, None
+    except Exception as e:
+        print(f"오류: YAML 파일을 읽는 중 에러 발생 - {e}")
+        return None, None
+        
+    # 2. 요청된 타임프레임에 대한 파라미터만 필터링
+    # YAML 파일에 정의된 키와 target_timeframes를 비교하여 해당 설정만 추출합니다.
+    feature_generation_params = {}
+    valid_timeframes = []
+    for tf in target_timeframes:
+        if tf in full_config:
+            feature_generation_params[tf] = full_config[tf]
+            valid_timeframes.append(tf)
+        else:
+            print(f"경고: '{tf}'에 대한 설정이 YAML 파일에 없습니다. 이 타임프레임은 건너뜁니다.")
+    
+    if not feature_generation_params:
+        print("오류: 유효한 타임프레임 설정이 하나도 없습니다. 프로세스를 중단합니다.")
+        return df, []
+
+    # 3. 메인 피처 생성 함수 호출
+    print("\nYAML 설정에 기반하여 Multi-Timeframe 피처 생성을 시작합니다.")
+    final_dataframe, added_cols = generate_multi_timeframe_features(
+        df=df,
+        timestamp_col=timestamp_col,
+        target_timeframes=valid_timeframes, # 유효한 타임프레임만 전달
+        feature_params=feature_generation_params
+    )
+
+    return final_dataframe, added_cols
 
 # ==============================================================================
 #                      복잡하고 풍부한 함수 실행 예시

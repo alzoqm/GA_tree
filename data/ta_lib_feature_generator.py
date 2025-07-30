@@ -129,6 +129,7 @@ def calculate_ichimoku(df, short_window=9, mid_window=26, long_window=52):
     """
     일목균형표 (Ichimoku Cloud) 지표들을 계산합니다.
     - 참고: TA-Lib는 일목균형표를 지원하지 않으므로 기존 pandas 구현을 유지합니다.
+    - [수정] Chikou 컬럼명에 mid_window 값을 포함하여 중복을 방지합니다.
     """
     high = df['High']
     low = df['Low']
@@ -138,7 +139,11 @@ def calculate_ichimoku(df, short_window=9, mid_window=26, long_window=52):
     kijun_sen_col = format_col_name('Ichimoku_Kijun', mid_window)
     senkou_a_col = format_col_name('Ichimoku_SenkouA', f"{short_window}_{mid_window}")
     senkou_b_col = format_col_name('Ichimoku_SenkouB', long_window)
-    chikou_col = format_col_name('Ichimoku_Chikou')
+    
+    # --- 수정된 부분 시작 ---
+    # Chikou 컬럼명에 mid_window를 추가하여 고유성을 보장
+    chikou_col = format_col_name('Ichimoku_Chikou', mid_window)
+    # --- 수정된 부분 끝 ---
 
     df[tenkan_sen_col] = (high.rolling(window=short_window).max() + low.rolling(window=short_window).min()) / 2
     df[kijun_sen_col] = (high.rolling(window=mid_window).max() + low.rolling(window=mid_window).min()) / 2
@@ -385,6 +390,7 @@ def calculate_support_resistance(df, window):
     지지 및 저항 수준을 계산합니다.
     - 이동평균 기반 지지/저항은 TA-Lib의 MIN/MAX 함수로 대체합니다.
     - 피벗 포인트는 TA-Lib에서 지원하지 않으므로 기존 구현을 유지합니다.
+    - [수정] 피벗 포인트 컬럼명에 window 값을 포함하여 중복을 방지합니다.
     """
     new_cols = []
     _, high_price, low_price, _, _ = get_ohlcv_arrays(df)
@@ -401,11 +407,14 @@ def calculate_support_resistance(df, window):
     low_prev = df['Low'].shift(1)
     close_prev = df['Close'].shift(1)
     
-    pivot_point_col = 'Pivot_Point'
-    support1_col = 'Support1_Pivot'
-    support2_col = 'Support2_Pivot'
-    resistance1_col = 'Resistance1_Pivot'
-    resistance2_col = 'Resistance2_Pivot'
+    # --- 수정된 부분 시작 ---
+    # 피벗 포인트 컬럼명에 window를 추가하여 고유성을 보장
+    pivot_point_col = format_col_name('Pivot_Point', window)
+    support1_col = format_col_name('Support1_Pivot', window)
+    support2_col = format_col_name('Support2_Pivot', window)
+    resistance1_col = format_col_name('Resistance1_Pivot', window)
+    resistance2_col = format_col_name('Resistance2_Pivot', window)
+    # --- 수정된 부분 끝 ---
 
     df[pivot_point_col] = (high_prev + low_prev + close_prev) / 3
     df[support1_col] = (2 * df[pivot_point_col]) - high_prev

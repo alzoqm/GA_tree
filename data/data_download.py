@@ -120,7 +120,7 @@ if __name__ == "__main__":
     # --- 함수 사용 예시 ---
     SYMBOL = 'BTCUSDT'
     INTERVAL = Client.KLINE_INTERVAL_1MINUTE
-    DAYS = 130  # 과거 130일치 데이터
+    DAYS = 365*5  # 과거 130일치 데이터
 
     historical_df = fetch_historical_data(SYMBOL, INTERVAL, DAYS)
 
