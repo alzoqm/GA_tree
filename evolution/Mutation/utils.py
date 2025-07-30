@@ -1,3 +1,5 @@
+# --- START OF FILE evolution/Mutation/utils.py ---
+
 import torch
 import random
 from typing import List, Dict, Any
@@ -6,7 +8,11 @@ from models.model import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1, COL_PARAM_2,
     COL_PARAM_3, COL_PARAM_4, NODE_TYPE_UNUSED, NODE_TYPE_DECISION,
     NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT, COMP_TYPE_FEAT_BOOL,
-    OP_GTE, OP_LTE, POS_TYPE_LONG, POS_TYPE_SHORT
+    OP_GTE, OP_LTE, 
+    # [신규] 새로운 Action 상수 임포트
+    ROOT_BRANCH_HOLD, ROOT_BRANCH_LONG, ROOT_BRANCH_SHORT,
+    ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL,
+    ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
 
 def find_subtree_nodes(tree_tensor: torch.Tensor, root_idx: int) -> List[int]:
@@ -65,15 +71,46 @@ def find_empty_slots(tree_tensor: torch.Tensor, count: int = 1) -> List[int]:
     return empty_indices[:count].tolist()
 
 def _create_random_action_params(tree_tensor: torch.Tensor, node_idx: int):
-    """주어진 Action 노드에 랜덤 파라미터를 채웁니다."""
-    tree_tensor[node_idx, COL_PARAM_1] = random.choice([POS_TYPE_LONG, POS_TYPE_SHORT])
-    tree_tensor[node_idx, COL_PARAM_2] = random.random()
-    tree_tensor[node_idx, COL_PARAM_3] = random.randint(1, 100)
+    """[전면 수정] 주어진 Action 노드에 문맥에 맞는 랜덤 파라미터를 채웁니다."""
+    parent_idx = int(tree_tensor[node_idx, COL_PARENT_IDX].item())
+    if parent_idx == -1: return # 부모가 없으면(이론상 불가) 아무것도 안 함
+
+    # 1. 부모로부터 루트 분기 타입을 결정
+    current_idx = parent_idx
+    while tree_tensor[current_idx, COL_PARENT_IDX].item() != -1:
+        current_idx = int(tree_tensor[current_idx, COL_PARENT_IDX].item())
+    root_branch_type = tree_tensor[current_idx, COL_PARAM_1].item()
+
+    # 2. 루트 분기 타입(문맥)에 따라 가능한 Action 리스트를 정의
+    if root_branch_type == ROOT_BRANCH_HOLD:
+        possible_actions = [ACTION_NEW_LONG, ACTION_NEW_SHORT]
+    elif root_branch_type == ROOT_BRANCH_LONG:
+        possible_actions = [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION]
+    elif root_branch_type == ROOT_BRANCH_SHORT:
+        possible_actions = [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION]
+    else:
+        possible_actions = []
+
+    if not possible_actions:
+        # 생성할 유효한 액션이 없으면 노드를 UNUSED로 변경 (호출한 쪽에서 처리)
+        tree_tensor[node_idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
+        return
+
+    # 3. 선택된 Action 타입에 따라 파라미터를 랜덤하게 생성
+    chosen_action = random.choice(possible_actions)
+    tree_tensor[node_idx, COL_PARAM_1] = chosen_action
+
+    if chosen_action in [ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_FLIP_POSITION]:
+        tree_tensor[node_idx, COL_PARAM_2] = random.random()  # Size or New Size
+        tree_tensor[node_idx, COL_PARAM_3] = random.randint(1, 100) # Leverage
+    elif chosen_action == ACTION_CLOSE_PARTIAL:
+        tree_tensor[node_idx, COL_PARAM_2] = random.random()  # Close Ratio
+    elif chosen_action == ACTION_ADD_POSITION:
+        tree_tensor[node_idx, COL_PARAM_2] = random.random()  # Add Size Ratio
 
 def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, config: Dict[str, Any]):
-    """[수정] 주어진 Decision 노드에 랜덤 파라미터를 채웁니다."""
+    """주어진 Decision 노드에 랜덤 파라미터를 채웁니다."""
     comp_type_choices = [COMP_TYPE_FEAT_NUM]
-    # [수정] config에서 feature_comparison_map의 존재 여부를 확인
     if config.get('feature_comparison_map'):
         comp_type_choices.append(COMP_TYPE_FEAT_FEAT)
     if config.get('feature_bool'):
@@ -98,11 +135,9 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
         tree_tensor[node_idx, COL_PARAM_4] = comp_val
         
     elif comp_type == COMP_TYPE_FEAT_FEAT:
-        # [수정] config에서 feature_comparison_map을 가져와 사용
         feature_comparison_map = config['feature_comparison_map']
         possible_feat1 = [k for k, v in feature_comparison_map.items() if v]
         
-        # 만약 유효한 비교 쌍이 없다면, FEAT_NUM 타입으로 대체하여 노드를 생성 (안정성)
         if not possible_feat1:
             tree_tensor[node_idx, COL_PARAM_3] = COMP_TYPE_FEAT_NUM
             feature_num = config['feature_num']

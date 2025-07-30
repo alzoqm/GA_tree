@@ -1,3 +1,5 @@
+// --- START OF FILE csrc/constants.h ---
+
 // csrc/constants.h
 #pragma once
 
@@ -33,9 +35,16 @@ constexpr int COMP_TYPE_FEAT_BOOL = 2; // Feature vs Boolean
 constexpr int OP_GTE = 0; // >= (Greater Than or Equal)
 constexpr int OP_LTE = 1; // <= (Less Than or Equal)
 
-// --- Action Node: Position Types ---
-constexpr int POS_TYPE_LONG = 0;
-constexpr int POS_TYPE_SHORT = 1;
-// 기본값으로 사용될 HOLD. Python에서는 POS_TYPE_MAP에만 존재.
-// CUDA 결과값은 숫자이므로 명시적인 상수가 있는 것이 안전.
-constexpr int ACTION_DEFAULT_HOLD = -1; // 임의의 값, Python에서는 딕셔너리로 처리됨
+// --- [수정] Action Node: Action Types ---
+// Python의 model.py와 동기화
+constexpr int ACTION_NEW_LONG        = 1;
+constexpr int ACTION_NEW_SHORT       = 2;
+constexpr int ACTION_CLOSE_ALL       = 3;
+constexpr int ACTION_CLOSE_PARTIAL   = 4;
+constexpr int ACTION_ADD_POSITION    = 5;
+constexpr int ACTION_FLIP_POSITION   = 6;
+
+// [수정] 기본값으로 사용될 Action Type. Action을 찾지 못했음을 의미.
+constexpr int ACTION_NOT_FOUND = 0;
+
+// --- END OF FILE csrc/constants.h ---

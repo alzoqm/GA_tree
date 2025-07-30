@@ -1,3 +1,5 @@
+# --- START OF FILE evolution/Mutation/reinitialize_node.py ---
+
 # evolution/Mutation/reinitialize_node.py (수정된 최종본)
 import torch
 from .base import BaseMutation
@@ -35,11 +37,8 @@ class ReinitializeNodeMutation(BaseMutation):
         mutation_indices = mutation_mask.nonzero()
 
         for chrom_idx, node_idx in mutation_indices:
-            # --- BUG FIX START ---
-            # 개별 트리를 나타내는 2D 텐서를 가져옴
             tree = mutated_chromosomes[chrom_idx] 
-            node = tree[node_idx] # 실제 수정은 1D 슬라이스(뷰)에 대해 수행
-            # --- BUG FIX END ---
+            node = tree[node_idx]
             
             node_type = int(node[COL_NODE_TYPE].item())
 
@@ -47,14 +46,10 @@ class ReinitializeNodeMutation(BaseMutation):
             node[COL_PARAM_1:] = 0.0
 
             if node_type == NODE_TYPE_ACTION:
-                # --- BUG FIX START ---
-                # 헬퍼 함수에 2D tree 텐서와 int 인덱스를 전달
+                # 수정된 _create_random_action_params 함수를 호출하여
+                # 문맥에 맞는 새로운 랜덤 파라미터로 교체합니다.
                 _create_random_action_params(tree, node_idx)
-                # --- BUG FIX END ---
             elif node_type == NODE_TYPE_DECISION:
-                # --- BUG FIX START ---
-                # 헬퍼 함수에 2D tree 텐서와 int 인덱스를 전달
                 _create_random_decision_params(tree, node_idx, self.config)
-                # --- BUG FIX END ---
 
         return mutated_chromosomes

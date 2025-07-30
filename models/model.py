@@ -1,3 +1,5 @@
+# --- START OF FILE models/model.py ---
+
 import torch
 import random
 import os
@@ -45,15 +47,18 @@ COMP_TYPE_FEAT_BOOL = 2 # Feature vs Boolean
 OP_GTE = 0  # >= (Greater Than or Equal)
 OP_LTE = 1  # <= (Less Than or Equal)
 
-# Action Node: Position Types
-POS_TYPE_LONG = 0
-POS_TYPE_SHORT = 1
+# --- [신규] Action Node: Action Types (COL_PARAM_1에 저장) ---
+ACTION_NEW_LONG        = 1  # 신규 롱 포지션 진입
+ACTION_NEW_SHORT       = 2  # 신규 숏 포지션 진입
+ACTION_CLOSE_ALL       = 3  # 현재 포지션 전체 청산
+ACTION_CLOSE_PARTIAL   = 4  # 현재 포지션 부분 청산 (비율 지정)
+ACTION_ADD_POSITION    = 5  # 현재 포지션 추가 진입 (피라미딩)
+ACTION_FLIP_POSITION   = 6  # 현재 포지션 청산 후 즉시 반대 포지션 진입
 
-# --- [수정] 예시 Feature 및 설정 (실제 사용 시 변경) ---
+# --- 예시 Feature 및 설정 (실제 사용 시 변경) ---
 FEATURE_NUM = {'RSI': (0, 100), 'ATR': (0, 1), 'WR': (-100, 0), 'STOCH_K':(0, 100)}
 FEATURE_BOOL = ['IsBullishMarket', 'IsHighVolatility']
 
-# [수정] 기존 feature_pair를 feature_comparison_map으로 대체
 FEATURE_COMPARISON_MAP = {
     'SMA_5': ['SMA_20', 'EMA_10', 'EMA_30'],
     'SMA_20': ['SMA_5', 'EMA_10', 'EMA_30'],
@@ -63,7 +68,6 @@ FEATURE_COMPARISON_MAP = {
     'BB_lower': ['EMA_10', 'BB_upper']
 }
 
-# [수정] ALL_FEATURES 생성 로직 변경
 def get_all_features(feature_num, feature_map, feature_bool):
     comp_features = set(feature_map.keys())
     for v_list in feature_map.values():
@@ -82,14 +86,22 @@ NODE_TYPE_MAP = {
 }
 ROOT_BRANCH_MAP = {ROOT_BRANCH_LONG: "IF_POS_IS_LONG", ROOT_BRANCH_HOLD: "IF_POS_IS_HOLD", ROOT_BRANCH_SHORT: "IF_POS_IS_SHORT"}
 OPERATOR_MAP = {OP_GTE: ">=", OP_LTE: "<="}
-POS_TYPE_MAP = {POS_TYPE_LONG: "LONG", POS_TYPE_SHORT: "SHORT"}
+# --- [신규] 기존 POS_TYPE_MAP을 ACTION_TYPE_MAP으로 대체 ---
+ACTION_TYPE_MAP = {
+    ACTION_NEW_LONG: "NEW_LONG",
+    ACTION_NEW_SHORT: "NEW_SHORT",
+    ACTION_CLOSE_ALL: "CLOSE_ALL",
+    ACTION_CLOSE_PARTIAL: "CLOSE_PARTIAL",
+    ACTION_ADD_POSITION: "ADD_POSITION",
+    ACTION_FLIP_POSITION: "FLIP_POSITION",
+}
 
 class GATree:
     """
     하나의 유전 알고리즘 트리를 나타내는 클래스.
     이 클래스의 데이터는 C++/CUDA에서 직접 처리할 수 있는 torch.Tensor 형식으로 저장됩니다.
     """
-    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, data_tensor=None): # [수정]
+    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, data_tensor=None):
         """
         GATree 초기화.
 
@@ -98,7 +110,7 @@ class GATree:
             max_depth (int): 트리의 최대 깊이.
             max_children (int): Decision 노드가 가질 수 있는 최대 자식 노드 수.
             feature_num (dict): 숫자와 비교할 피쳐와 (min, max) 범위.
-            feature_comparison_map (dict): [신규] 피처 간 비교 규칙을 정의한 맵.
+            feature_comparison_map (dict): 피처 간 비교 규칙을 정의한 맵.
             feature_bool (list): Boolean과 비교할 피쳐 리스트.
             data_tensor (torch.Tensor, optional): 외부에서 생성된 텐서의 view.
                                                   None이면 자체적으로 텐서를 생성합니다.
@@ -125,34 +137,38 @@ class GATree:
                 raise ValueError("Provided data_tensor has incorrect shape")
             self.data = data_tensor
 
-        # --- [신규] BFS 및 CUDA 최적화를 위한 속성 ---
-        # predict 시에만 사용되는 임시 버퍼이므로 torch.save 대상에 포함될 필요 없음
-        # 1. BFS 탐색을 위한 고정 크기 원형 큐 (동적 할당 방지)
         self._bfs_queue = torch.zeros(max_nodes, dtype=torch.int32)
         self._queue_head = 0
         self._queue_tail = 0
-        # 2. 자식 노드 고속 조회를 위한 인접 리스트 (전체 노드 스캔 방지)
         self._adjacency_list = {}
+
+    def _get_root_branch_type_from_child(self, start_node_idx: int) -> int:
+        """
+        [신규 헬퍼 함수]
+        주어진 노드에서부터 부모를 거슬러 올라가 최상위 루트 분기의 타입을 찾습니다.
+        """
+        current_idx = start_node_idx
+        # 부모 인덱스가 -1 (루트)가 아닐 동안 계속 올라감
+        while self.data[current_idx, COL_PARENT_IDX].item() != -1:
+            current_idx = int(self.data[current_idx, COL_PARENT_IDX].item())
+        
+        # 최상위 노드 (루트 분기 노드)의 타입을 반환
+        return int(self.data[current_idx, COL_PARAM_1].item())
 
     def _build_adjacency_list(self):
         """
-        [신규 메서드]
         self.data 텐서가 완성된 후, 이를 기반으로 부모-자식 관계를 맵(딕셔너리)으로 만들어
-        _adjacency_list 속성에 저장합니다. 이로써 predict 시 O(1)에 가까운 속도로 자식 노드를 조회할 수 있습니다.
+        _adjacency_list 속성에 저장합니다.
         """
         self._adjacency_list.clear()
         for i in range(self.next_idx):
-            # UNUSED 노드는 트리의 일부가 아니므로 제외
             if self.data[i, COL_NODE_TYPE] == NODE_TYPE_UNUSED:
                 continue
 
             parent_id = int(self.data[i, COL_PARENT_IDX].item())
-            # 루트 분기 노드(-1)가 아닌 모든 노드는 부모가 있음
             if parent_id != -1:
-                # 부모 ID가 딕셔너리에 없으면 새로운 리스트로 초기화
                 if parent_id not in self._adjacency_list:
                     self._adjacency_list[parent_id] = []
-                # 부모의 자식 리스트에 현재 노드 인덱스 추가
                 self._adjacency_list[parent_id].append(i)
 
 
@@ -186,7 +202,6 @@ class GATree:
         for i, branch_id in enumerate(root_branch_ids):
             self._grow_branch(branch_id, budgets[i])
 
-        # [수정] 트리 구조가 완성된 후, 예측 성능 최적화를 위해 인접 리스트를 생성합니다.
         self._build_adjacency_list()
         self.initialized = True
         print(f"Tree created with {self.next_idx} nodes.")
@@ -245,7 +260,7 @@ class GATree:
                      self._create_action_node(parent_id)
 
     def _create_action_node(self, parent_id):
-        """Action 노드 하나를 생성하고 Tensor에 기록"""
+        """[전면 수정] Action 노드 하나를 문맥에 맞게 생성하고 Tensor에 기록"""
         idx = self._get_next_idx()
         if idx is None: return None
 
@@ -253,13 +268,50 @@ class GATree:
         self.data[idx, COL_PARENT_IDX] = parent_id
         self.data[idx, COL_DEPTH] = self.data[parent_id, COL_DEPTH] + 1
 
-        self.data[idx, COL_PARAM_1] = random.choice([POS_TYPE_LONG, POS_TYPE_SHORT])
-        self.data[idx, COL_PARAM_2] = random.random()
-        self.data[idx, COL_PARAM_3] = random.randint(1, 100)
+        # 1. 부모로부터 루트 분기 타입을 결정
+        root_branch_type = self._get_root_branch_type_from_child(parent_id)
+
+        # 2. 루트 분기 타입(문맥)에 따라 가능한 Action 리스트를 정의
+        if root_branch_type == ROOT_BRANCH_HOLD:
+            possible_actions = [ACTION_NEW_LONG, ACTION_NEW_SHORT]
+        elif root_branch_type == ROOT_BRANCH_LONG:
+            possible_actions = [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION]
+        elif root_branch_type == ROOT_BRANCH_SHORT:
+            possible_actions = [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION]
+        else: # 혹시 모를 예외 처리
+            possible_actions = []
+
+        if not possible_actions:
+            # 생성할 유효한 액션이 없으면 노드를 UNUSED로 처리하고 반납
+            self.data[idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
+            self.next_idx -= 1
+            return None
+
+        # 3. 선택된 Action 타입에 따라 파라미터를 랜덤하게 생성
+        chosen_action = random.choice(possible_actions)
+        self.data[idx, COL_PARAM_1] = chosen_action
+        
+        # 파라미터 2, 3은 Action 종류에 따라 의미가 달라짐
+        if chosen_action in [ACTION_NEW_LONG, ACTION_NEW_SHORT]:
+            # Param2: 진입 비중 (0~1), Param3: 레버리지 (1~100)
+            self.data[idx, COL_PARAM_2] = random.random()
+            self.data[idx, COL_PARAM_3] = random.randint(1, 100)
+        elif chosen_action == ACTION_FLIP_POSITION:
+            # Param2: 새로운 포지션의 진입 비중, Param3: 새로운 포지션의 레버리지
+            self.data[idx, COL_PARAM_2] = random.random()
+            self.data[idx, COL_PARAM_3] = random.randint(1, 100)
+        elif chosen_action == ACTION_CLOSE_PARTIAL:
+            # Param2: 청산 비율 (0~1), Param3: 사용 안함
+            self.data[idx, COL_PARAM_2] = random.random()
+        elif chosen_action == ACTION_ADD_POSITION:
+            # Param2: 추가 진입 비중 (0~1), Param3: 사용 안함
+            self.data[idx, COL_PARAM_2] = random.random()
+        # ACTION_CLOSE_ALL은 추가 파라미터가 필요 없음
+
         return idx
 
     def _create_decision_node(self, parent_id):
-        """[수정] Decision 노드 하나를 생성하고 Tensor에 기록"""
+        """Decision 노드 하나를 생성하고 Tensor에 기록"""
         idx = self._get_next_idx()
         if idx is None: return None
 
@@ -268,7 +320,7 @@ class GATree:
         self.data[idx, COL_DEPTH] = self.data[parent_id, COL_DEPTH] + 1
 
         comp_type_choices = [COMP_TYPE_FEAT_NUM]
-        if self.feature_comparison_map: # [수정]
+        if self.feature_comparison_map:
             comp_type_choices.append(COMP_TYPE_FEAT_FEAT)
         if self.feature_bool:
             comp_type_choices.append(COMP_TYPE_FEAT_BOOL)
@@ -289,11 +341,10 @@ class GATree:
             self.data[idx, COL_PARAM_4] = comp_val
 
         elif comp_type == COMP_TYPE_FEAT_FEAT:
-            # [수정] feature_comparison_map 기반으로 피처 쌍 선택
             possible_feat1 = [k for k, v in self.feature_comparison_map.items() if v]
-            if not possible_feat1: # 유효한 쌍이 없는 경우, 이 노드를 UNUSED로 만들고 종료
+            if not possible_feat1:
                 self.data[idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
-                self.next_idx -= 1 # 반납
+                self.next_idx -= 1
                 return None
 
             feat1_name = random.choice(possible_feat1)
@@ -326,7 +377,6 @@ class GATree:
     def reorganize_nodes(self):
         """
         텐서 내의 노드들을 재조직하여 빈 공간(단편화)을 제거합니다.
-        재조직 후에는 인접 리스트를 다시 생성해야 합니다.
         """
         if not self.initialized:
             print("Warning: Reorganizing an uninitialized tree.")
@@ -338,7 +388,7 @@ class GATree:
         if len(active_indices) == 0:
             self.data.zero_()
             self.next_idx = 0
-            self._adjacency_list.clear() # [수정] 인접리스트도 초기화
+            self._adjacency_list.clear()
             return
 
         active_node_data = self.data[active_indices]
@@ -363,7 +413,6 @@ class GATree:
         self.data.copy_(new_data)
         self.next_idx = num_active_nodes
         
-        # [수정] 노드 재조직 후에는 반드시 인접 리스트를 다시 빌드해야 합니다.
         self._build_adjacency_list()
 
 
@@ -420,20 +469,17 @@ class GATree:
 
     def predict(self, feature_values, current_position):
         """
-        [전면 수정] BFS(너비 우선 탐색)를 사용하여 최단 경로의 Action을 찾는 예측 메서드.
-        이 방식은 CUDA 커널로의 변환 및 병렬 처리에 최적화되어 있습니다.
+        [수정] BFS를 사용하여 최단 경로의 Action을 찾고, 새로운 Action 체계의 파라미터를 반환합니다.
         """
         if not self.initialized:
             raise RuntimeError("Tree is not initialized. Call make_tree() or load() first.")
 
-        # 1. 시작 노드 결정
         pos_map = {'LONG': ROOT_BRANCH_LONG, 'HOLD': ROOT_BRANCH_HOLD, 'SHORT': ROOT_BRANCH_SHORT}
         if current_position not in pos_map:
             raise ValueError(f"Invalid current_position: {current_position}")
         target_branch_type = pos_map[current_position]
 
         start_node_idx = -1
-        # 루트 분기는 항상 0, 1, 2 인덱스에 위치
         for i in range(3):
             if self.data[i, COL_NODE_TYPE] == NODE_TYPE_ROOT_BRANCH and \
                self.data[i, COL_PARAM_1] == target_branch_type:
@@ -441,53 +487,45 @@ class GATree:
                 break
 
         if start_node_idx == -1:
-            # 이론적으로 발생해서는 안 됨
-            return ('HOLD', 0.0, 0)
+            return (None, 0.0, 0.0, 0.0) # 기본 HOLD 동작 유도
 
-        # 2. 원형 큐 초기화 및 시작 노드 삽입(Enqueue)
         self._queue_head = 0
         self._queue_tail = 0
         self._bfs_queue[self._queue_tail] = start_node_idx
         self._queue_tail += 1
 
-        # 3. BFS 루프 시작 (큐가 빌 때까지)
         while self._queue_head < self._queue_tail:
-            # 3-1. 큐에서 현재 노드 추출(Dequeue)
             current_node_idx = self._bfs_queue[self._queue_head]
             self._queue_head += 1
 
-            # 3-2. 최적화된 방식으로 자식 노드 조회 (O(1) 조회)
             child_indices = self._adjacency_list.get(int(current_node_idx.item()), [])
 
-            # 3-3. 자식 노드 순회 및 처리
             for child_idx in child_indices:
                 child_node_type = int(self.data[child_idx, COL_NODE_TYPE].item())
 
-                # Action 노드를 발견하면, 즉시 결과를 반환. BFS이므로 이것이 최단 경로의 해임.
                 if child_node_type == NODE_TYPE_ACTION:
-                    pos_type = POS_TYPE_MAP.get(int(self.data[child_idx, COL_PARAM_1].item()))
-                    size = self.data[child_idx, COL_PARAM_2].item()
-                    leverage = int(self.data[child_idx, COL_PARAM_3].item())
-                    return (pos_type, size, leverage)
+                    # [수정] Action 노드의 파라미터를 그대로 반환
+                    action_type = int(self.data[child_idx, COL_PARAM_1].item())
+                    param_2 = self.data[child_idx, COL_PARAM_2].item()
+                    param_3 = self.data[child_idx, COL_PARAM_3].item()
+                    param_4 = self.data[child_idx, COL_PARAM_4].item()
+                    return (action_type, param_2, param_3, param_4)
 
-                # Decision 노드인 경우, 조건을 평가하고 참이면 큐에 추가(Enqueue)
                 elif child_node_type == NODE_TYPE_DECISION:
                     if self._evaluate_node(child_idx, feature_values):
-                        # 큐 오버플로우 방지 (안전 장치)
                         if self._queue_tail < self.max_nodes:
                             self._bfs_queue[self._queue_tail] = child_idx
                             self._queue_tail += 1
                         else:
-                            # 큐가 가득 차면 더 이상 탐색 불가, 현재까지 찾은게 없으므로 HOLD
                             print("Warning: BFS queue is full. Prediction might be incomplete.")
-                            return ('HOLD', 0.0, 0)
+                            return (None, 0.0, 0.0, 0.0)
 
-        # 4. 루프가 모두 종료될 때까지 Action을 찾지 못한 경우
-        return ('HOLD', 0.0, 0)
+        # Action을 찾지 못하면 None을 반환하여 HOLD 동작 유도
+        return (None, 0.0, 0.0, 0.0)
 
 
     def save(self, filepath):
-        """[수정] 트리의 상태를 파일로 저장합니다."""
+        """트리의 상태를 파일로 저장합니다."""
         if not self.initialized:
             print("Warning: Saving uninitialized tree.")
 
@@ -505,7 +543,7 @@ class GATree:
         print(f"Tree saved to {filepath}")
 
     def load(self, source):
-        """[수정] 파일 또는 state_dict로부터 트리 상태를 로드합니다."""
+        """파일 또는 state_dict로부터 트리 상태를 로드합니다."""
         if isinstance(source, str):
             if not os.path.exists(source):
                 raise FileNotFoundError(f"File not found: {source}")
@@ -528,7 +566,6 @@ class GATree:
         self.data.copy_(state['data'])
         self.next_idx = state['next_idx']
         
-        # [수정] 데이터를 로드한 후, 예측 최적화를 위해 인접 리스트를 생성합니다.
         self._build_adjacency_list()
         self.initialized = True
         print(f"Tree loaded successfully.")
@@ -564,10 +601,22 @@ class GATree:
                 label += f"IF {feat1_name} == {bool_val}"
             color = "#1E90FF"
         elif node_type == NODE_TYPE_ACTION:
-            pos = POS_TYPE_MAP.get(int(node[COL_PARAM_1].item()))
-            size = node[COL_PARAM_2].item()
-            lev = int(node[COL_PARAM_3].item())
-            label += f"ACTION: {pos}\nSize: {size:.2f}, Lev: {lev}x"
+            # [수정] 새로운 Action 체계에 맞게 레이블 생성
+            action_type = int(node[COL_PARAM_1].item())
+            action_name = ACTION_TYPE_MAP.get(action_type, 'UNKNOWN_ACTION')
+            label += f"ACTION: {action_name}"
+
+            if action_type in [ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_FLIP_POSITION]:
+                size = node[COL_PARAM_2].item()
+                lev = int(node[COL_PARAM_3].item())
+                label += f"\nSize: {size:.2f}, Lev: {lev}x"
+            elif action_type == ACTION_CLOSE_PARTIAL:
+                ratio = node[COL_PARAM_2].item()
+                label += f"\nRatio: {ratio:.2f}"
+            elif action_type == ACTION_ADD_POSITION:
+                add_size = node[COL_PARAM_2].item()
+                label += f"\nAdd Size: {add_size:.2f}"
+            
             color = "#32CD32"
         else:
             label += "UNUSED"
@@ -575,7 +624,7 @@ class GATree:
         return label, color
 
     def visualize_graph(self, file="ga_tree.html", open_browser=True):
-        """[수정] 시각화 로직은 인접 리스트를 활용하여 더 효율적으로 구성할 수 있습니다."""
+        """시각화 로직은 인접 리스트를 활용하여 효율적으로 구성합니다."""
         if not PYVIS_AVAILABLE:
             print("Install `networkx pyvis` for graph view")
             return
@@ -585,7 +634,6 @@ class GATree:
 
         g = nx.DiGraph()
 
-        # 모든 활성 노드를 그래프에 추가
         for idx in range(int(self.next_idx)):
             node_type = int(self.data[idx, COL_NODE_TYPE].item())
             if node_type == NODE_TYPE_UNUSED:
@@ -593,10 +641,8 @@ class GATree:
             label, color = self._node_label_color(idx)
             g.add_node(idx, label=label, color=color, title=label.replace("\n", "<br>"), shape='box')
         
-        # 인접 리스트를 사용하여 엣지(연결) 추가
         for parent_id, children in self._adjacency_list.items():
             for child_id in children:
-                # 두 노드가 모두 그래프에 존재하는지 확인 (UNUSED 노드 필터링 후에는 항상 존재)
                 if parent_id in g and child_id in g:
                     g.add_edge(parent_id, child_id)
 
@@ -628,14 +674,14 @@ class GATreePop:
     """
     GATree의 집단(Population)을 관리하는 클래스.
     """
-    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool): # [수정]
-        """[수정] GATreePop 초기화"""
+    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool):
+        """GATreePop 초기화"""
         self.pop_size = pop_size
         self.max_nodes = max_nodes
         self.max_depth = max_depth
         self.max_children = max_children
         self.feature_num = feature_num
-        self.feature_comparison_map = feature_comparison_map # [수정]
+        self.feature_comparison_map = feature_comparison_map
         self.feature_bool = feature_bool
 
         self.initialized = False
@@ -643,14 +689,14 @@ class GATreePop:
         self.population = []
 
     def make_population(self):
-        """[수정] 설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다."""
+        """설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다."""
         self.population = []
         for i in range(self.pop_size):
             print(f"--- Creating Tree {i+1}/{self.pop_size} ---")
             tree_data_view = self.population_tensor[i]
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
-                self.feature_num, self.feature_comparison_map, self.feature_bool, # [수정]
+                self.feature_num, self.feature_comparison_map, self.feature_bool,
                 data_tensor=tree_data_view
             )
             tree.make_tree()
@@ -692,7 +738,7 @@ class GATreePop:
         return [tree.return_next_idx() for tree in self.population]
 
     def save(self, filepath):
-        """[수정] 집단 전체의 상태를 파일로 저장합니다."""
+        """집단 전체의 상태를 파일로 저장합니다."""
         if not self.initialized:
             print("Warning: Saving uninitialized population.")
 
@@ -703,19 +749,18 @@ class GATreePop:
             'max_depth': self.max_depth,
             'max_children': self.max_children,
             'feature_num': self.feature_num,
-            'feature_comparison_map': self.feature_comparison_map, # [수정]
+            'feature_comparison_map': self.feature_comparison_map,
             'feature_bool': self.feature_bool,
         }
         torch.save(state, filepath)
         print(f"Population saved to {filepath}")
 
     def load(self, filepath):
-        """[수정] 파일로부터 집단 전체의 상태를 로드합니다."""
+        """파일로부터 집단 전체의 상태를 로드합니다."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"File not found: {filepath}")
         state = torch.load(filepath)
 
-        # [수정] 하위 호환성 처리
         feature_comparison_map = state.get('feature_comparison_map', {})
         if not feature_comparison_map and 'feature_pair' in state:
              print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
@@ -724,7 +769,7 @@ class GATreePop:
 
         self.__init__(
             state['pop_size'], state['max_nodes'], state['max_depth'],
-            state['max_children'], state['feature_num'], feature_comparison_map, # [수정]
+            state['max_children'], state['feature_num'], feature_comparison_map,
             feature_bool
         )
         self.population_tensor.copy_(state['population_tensor'])
@@ -734,10 +779,9 @@ class GATreePop:
             tree_data_view = self.population_tensor[i]
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
-                self.feature_num, self.feature_comparison_map, self.feature_bool, # [수정]
+                self.feature_num, self.feature_comparison_map, self.feature_bool,
                 data_tensor=tree_data_view
             )
-            # GATree의 load 메서드를 호출하여 인접리스트 생성 등을 위임
             tree.load({
                 'data': tree_data_view,
                 'next_idx': (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item(),
@@ -766,49 +810,33 @@ if __name__ == '__main__':
     # =======================================================
     print("===== [Phase 1] Single GATree Demo =====")
 
-    # GATree가 자체 텐서를 소유하는 경우
     print("\n1. Creating a standalone GATree...")
-    # [수정] FEATURE_COMPARISON_MAP 사용
     tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     tree1.make_tree()
-
-    # 생성된 트리 시각화
     tree1.visualize_graph(file="single_tree_generated.html")
-
-    # 트리 저장
     tree1.save("single_tree.pth")
 
-    # 새로운 객체에 트리 로드
     print("\n2. Loading the tree into a new GATree object...")
-    # [수정] FEATURE_COMPARISON_MAP 사용
     tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     tree2.load("single_tree.pth")
-
-    # 로드된 트리 시각화 (결과가 동일한지 확인)
     tree2.visualize_graph(file="single_tree_loaded.html")
 
-    # 데이터가 동일한지 확인
     assert torch.equal(tree1.data, tree2.data), "Saved and Loaded trees are not identical!"
     print("\nStandalone GATree save/load test PASSED.")
 
-    # --- [신규] predict 메서드 테스트 ---
     print("\n3. Testing the new BFS predict method...")
-    # 테스트용 임의의 피쳐 값 생성
     test_features = {
         'RSI': 50, 'ATR': 0.5, 'WR': -50, 'STOCH_K': 50,
         'SMA_5': 100, 'SMA_20': 98, 'EMA_10': 101, 'EMA_30': 97,
         'BB_upper': 105, 'BB_lower': 95,
         'IsBullishMarket': True, 'IsHighVolatility': False
     }
-    # LONG 포지션일 때의 예측
     action_long = tree1.predict(test_features, 'LONG')
-    print(f"Prediction for 'LONG' position: {action_long}")
-    # HOLD 포지션일 때의 예측
+    print(f"Prediction for 'LONG' position: {action_long} -> Action: {ACTION_TYPE_MAP.get(action_long[0])}")
     action_hold = tree1.predict(test_features, 'HOLD')
-    print(f"Prediction for 'HOLD' position: {action_hold}")
-    # SHORT 포지션일 때의 예측
+    print(f"Prediction for 'HOLD' position: {action_hold} -> Action: {ACTION_TYPE_MAP.get(action_hold[0])}")
     action_short = tree1.predict(test_features, 'SHORT')
-    print(f"Prediction for 'SHORT' position: {action_short}")
+    print(f"Prediction for 'SHORT' position: {action_short} -> Action: {ACTION_TYPE_MAP.get(action_short[0])}")
 
 
     # =====================================================
@@ -816,36 +844,25 @@ if __name__ == '__main__':
     # =====================================================
     print("\n\n===== [Phase 2] GATreePop Demo =====")
 
-    # GATree가 GATreePop의 텐서 view를 참조하는 경우
     print("\n1. Creating a population of GATrees...")
-    # [수정] FEATURE_COMPARISON_MAP 사용
     population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     population1.make_population()
 
-    # 집단의 첫 번째 트리 시각화
     print("\nVisualizing the first tree from the population...")
     first_tree_from_pop = population1.population[0]
     first_tree_from_pop.visualize_graph(file="population_tree_generated.html")
-
-    # 집단 저장
     population1.save("population.pth")
 
-    # 새로운 객체에 집단 로드
     print("\n2. Loading the population into a new GATreePop object...")
-    # [수정] FEATURE_COMPARISON_MAP 사용
     population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
     population2.load("population.pth")
 
-    # 로드된 집단의 첫 번째 트리 시각화 (결과가 동일한지 확인)
     print("\nVisualizing the first tree from the loaded population...")
     first_tree_from_loaded_pop = population2.population[0]
     first_tree_from_loaded_pop.visualize_graph(file="population_tree_loaded.html")
 
-    # 데이터가 동일한지 확인
     assert torch.equal(population1.population_tensor, population2.population_tensor), "Saved and Loaded populations are not identical!"
     print("\nGATreePop save/load test PASSED.")
 
-    # population1의 첫번째 트리 데이터와 population2의 첫번째 트리 데이터가 동일한지 확인
-    # 이는 GATree 객체들이 텐서의 view를 올바르게 참조하고 있음을 증명
     assert torch.equal(population1.population[0].data, population2.population[0].data)
     print("Memory view reference in loaded population confirmed.")
