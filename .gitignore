@@ -8,3 +8,5 @@
 *.npy
 *.npz
 *.pth
+*.csv
+*.yaml
