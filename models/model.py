@@ -174,7 +174,8 @@ class GATree:
 
     def make_tree(self):
         """
-        요구사항에 맞는 랜덤 트리를 생성하고 현재 객체를 초기화합니다.
+        [수정됨] 요구사항에 맞는 랜덤 트리를 생성하고 현재 객체를 초기화합니다.
+        브랜치 간 노드 불균형 문제를 해결하기 위해 예산을 사전에 균등하게 분배합니다.
         """
         self.data.zero_()
         self.initialized = False
@@ -189,15 +190,23 @@ class GATree:
             self.data[idx, COL_DEPTH] = 0
             self.data[idx, COL_PARAM_1] = branch_type
             root_branch_ids.append(idx)
+        
+        # [수정된 로직 1] 전체 생성할 노드 수를 합리적인 범위 내에서 결정
+        min_nodes_to_create = (self.max_nodes - 3) // 2
+        max_nodes_to_create = self.max_nodes - 3
+        # 생성할 노드가 0보다 작아지는 경우 방지
+        if min_nodes_to_create > max_nodes_to_create:
+            min_nodes_to_create = max_nodes_to_create
+        
+        total_nodes = random.randint(min_nodes_to_create, max_nodes_to_create)
 
-        min_total_nodes = 3 + 3
-        total_nodes = random.randint(min_total_nodes, self.max_nodes)
-
-        node_budget = total_nodes - 3
-        nodes_per_branch = node_budget // 3
+        # [수정된 로직 2] 브랜치별 예산을 최대한 균등하게 분배
+        nodes_per_branch = total_nodes // 3
+        remainder = total_nodes % 3
         budgets = [nodes_per_branch] * 3
-        for i in range(node_budget % 3):
-            budgets[random.randint(0, 2)] += 1
+        for i in range(remainder):
+            budgets[i] += 1
+        random.shuffle(budgets)  # 어떤 브랜치가 더 많은 예산을 받을지 무작위로 결정
 
         for i, branch_id in enumerate(root_branch_ids):
             self._grow_branch(branch_id, budgets[i])
@@ -208,56 +217,73 @@ class GATree:
 
     def _grow_branch(self, branch_root_id, budget):
         """
-        한 분기(LONG/HOLD/SHORT) 아래의 트리를 성장시키는 내부 함수.
+        [전면 수정됨] 한 분기(LONG/HOLD/SHORT) 아래의 트리를 성장시키는 내부 함수.
+        'Two-List 관리 시스템'과 '미래 예측 안전 점검' 로직을 사용하여 안정적인 트리를 생성합니다.
         """
-        if budget <= 0:
-            self._create_action_node(branch_root_id)
+        nodes_to_create = budget
+        if nodes_to_create <= 0:
+            if self.next_idx < self.max_nodes:
+                self._create_action_node(branch_root_id)
             return
 
+        # "Two-List 관리 시스템" 초기화
+        # open_list: 자식을 더 가질 수 있는 Decision 노드 목록 (성장 후보)
         open_list = [branch_root_id]
-        nodes_to_create = budget
+        # leaf_list: 현재 자식이 없는 순수 말단 노드 목록 (종료 대상)
+        leaf_list = [branch_root_id]
+        # child_counts: 각 부모 노드의 현재 자식 수를 추적
+        child_counts = {branch_root_id: 0}
 
         while nodes_to_create > 0 and open_list:
+            # [핵심 로직 1] 미래 예측 안전 점검 (Lookahead Safety Check)
+            # 남은 예산이 모든 리프를 Action 노드로 덮기에도 빠듯하거나 부족한지 확인
+            if nodes_to_create <= len(leaf_list)+1:
+                # "강제 종료 모드"로 전환하여 모든 리프에 Action 노드를 붙이고 종료
+                for parent_id in leaf_list:
+                    if self.next_idx < self.max_nodes:
+                        self._create_action_node(parent_id)
+                break  # 브랜치 생성 종료
+
+            # [핵심 로직 2] 일반 성장 모드
             parent_id = random.choice(open_list)
-            parent_depth = int(self.data[parent_id, COL_DEPTH].item())
+            parent_depth = self.data[parent_id, COL_DEPTH].item()
 
-            create_action = (parent_depth + 1 >= self.max_depth)
-            if not create_action:
-                prob_action = 0.2 + 0.5 * (1 - nodes_to_create / budget)
-                if random.random() < prob_action:
-                    create_action = True
+            # CASE 1: 최대 깊이에 도달하여 Action 노드를 생성해야 하는 경우
+            if parent_depth >= self.max_depth - 1:
+                new_node_id = self._create_action_node(parent_id)
+                if new_node_id is not None:
+                    nodes_to_create -= 1
+                
+                # 리스트 관리: 해당 부모는 더 이상 성장/리프가 아님
+                open_list.remove(parent_id)
+                if parent_id in leaf_list:
+                    leaf_list.remove(parent_id)
+                continue
 
-            if create_action:
-                if nodes_to_create >= 1:
-                    new_node_id = self._create_action_node(parent_id)
-                    if new_node_id is not None:
-                        nodes_to_create -= 1
-                    open_list.remove(parent_id)
-                else:
+            # CASE 2: 일반적인 Decision 노드 생성
+            child_id = self._create_decision_node(parent_id)
+            
+            if child_id is not None:
+                # 노드 생성 성공 시
+                nodes_to_create -= 1
+                
+                # 자식 수 카운트 업데이트
+                child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
+                child_counts[child_id] = 0
+
+                # 리스트 관리
+                if parent_id in leaf_list:
+                    leaf_list.remove(parent_id) # 부모는 더 이상 리프가 아님
+                leaf_list.append(child_id)      # 자식은 새로운 리프임
+                open_list.append(child_id)      # 자식은 새로운 성장 후보임
+
+                # 부모의 자식 수가 최대치에 도달하면 성장 후보에서 제외
+                if child_counts[parent_id] >= self.max_children:
                     open_list.remove(parent_id)
             else:
-                num_children = random.randint(1, self.max_children)
-                num_children = min(num_children, nodes_to_create, self.max_nodes - self.next_idx)
-
-                if num_children > 0:
-                    created_count = 0
-                    for _ in range(num_children):
-                        child_id = self._create_decision_node(parent_id)
-                        if child_id is not None:
-                            open_list.append(child_id)
-                            created_count += 1
-
-                    if created_count > 0:
-                        nodes_to_create -= created_count
-                        open_list.remove(parent_id)
-
-        for parent_id in open_list:
-            children_mask = self.data[:, COL_PARENT_IDX] == parent_id
-            active_children_mask = children_mask & (self.data[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED)
-
-            if not active_children_mask.any():
-                if self.next_idx < self.max_nodes:
-                     self._create_action_node(parent_id)
+                # 노드 생성 실패 시 (e.g. 전역 노드 풀 고갈)
+                # 해당 부모는 더 이상 성장할 수 없으므로 성장 후보에서 제외
+                open_list.remove(parent_id)
 
     def _create_action_node(self, parent_id):
         """[전면 수정] Action 노드 하나를 문맥에 맞게 생성하고 Tensor에 기록"""
@@ -800,9 +826,9 @@ class GATreePop:
 
 if __name__ == '__main__':
     # --- 시뮬레이션 파라미터 ---
-    MAX_NODES = 1024
-    MAX_DEPTH = 10
-    MAX_CHILDREN = 5
+    MAX_NODES = 2048
+    MAX_DEPTH = 200
+    MAX_CHILDREN = 200
     POP_SIZE = 5
 
     # =======================================================
