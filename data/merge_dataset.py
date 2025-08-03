@@ -1,17 +1,63 @@
+# === 수정된 merge_dataset.py 파일의 전체 코드 ===
+
 import pandas as pd
 import numpy as np
 import yaml
 import data.ta_lib_feature_generator as talib_feat
+from typing import List, Dict, Any, Tuple
+
+# ==============================================================================
+#           [신규 추가] 모델 설정을 위한 피처 분류 템플릿
+# ==============================================================================
+
+# 1. 피처 vs. 숫자 (Feature vs. Number) 비교용 템플릿
+FEATURE_NUM_TEMPLATE = {
+    'close_change_pct': (-10, 10), 'body_size': (0, 100), 'upper_wick_size': (0, 100),
+    'lower_wick_size': (0, 100), 'total_range': (0, 200), 'body_to_range_ratio': (0, 1),
+    'RSI': (0, 100), '%K': (0, 100), '%D': (0, 100), 'Williams_R': (-100, 0),
+    'CCI': (-250, 250), 'STOCHRSI_K': (0, 100), 'STOCHRSI_D': (0, 100),
+    'PPO': (-50, 50), 'ROC': (-50, 50), 'ULTOSC': (0, 100), 'MOM': (-50, 50),
+    'MACD': (-100, 100), 'MACD_Signal': (-100, 100), 'MACD_Hist': (-50, 50),
+    'ADX': (0, 100), 'DI_plus': (0, 100), 'DI_minus': (0, 100), 'BB_Width': (0, 1),
+    'ATR': (0, 100), 'NATR': (0, 5), 'OBV': (-1e9, 1e9), 'CMF': (-1, 1),
+    'AD': (-1e9, 1e9), 'ADOSC': (-1e9, 1e9), 'HT_DCPERIOD': (0, 100),
+    'HT_SINE': (-1, 1), 'HT_LEADSINE': (-1, 1),
+}
+
+# 2. 피처 vs. 피처 (Feature vs. Feature) 비교용 템플릿
+PRICE_AND_TREND_FEATURES_TEMPLATE = [
+    'Open', 'High', 'Low', 'Close', 'SMA', 'EMA', 'VWMA', 'DEMA', 'TEMA', 'TRIMA',
+    'BB_Upper', 'BB_Mid', 'BB_Lower', 'Ichimoku_Tenkan', 'Ichimoku_Kijun',
+    'Ichimoku_SenkouA', 'Ichimoku_SenkouB', 'Ichimoku_Chikou', 'SAR',
+    'Support_MA', 'Resistance_MA', 'Pivot_Point', 'Support1_Pivot',
+    'Support2_Pivot', 'Resistance1_Pivot', 'Resistance2_Pivot'
+]
+
+# 3. 피처 vs. 불리언 (Feature vs. Boolean) 비교용 템플릿
+FEATURE_BOOL_TEMPLATE = [
+    'InvertedHammers', 'Hammers', 'HangingMen', 'DarkCloudCovers', 'Dojis',
+    'DragonflyDojis', 'GravestoneDojis', 'MorningStars', 'MorningStarDojis',
+    'PiercingPatterns', 'ShootingStars', '3BlackCrows', '3WhiteSoldiers', '3StarsInSouth',
+    'BullishHarami', 'BearishHarami', 'BullishEngulfing', 'BearishEngulfing',
+    'BullishDojiStar', 'BearishDojiStar', 'BullishTasukiGap', 'BearishTasukiGap',
+    'BullishXSideGap3Methods', 'BearishXSideGap3Methods', 'BullishSpinningTop',
+    'BearishSpinningTop', 'BullishRise3Methods', 'BearishFall3Methods',
+    'HT_TRENDMODE',
+]
+
+# ==============================================================================
+#                      기존 함수 (수정 없음)
+# ==============================================================================
 
 def generate_multi_timeframe_features(
     df: pd.DataFrame,
     timestamp_col: str,
     target_timeframes: list,
     feature_params: dict
-):
+) -> Tuple[pd.DataFrame, List[str]]:
     """
     서로 다른 시간 단위의 기술적 분석 지표를 생성하고 기준 데이터프레임에 통합합니다.
-    (이전 답변과 동일한 함수 코드)
+    (이전 코드와 동일하며, 수정되지 않았습니다)
     """
     # --- 0. 입력 유효성 검사 및 초기 설정 ---
     if not target_timeframes:
@@ -28,7 +74,7 @@ def generate_multi_timeframe_features(
     all_new_columns = []
 
     # --- 1. 기준 시간 단위 결정 및 기준 데이터프레임 생성 ---
-    time_deltas = [pd.to_timedelta(tf.replace('m', 'T')) for tf in target_timeframes]
+    time_deltas = [pd.to_timedelta(tf.replace('m', 'T').replace('h','H').replace('d','D')) for tf in target_timeframes]
     base_timeframe = target_timeframes[np.argmin(time_deltas)]
     
     print(f"기준 시간 단위가 '{base_timeframe}'으로 설정되었습니다.")
@@ -40,20 +86,23 @@ def generate_multi_timeframe_features(
         'Close': 'last',
         'Volume': 'sum'
     }
-    base_df = source_df.resample(base_timeframe.replace('m', 'T')).agg(agg_rules)
+    # 시간 단위 문자열 변환 (e.g., '1h' -> '1H')
+    resample_freq = base_timeframe.replace('m', 'T').replace('h','H').replace('d','D')
+    base_df = source_df.resample(resample_freq).agg(agg_rules)
     base_df.dropna(inplace=True)
 
     # --- 2. 시간 단위별 피처 계산 및 통합 ---
     features_by_timeframe = {}
 
-    for timeframe in sorted(list(set(target_timeframes)), key=lambda x: pd.to_timedelta(x.replace('m', 'T'))):
+    for timeframe in sorted(list(set(target_timeframes)), key=lambda x: pd.to_timedelta(x.replace('m', 'T').replace('h','H').replace('d','D'))):
         if timeframe not in feature_params:
             print(f"'{timeframe}'에 대한 피처 설정이 없어 건너뜁니다.")
             continue
             
         print(f"--- '{timeframe}' 시간 단위 피처 계산 시작 ---")
 
-        df_resampled = source_df.resample(timeframe.replace('m', 'T')).agg(agg_rules).dropna()
+        resample_freq = timeframe.replace('m', 'T').replace('h','H').replace('d','D')
+        df_resampled = source_df.resample(resample_freq).agg(agg_rules).dropna()
         
         for func_name, params_list in feature_params[timeframe].items():
             try:
@@ -82,7 +131,7 @@ def generate_multi_timeframe_features(
     print("\n--- 모든 피처를 기준 데이터프레임에 병합합니다 ---")
     final_df = base_df.copy()
 
-    sorted_timeframes = sorted(features_by_timeframe.keys(), key=lambda x: pd.to_timedelta(x.replace('m', 'T')))
+    sorted_timeframes = sorted(features_by_timeframe.keys(), key=lambda x: pd.to_timedelta(x.replace('m', 'T').replace('h','H').replace('d','D')))
 
     for timeframe in sorted_timeframes:
         feature_df = features_by_timeframe[timeframe]
@@ -105,31 +154,85 @@ def generate_multi_timeframe_features(
     print("\n최종 피처 생성 및 통합이 완료되었습니다.")
     return final_df, sorted(list(set(all_new_columns)))
 
+# ==============================================================================
+#           [신규 추가] 모델 설정을 동적으로 생성하는 헬퍼 함수
+# ==============================================================================
+
+def _generate_model_config_from_features(all_generated_cols: List[str]) -> Dict[str, Any]:
+    """
+    생성된 전체 피처 목록을 받아 모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
+    """
+    print("\n--- 생성된 피처를 기반으로 모델 설정(config)을 동적으로 생성합니다 ---")
+    
+    final_feature_num = {}
+    final_feature_bool = []
+    comparison_feature_list = [] # Feature-Feature 비교용 임시 리스트
+    
+    unclassified_cols = []
+
+    for col_name in all_generated_cols:
+        classified = False
+        # 1. 불리언 타입 피처 분류
+        for base_name in FEATURE_BOOL_TEMPLATE:
+            if col_name.startswith(base_name):
+                final_feature_bool.append(col_name)
+                classified = True
+                break
+        if classified: continue
+
+        # 2. 피처-피처 비교 타입 피처 분류
+        for base_name in PRICE_AND_TREND_FEATURES_TEMPLATE:
+            if col_name.startswith(base_name):
+                comparison_feature_list.append(col_name)
+                classified = True
+                break
+        if classified: continue
+
+        # 3. 피처-숫자 비교 타입 피처 분류
+        for base_name, value_range in FEATURE_NUM_TEMPLATE.items():
+            if col_name.startswith(base_name):
+                final_feature_num[col_name] = value_range
+                classified = True
+                break
+        if classified: continue
+        
+        # 4. 분류되지 않은 피처 기록
+        if not classified:
+            unclassified_cols.append(col_name)
+
+    # 5. 최종 feature_comparison_map 생성
+    final_feature_comparison_map = {
+        feat: [other for other in comparison_feature_list if other != feat]
+        for feat in comparison_feature_list
+    }
+    
+    print(f"  - 숫자 비교(feature_num) 타입 피처: {len(final_feature_num)}개")
+    print(f"  - 피처간 비교(feature_comparison) 타입 피처: {len(final_feature_comparison_map)}개")
+    print(f"  - 불리언(feature_bool) 타입 피처: {len(final_feature_bool)}개")
+    
+    if unclassified_cols:
+        print(f"  - 경고: 분류되지 않은 피처 {len(unclassified_cols)}개 발견: {unclassified_cols}")
+
+    return {
+        'feature_num': final_feature_num,
+        'feature_comparison_map': final_feature_comparison_map,
+        'feature_bool': final_feature_bool,
+    }
+
+
+# ==============================================================================
+#            [수정된] 메인 래퍼 함수 및 테스트 실행 부분
+# ==============================================================================
 
 def run_feature_generation_from_yaml(
     df: pd.DataFrame,
     timestamp_col: str,
     target_timeframes: list,
-    yaml_config_path: str='/feature_config.yaml'
-):
+    yaml_config_path: str
+) -> Tuple[pd.DataFrame | None, Dict[str, Any] | None]:
     """
-    YAML 설정 파일을 기반으로 Multi-Timeframe 피처 생성을 실행하는 래퍼 함수입니다.
-
-    이 함수는 YAML 파일 경로를 받아 내부적으로 파라미터를 파싱하고,
-    기존의 `generate_multi_timeframe_features` 함수를 호출하여 피처 생성을 수행합니다.
-
-    Args:
-        df (pd.DataFrame): 'Open', 'High', 'Low', 'Close', 'Volume' 및 타임스탬프 컬럼을 포함하는 원본 데이터프레임.
-        timestamp_col (str): 데이터프레임 내의 타임스탬프 컬럼명.
-        target_timeframes (list): 피처를 생성할 시간 단위 목록 (예: ['5m', '1h', '1d']).
-                                  이 목록에 있는 타임프레임에 대한 설정만 YAML 파일에서 사용됩니다.
-        yaml_config_path (str): 피처 생성 파라미터를 정의한 .yaml 파일의 경로.
-
-    Returns:
-        pd.DataFrame: 모든 시간 단위의 피처가 통합된 최종 데이터프레임.
-                      오류 발생 시 None을 반환합니다.
-        list: 새로 추가된 모든 피처 컬럼명의 리스트.
-              오류 발생 시 None을 반환합니다.
+    YAML 설정 파일을 기반으로 Multi-Timeframe 피처 생성을 실행하고,
+    모델에 필요한 설정 딕셔너리까지 함께 반환하는 래퍼 함수입니다.
     """
     # 1. YAML 설정 파일 로드
     print(f"'{yaml_config_path}' 에서 피처 생성 설정을 로드합니다.")
@@ -144,7 +247,6 @@ def run_feature_generation_from_yaml(
         return None, None
         
     # 2. 요청된 타임프레임에 대한 파라미터만 필터링
-    # YAML 파일에 정의된 키와 target_timeframes를 비교하여 해당 설정만 추출합니다.
     feature_generation_params = {}
     valid_timeframes = []
     for tf in target_timeframes:
@@ -156,105 +258,115 @@ def run_feature_generation_from_yaml(
     
     if not feature_generation_params:
         print("오류: 유효한 타임프레임 설정이 하나도 없습니다. 프로세스를 중단합니다.")
-        return df, []
+        return df, {}
 
     # 3. 메인 피처 생성 함수 호출
     print("\nYAML 설정에 기반하여 Multi-Timeframe 피처 생성을 시작합니다.")
     final_dataframe, added_cols = generate_multi_timeframe_features(
         df=df,
         timestamp_col=timestamp_col,
-        target_timeframes=valid_timeframes, # 유효한 타임프레임만 전달
+        target_timeframes=valid_timeframes,
         feature_params=feature_generation_params
     )
+    
+    # 4. [신규] 생성된 피처 목록으로 모델 설정(config) 생성
+    model_config = _generate_model_config_from_features(added_cols)
 
-    return final_dataframe, added_cols
+    return final_dataframe, model_config
 
-# ==============================================================================
-#                      복잡하고 풍부한 함수 실행 예시
-# ==============================================================================
+
 if __name__ == '__main__':
     # 1. 가상 데이터 생성 (1분봉, 15일치 데이터)
     print("1. 가상 1분봉 데이터 생성...")
-    time_index = pd.to_datetime(pd.date_range(start='2024-07-15 00:00', periods=15*24*60*200, freq='1T'))
+    time_index = pd.date_range(start='2024-07-15 00:00', periods=15 * 24 * 60, freq='T')
     data_size = len(time_index)
     data = {
-        'Timestamp': time_index,
-        'Open': np.random.uniform(-0.5, 0.5, data_size).cumsum() + 2000,
-        'Close': np.random.uniform(-0.5, 0.5, data_size).cumsum() + 2000,
+        'Open time': time_index,
+        'Open': np.random.uniform(-0.1, 0.1, data_size).cumsum() + 2000,
+        'Close': np.random.uniform(-0.1, 0.1, data_size).cumsum() + 2000,
         'Volume': np.random.uniform(10, 100, data_size)
     }
-    data['High'] = np.maximum(data['Open'], data['Close']) + np.random.uniform(0, 2, data_size)
-    data['Low'] = np.minimum(data['Open'], data['Close']) - np.random.uniform(0, 2, data_size)
+    data['High'] = np.maximum(data['Open'], data['Close']) + np.random.uniform(0, 0.2, data_size)
+    data['Low'] = np.minimum(data['Open'], data['Close']) - np.random.uniform(0, 0.2, data_size)
     
     source_df = pd.DataFrame(data)
     print(f"생성된 원본 데이터 Shape: {source_df.shape}")
 
-    # 2. 복잡한 피처 생성 규칙 정의
-    feature_generation_params = {
-        # -- 단기(5분봉) 지표: 빠른 반응성 지표들 --
-        '5m': {
-            'calculate_ema': [{'window': 12}],
-            'calculate_rsi': [{'window': 14}],
-            'calculate_stochastic_oscillator': [{'k_window': 14, 'd_window': 3}],
-        },
-        # -- 중단기(15분봉) 지표 --
-        '15m': {
-            'calculate_ma': [{'window': 20}, {'window': 50}], # 두 개의 다른 SMA 계산
-            'calculate_cci': [{'window': 20}],
-        },
-        # -- 중기(1시간봉) 지표: 추세 및 변동성 중심 --
-        '1h': {
-            'calculate_macd': [{'short_window': 12, 'long_window': 26, 'signal_window': 9}],
-            'calculate_bollinger_bands': [{'window': 20, 'num_std': 2}],
-            'calculate_adx': [{'window': 14}],
-        },
-        # -- 장기(4시간봉) 지표: 긴 호흡의 추세 및 거래량 --
-        '4h': {
-            'calculate_ma': [{'window': 120}], # 긴 기간의 SMA
-            'calculate_atr': [{'window': 14}],
-            'calculate_obv': [{}], # 인자가 없는 함수는 빈 dict 전달
-        },
-        # -- 초장기(일봉) 지표: 지지/저항 및 종합 패턴 --
-        '1d': {
-            'calculate_support_resistance': [{'window': 14}],
-            'calculate_all_candlestick_patterns': [{}], # 모든 캔들 패턴 생성
-        }
-    }
+    # 2. YAML 파일 생성 (테스트용)
+    yaml_content = """
+5m:
+  calculate_ema:
+    - {window: 12}
+  calculate_rsi:
+    - {window: 14}
+  calculate_stochastic_oscillator:
+    - {k_window: 14, d_window: 3}
+15m:
+  calculate_ma:
+    - {window: 20}
+    - {window: 50}
+  calculate_cci:
+    - {window: 20}
+1h:
+  calculate_macd:
+    - {short_window: 12, long_window: 26, signal_window: 9}
+  calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+  calculate_adx:
+    - {window: 14}
+4h:
+  calculate_ma:
+    - {window: 120}
+  calculate_atr:
+    - {window: 14}
+  calculate_obv:
+    - {}
+1d:
+  calculate_support_resistance:
+    - {window: 14}
+  calculate_all_candlestick_patterns:
+    - {}
+"""
+    yaml_path = 'test_feature_config.yaml'
+    with open(yaml_path, 'w') as f:
+        f.write(yaml_content)
 
-    # 3. Multi-Timeframe 피처 생성 함수 호출
-    print("\n2. Multi-Timeframe 피처 생성 시작...")
-    # target_timeframes_list = ['5m', '15m', '1h', '4h', '1d']
-    target_timeframes_list = ['5m', '15m', '1h']
-    final_dataframe, added_cols = generate_multi_timeframe_features(
-        df=df,
-        timestamp_col='Close time',
+
+    # 3. [수정된] Multi-Timeframe 피처 생성 함수 호출
+    print("\n2. Multi-Timeframe 피처 및 모델 설정 생성 시작...")
+    target_timeframes_list = ['5m', '15m', '1h', '4h', '1d']
+    
+    # 함수의 반환값이 (DataFrame, Dict)으로 변경됨
+    final_dataframe, model_config = run_feature_generation_from_yaml(
+        df=source_df,
+        timestamp_col='Open time',
         target_timeframes=target_timeframes_list,
-        feature_params=feature_generation_params
+        yaml_config_path=yaml_path
     )
     
     # 4. 결과 확인
     print("\n3. 최종 결과 확인...")
-    print(f"최종 데이터프레임 Shape: {final_dataframe.shape}")
-    print(f"총 {len(added_cols)}개의 피처가 추가되었습니다.")
-    # 추가된 컬럼 중 일부만 출력
-    print("추가된 컬럼 목록 (일부):", added_cols[:5], "...", added_cols[-5:])
-    
-    # 각 시간 단위별 대표 피처들을 선정하여 병합 결과 확인
-    print("\n각 시간 단위별 대표 피처 병합 결과 샘플 (마지막 15개 행):")
-    display_cols = [
-        'Timestamp',
-        'Close',
-        'RSI_14_5m',                   # 5분봉 대표
-        'SMA_50_15m',                  # 15분봉 대표
-        'MACD_12_26_9_1h',             # 1시간봉 대표
-        # 'ATR_14_4h',                   # 4시간봉 대표
-        # 'Support_MA_14_1d',            # 일봉 대표
-        # 'Hammers_1d'                   # 일봉 캔들 패턴 대표
-    ]
-    # display_cols에 있는 컬럼만 필터링
-    display_cols_exist = [col for col in display_cols if col in final_dataframe.columns]
-    
-    # 소수점 2자리까지만 표시하도록 설정
-    pd.set_option('display.float_format', lambda x: '%.2f' % x)
-    
-    print(final_dataframe[display_cols_exist].tail(15).to_string())
+    if final_dataframe is not None and model_config is not None:
+        print(f"최종 데이터프레임 Shape: {final_dataframe.shape}")
+        
+        # 생성된 model_config 내용 확인
+        print("\n--- 생성된 Model Config 미리보기 ---")
+        
+        # Feature_num
+        fn_keys = list(model_config['feature_num'].keys())
+        print(f"\n[Feature_num] (총 {len(fn_keys)}개)")
+        print(f"  - 예시: {dict(list(model_config['feature_num'].items())[:3])}")
+        
+        # Feature_comparison_map
+        fcm_keys = list(model_config['feature_comparison_map'].keys())
+        print(f"\n[Feature_comparison_map] (총 {len(fcm_keys)}개)")
+        if fcm_keys:
+            print(f"  - 예시 (키): '{fcm_keys[0]}' -> 비교 대상 {len(model_config['feature_comparison_map'][fcm_keys[0]])}개")
+
+        # Feature_bool
+        fb_keys = model_config['feature_bool']
+        print(f"\n[Feature_bool] (총 {len(fb_keys)}개)")
+        print(f"  - 예시: {fb_keys[:5]}")
+
+        print("\n이제 이 'model_config' 딕셔너리를 GATreePop 생성자에 바로 전달할 수 있습니다.")
+        print("예: GATreePop(..., **model_config)")

@@ -716,6 +716,7 @@ class GATreePop:
 
     def make_population(self):
         """설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다."""
+        # 추후 multiprocessing을 통한 생성
         self.population = []
         for i in range(self.pop_size):
             print(f"--- Creating Tree {i+1}/{self.pop_size} ---")
