@@ -36,24 +36,24 @@ void check_tensors(
 
     // Dimension check
     TORCH_CHECK(population.dim() == 3, "Population tensor must be 3D");
-    TORCH_CHECK(features.dim() == 2, "Features tensor must be 2D");
+    // [수정] features 텐서는 이제 1차원입니다.
+    TORCH_CHECK(features.dim() == 1, "Features tensor must be 1D");
     TORCH_CHECK(positions.dim() == 1, "Positions tensor must be 1D");
     TORCH_CHECK(next_indices.dim() == 1, "Next_indices tensor must be 1D");
     TORCH_CHECK(results.dim() == 2, "Results tensor must be 2D");
 
     // Size consistency check
     int pop_size = population.size(0);
-    TORCH_CHECK(features.size(0) == pop_size, "Features tensor pop_size mismatch");
+    // [수정] features 텐서에 대한 pop_size 일관성 체크는 제거합니다.
     TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
     TORCH_CHECK(next_indices.size(0) == pop_size, "Next_indices tensor pop_size mismatch");
     TORCH_CHECK(results.size(0) == pop_size, "Results tensor pop_size mismatch");
     TORCH_CHECK(population.size(2) == NODE_INFO_DIM, "Population tensor node_dim mismatch");
-    // [수정] 결과 텐서의 컬럼 수를 4로 체크
     TORCH_CHECK(results.size(1) == 4, "Results tensor must have 4 columns");
 }
 
 
-// --- C++ Wrapper for the CUDA Kernel --- (수정 없음)
+// --- [수정] C++ Wrapper for the CUDA Kernel ---
 void predict_cuda(
     torch::Tensor population_tensor,
     torch::Tensor features_tensor,
@@ -65,7 +65,8 @@ void predict_cuda(
 
     int pop_size = population_tensor.size(0);
     int max_nodes = population_tensor.size(1);
-    int num_features = features_tensor.size(1);
+    // [수정] num_features는 1D features_tensor의 크기에서 가져옵니다.
+    int num_features = features_tensor.size(0);
 
     launch_predict_kernel(
         population_tensor.data_ptr<float>(),
