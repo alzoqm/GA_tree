@@ -4,8 +4,7 @@
 #include <cuda_runtime.h>
 #include "constants.h"
 
-// --- Device-level Helper Function ---
-// Python의 _evaluate_node와 동일한 로직 (수정 없음)
+// --- Device-level Helper Function --- (수정 없음)
 __device__ bool evaluate_node_device(
     const float* node_data,
     const float* feature_values) {
@@ -13,7 +12,7 @@ __device__ bool evaluate_node_device(
     int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
     int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
     float val1 = feature_values[feat1_idx];
-    float val2 = node_data[COL_PARAM_4]; // feat-num 또는 feat-bool의 비교값
+    float val2 = node_data[COL_PARAM_4];
 
     if (comp_type == COMP_TYPE_FEAT_FEAT) {
         int feat2_idx = static_cast<int>(node_data[COL_PARAM_4]);
@@ -35,10 +34,9 @@ __device__ bool evaluate_node_device(
 
 
 // --- Main CUDA Kernel ---
-// [수정] 결과값이 4개 파라미터로 확장됨
 __global__ void predict_kernel(
     const float* population_ptr,
-    const float* features_ptr,
+    const float* features_ptr, // 이 포인터는 이제 (num_features) 크기의 1D 배열을 가리킵니다.
     const long* positions_ptr,
     const int* next_indices_ptr,
     float* results_ptr,
@@ -54,8 +52,11 @@ __global__ void predict_kernel(
 
     // 2. Setup pointers and variables for the current tree
     const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
-    const float* features = features_ptr + tree_idx * num_features;
-    // [수정] 결과값은 이제 4개 (action_type, param_2, param_3, param_4)
+    
+    // [수정] features 포인터를 인덱싱하지 않고 그대로 사용합니다.
+    // 모든 스레드는 동일한 features 포인터를 공유합니다.
+    const float* features = features_ptr;
+    
     float* result_out = results_ptr + tree_idx * 4;
     const int next_idx = next_indices_ptr[tree_idx];
 
@@ -71,8 +72,8 @@ __global__ void predict_kernel(
         }
     }
 
-    // [수정] 기본 결과값(HOLD) 설정
-    result_out[0] = ACTION_NOT_FOUND; // Python에서 'HOLD'로 처리될 값 (0)
+    // 기본 결과값(HOLD) 설정
+    result_out[0] = ACTION_NOT_FOUND;
     result_out[1] = 0.0f;
     result_out[2] = 0.0f;
     result_out[3] = 0.0f;
@@ -92,7 +93,7 @@ __global__ void predict_kernel(
     
     bool found_action = false;
 
-    // 5. BFS 루프 시작
+    // 5. BFS 루프 시작 (수정 없음)
     while (queue_head < queue_tail && !found_action) {
         int current_node_idx = bfs_queue[queue_head++];
 
@@ -103,11 +104,10 @@ __global__ void predict_kernel(
                 int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
 
                 if (child_node_type == NODE_TYPE_ACTION) {
-                    // [수정] Action 노드의 4개 파라미터를 모두 결과에 기록
-                    result_out[0] = child_node_data[COL_PARAM_1]; // action_type
-                    result_out[1] = child_node_data[COL_PARAM_2]; // param_2
-                    result_out[2] = child_node_data[COL_PARAM_3]; // param_3
-                    result_out[3] = child_node_data[COL_PARAM_4]; // param_4
+                    result_out[0] = child_node_data[COL_PARAM_1];
+                    result_out[1] = child_node_data[COL_PARAM_2];
+                    result_out[2] = child_node_data[COL_PARAM_3];
+                    result_out[3] = child_node_data[COL_PARAM_4];
                     found_action = true;
                     break;
                 }
