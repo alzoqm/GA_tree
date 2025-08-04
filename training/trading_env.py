@@ -22,7 +22,7 @@ from training.predictor import predict_population_cuda
 # --- 시뮬레이션 환경 설정을 위한 상수 정의 ---
 TAKER_FEE_RATE = 0.0004
 MAINTENANCE_MARGIN_RATE = 0.005
-SLIPPAGE_CONSTANT = 0.2
+FIXED_SLIPPAGE_RATE = 0.0005  # 0.05% 고정 슬리피지
 FUNDING_FEE_HOURS = {0, 8, 16}
 
 # [신규] GATree 예측에 필요한 포지션 정수 -> 문자열 변환 맵
@@ -128,10 +128,17 @@ class TradingEnvironment:
 
     def _execute_actions(self, actions_tensor, curr_close, curr_high, curr_low):
         """
-        [신규] GATree의 예측(actions_tensor)을 받아 실제 거래를 실행하고 상태를 업데이트하는 핵심 메서드.
+        [수정] 고정 비율(FIXED_SLIPPAGE_RATE) 슬리피지를 모든 거래에 일관되게 적용하도록 수정된 메서드.
         """
-        volatility = (curr_high - curr_low) / (curr_close + 1e-9)
-        slippage_rate = volatility * SLIPPAGE_CONSTANT
+        # [삭제] 변동성 기반 슬리피지 계산 로직 제거
+        # volatility = (curr_high - curr_low) / (curr_close + 1e-9)
+        # slippage_rate = volatility * SLIPPAGE_CONSTANT
+        
+        # --- 슬리피지가 적용된 체결 가격 미리 계산 ---
+        # 매수 체결가 (롱 진입, 숏 청산): 현재가보다 약간 비싸게 체결
+        buy_exec_price = curr_close * (1 + FIXED_SLIPPAGE_RATE)
+        # 매도 체결가 (숏 진입, 롱 청산): 현재가보다 약간 싸게 체결
+        sell_exec_price = curr_close * (1 - FIXED_SLIPPAGE_RATE)
 
         # --- 상태별 마스크 미리 정의 ---
         currently_hold = (self.pos_list == 0)
@@ -139,13 +146,15 @@ class TradingEnvironment:
         currently_long = (self.pos_list == 2)
         
         # --- 1. 신규 진입 (NEW_LONG / NEW_SHORT) ---
-        for action_type, target_pos, pos_cond in [(ACTION_NEW_LONG, 2, currently_hold), (ACTION_NEW_SHORT, 1, currently_hold)]:
+        for action_type, target_pos, pos_cond, exec_price in [
+            (ACTION_NEW_LONG, 2, currently_hold, buy_exec_price), 
+            (ACTION_NEW_SHORT, 1, currently_hold, sell_exec_price)
+        ]:
             action_mask = (actions_tensor[:, 0] == action_type) & pos_cond
             if action_mask.any():
                 enter_ratio = actions_tensor[action_mask, 1]
                 leverage = actions_tensor[action_mask, 2].long()
                 
-                exec_price = curr_close * (1 + slippage_rate) if target_pos == 2 else curr_close * (1 - slippage_rate)
                 fee = enter_ratio * leverage.float() * TAKER_FEE_RATE
                 
                 self.profit[action_mask] -= fee
@@ -158,23 +167,21 @@ class TradingEnvironment:
         # --- 2. 전체 청산 (CLOSE_ALL) ---
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_ALL) & (self.pos_list != 0)
         if action_mask.any():
-            # 롱 포지션 청산
+            # 롱 포지션 청산 (매도)
             long_close_mask = action_mask & currently_long
             if long_close_mask.any():
                 entry_price = self.price_list[long_close_mask]
                 leverage = self.leverage_ratio[long_close_mask].float()
-                exec_price = curr_close * (1 - slippage_rate)
-                pnl = ((exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[long_close_mask]
+                pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[long_close_mask]
                 fee = self.enter_ratio[long_close_mask] * leverage * TAKER_FEE_RATE
                 self.profit[long_close_mask] += (pnl - fee)
 
-            # 숏 포지션 청산
+            # 숏 포지션 청산 (매수)
             short_close_mask = action_mask & currently_short
             if short_close_mask.any():
                 entry_price = self.price_list[short_close_mask]
                 leverage = self.leverage_ratio[short_close_mask].float()
-                exec_price = curr_close * (1 + slippage_rate)
-                pnl = ((entry_price - exec_price) / entry_price) * leverage * self.enter_ratio[short_close_mask]
+                pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[short_close_mask]
                 fee = self.enter_ratio[short_close_mask] * leverage * TAKER_FEE_RATE
                 self.profit[short_close_mask] += (pnl - fee)
             
@@ -190,31 +197,29 @@ class TradingEnvironment:
         if action_mask.any():
             close_ratio = actions_tensor[action_mask, 1]
             
-            # 롱 포지션 부분 청산
+            # 롱 포지션 부분 청산 (매도)
             long_p_close_mask = action_mask & currently_long
             if long_p_close_mask.any():
                 entry_price = self.price_list[long_p_close_mask]
                 leverage = self.leverage_ratio[long_p_close_mask].float()
-                ratio = close_ratio[currently_long[action_mask]] # 해당 개체들의 close_ratio만 추출
-                exec_price = curr_close * (1 - slippage_rate)
+                ratio = close_ratio[currently_long[action_mask]]
                 
                 closed_margin = self.enter_ratio[long_p_close_mask] * ratio
-                pnl = ((exec_price - entry_price) / entry_price) * leverage * closed_margin
+                pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * closed_margin
                 fee = closed_margin * leverage * TAKER_FEE_RATE
                 
                 self.profit[long_p_close_mask] += (pnl - fee)
                 self.enter_ratio[long_p_close_mask] -= closed_margin
 
-            # 숏 포지션 부분 청산
+            # 숏 포지션 부분 청산 (매수)
             short_p_close_mask = action_mask & currently_short
             if short_p_close_mask.any():
                 entry_price = self.price_list[short_p_close_mask]
                 leverage = self.leverage_ratio[short_p_close_mask].float()
                 ratio = close_ratio[currently_short[action_mask]]
-                exec_price = curr_close * (1 + slippage_rate)
 
                 closed_margin = self.enter_ratio[short_p_close_mask] * ratio
-                pnl = ((entry_price - exec_price) / entry_price) * leverage * closed_margin
+                pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * closed_margin
                 fee = closed_margin * leverage * TAKER_FEE_RATE
 
                 self.profit[short_p_close_mask] += (pnl - fee)
@@ -225,7 +230,10 @@ class TradingEnvironment:
         if action_mask.any():
             add_ratio = actions_tensor[action_mask, 1]
             
-            for pos_type, pos_cond in [(2, currently_long), (1, currently_short)]:
+            for pos_type, pos_cond, exec_price in [
+                (2, currently_long, buy_exec_price),  # 롱 추가 진입은 매수
+                (1, currently_short, sell_exec_price) # 숏 추가 진입은 매도
+            ]:
                 add_mask = action_mask & pos_cond
                 if add_mask.any():
                     ratio = add_ratio[pos_cond[action_mask]]
@@ -235,8 +243,8 @@ class TradingEnvironment:
                     old_price = self.price_list[add_mask]
                     old_ratio = self.enter_ratio[add_mask]
                     
-                    # 추가 진입은 슬리피지 간소화
-                    new_avg_price = (old_price * old_ratio + curr_close * ratio) / (old_ratio + ratio + 1e-9)
+                    # [수정] 추가 진입 시에도 슬리피지가 적용된 가격으로 평단가 계산
+                    new_avg_price = (old_price * old_ratio + exec_price * ratio) / (old_ratio + ratio + 1e-9)
                     
                     self.price_list[add_mask] = new_avg_price
                     self.enter_ratio[add_mask] += ratio
@@ -248,50 +256,42 @@ class TradingEnvironment:
             new_enter_ratio = actions_tensor[action_mask, 1]
             new_leverage = actions_tensor[action_mask, 2].long()
             
-            # 기존 롱 -> 신규 숏
+            # 기존 롱 -> 신규 숏 (매도 후 매도)
             flip_to_short_mask = action_mask & currently_long
             if flip_to_short_mask.any():
-                # 1. 기존 롱 청산
                 entry_price = self.price_list[flip_to_short_mask]
                 leverage = self.leverage_ratio[flip_to_short_mask].float()
-                exec_price_close = curr_close * (1 - slippage_rate)
-                pnl = ((exec_price_close - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
+                pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
                 fee_close = self.enter_ratio[flip_to_short_mask] * leverage * TAKER_FEE_RATE
                 self.profit[flip_to_short_mask] += (pnl - fee_close)
                 
-                # 2. 신규 숏 진입
                 ratio = new_enter_ratio[currently_long[action_mask]]
                 lev = new_leverage[currently_long[action_mask]]
-                exec_price_open = curr_close * (1 - slippage_rate)
                 fee_open = ratio * lev.float() * TAKER_FEE_RATE
                 self.profit[flip_to_short_mask] -= fee_open
                 
                 self.pos_list[flip_to_short_mask] = 1
-                self.price_list[flip_to_short_mask] = exec_price_open
+                self.price_list[flip_to_short_mask] = sell_exec_price # 숏 진입(매도) 가격
                 self.enter_ratio[flip_to_short_mask] = ratio
                 self.leverage_ratio[flip_to_short_mask] = lev
                 self.additional_count[flip_to_short_mask] = 0
 
-            # 기존 숏 -> 신규 롱
+            # 기존 숏 -> 신규 롱 (매수 후 매수)
             flip_to_long_mask = action_mask & currently_short
             if flip_to_long_mask.any():
-                # 1. 기존 숏 청산
                 entry_price = self.price_list[flip_to_long_mask]
                 leverage = self.leverage_ratio[flip_to_long_mask].float()
-                exec_price_close = curr_close * (1 + slippage_rate)
-                pnl = ((entry_price - exec_price_close) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
+                pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
                 fee_close = self.enter_ratio[flip_to_long_mask] * leverage * TAKER_FEE_RATE
                 self.profit[flip_to_long_mask] += (pnl - fee_close)
 
-                # 2. 신규 롱 진입
                 ratio = new_enter_ratio[currently_short[action_mask]]
                 lev = new_leverage[currently_short[action_mask]]
-                exec_price_open = curr_close * (1 + slippage_rate)
                 fee_open = ratio * lev.float() * TAKER_FEE_RATE
                 self.profit[flip_to_long_mask] -= fee_open
                 
                 self.pos_list[flip_to_long_mask] = 2
-                self.price_list[flip_to_long_mask] = exec_price_open
+                self.price_list[flip_to_long_mask] = buy_exec_price # 롱 진입(매수) 가격
                 self.enter_ratio[flip_to_long_mask] = ratio
                 self.leverage_ratio[flip_to_long_mask] = lev
                 self.additional_count[flip_to_long_mask] = 0
@@ -517,8 +517,8 @@ def generation_valid(
             # 엘리트 개체들의 검증 결과
             valid_metrics_np = train_metrics[:elite_size]
             
-            # 높은 성과를 보인 개체 필터링 (예: 복리수익률 > 600%, MDD < 40%)
-            valid_index = np.where((valid_metrics_np[:, 4] > 6.0) & (valid_metrics_np[:, 3] < 0.4))[0]
+            # 높은 성과를 보인 개체 필터링 (예: 복리수익률 > 600%, MDD < 60%)
+            valid_index = np.where((valid_metrics_np[:, 4] > 6.0) & (valid_metrics_np[:, 3] < 0.6))[0]
             
             if len(valid_index) > 0:
                 new_best_metrics = torch.from_numpy(valid_metrics_np[valid_index])
