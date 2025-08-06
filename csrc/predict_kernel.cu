@@ -1,13 +1,15 @@
-// --- START OF FILE csrc/predict_kernel.cu ---
-
-// csrc/predict_kernel.cu
+// csrc/predict_kernel.cu (수정됨)
 #include <cuda_runtime.h>
 #include "constants.h"
+
+// [신규] 공유 메모리에 캐싱할 피처의 최대 개수.
+// 실제 피처 수가 이보다 많으면 에러가 발생합니다. (C++ 래퍼에서 체크)
+constexpr int MAX_FEATURES_IN_SHARED_MEM = 1024;
 
 // --- Device-level Helper Function ---
 __device__ bool evaluate_node_device(
     const float* node_data,
-    const float* feature_values) {
+    const float* feature_values) { // 이제 feature_values는 공유 메모리 포인터가 됩니다.
 
     int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
     int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
@@ -39,23 +41,36 @@ __global__ void predict_kernel(
     const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
+    // [신규] 인접 리스트 포인터
+    const int* offset_ptr,
+    const int* child_indices_ptr,
     float* results_ptr,
-    int* bfs_queue_buffer, // [신규] 버퍼 포인터 인자 추가
+    int* bfs_queue_buffer,
     int pop_size,
     int max_nodes,
     int num_features) {
+
+    // [신규] 공유 메모리 선언
+    __shared__ float feature_cache[MAX_FEATURES_IN_SHARED_MEM];
 
     // 1. Thread-to-Tree Mapping
     const int tree_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (tree_idx >= pop_size) {
         return;
     }
+    
+    // [신규] 블록의 첫 번째 스레드가 피처 값을 공유 메모리로 캐싱
+    if (threadIdx.x < num_features) {
+        feature_cache[threadIdx.x] = features_ptr[threadIdx.x];
+    }
+    __syncthreads(); // 블록 내 모든 스레드가 캐싱 완료까지 대기
 
     // 2. Setup pointers and variables for the current tree
     const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
-    const float* features = features_ptr;
     float* result_out = results_ptr + tree_idx * 4;
     const int next_idx = next_indices_ptr[tree_idx];
+    // [신규] 현재 트리에 해당하는 오프셋 배열 부분 포인터 설정
+    const int* tree_offset_ptr = offset_ptr + tree_idx * max_nodes;
 
     // 3. Find the starting node (root branch)
     long start_pos_type = positions_ptr[tree_idx];
@@ -69,7 +84,6 @@ __global__ void predict_kernel(
         }
     }
 
-    // 기본 결과값(HOLD) 설정
     result_out[0] = ACTION_NOT_FOUND;
     result_out[1] = 0.0f;
     result_out[2] = 0.0f;
@@ -79,13 +93,11 @@ __global__ void predict_kernel(
         return;
     }
 
-    // 4. [수정] BFS를 위한 로컬 포인터 및 큐 관리 변수 설정
-    // 고정 크기 로컬 배열 대신, 전달받은 버퍼에서 현재 스레드가 사용할 공간을 가리키는 포인터를 설정합니다.
+    // 4. BFS를 위한 큐 관리 변수 설정
     int* bfs_queue = bfs_queue_buffer + tree_idx * max_nodes;
     int queue_head = 0;
     int queue_tail = 0;
 
-    // [수정] 큐 크기 검사를 max_nodes 기준으로 변경
     if (queue_tail < max_nodes) {
         bfs_queue[queue_tail++] = start_node_idx;
     }
@@ -96,27 +108,28 @@ __global__ void predict_kernel(
     while (queue_head < queue_tail && !found_action) {
         int current_node_idx = bfs_queue[queue_head++];
 
-        for (int child_idx = 0; child_idx < next_idx; ++child_idx) {
+        // [수정] 비효율적인 선형 탐색을 인접 리스트 조회로 변경 (핵심 최적화)
+        int start_offset = tree_offset_ptr[current_node_idx];
+        int end_offset = tree_offset_ptr[current_node_idx + 1];
+
+        for (int i = start_offset; i < end_offset; ++i) {
+            int child_idx = child_indices_ptr[i];
             const float* child_node_data = tree_data + child_idx * NODE_INFO_DIM;
+            int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
 
-            if (static_cast<int>(child_node_data[COL_PARENT_IDX]) == current_node_idx) {
-                int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
-
-                if (child_node_type == NODE_TYPE_ACTION) {
-                    result_out[0] = child_node_data[COL_PARAM_1];
-                    result_out[1] = child_node_data[COL_PARAM_2];
-                    result_out[2] = child_node_data[COL_PARAM_3];
-                    result_out[3] = child_node_data[COL_PARAM_4];
-                    found_action = true;
-                    break;
-                }
-                
-                else if (child_node_type == NODE_TYPE_DECISION) {
-                    if (evaluate_node_device(child_node_data, features)) {
-                        // [수정] 큐 크기 검사를 max_nodes 기준으로 변경
-                        if (queue_tail < max_nodes) {
-                            bfs_queue[queue_tail++] = child_idx;
-                        }
+            if (child_node_type == NODE_TYPE_ACTION) {
+                result_out[0] = child_node_data[COL_PARAM_1];
+                result_out[1] = child_node_data[COL_PARAM_2];
+                result_out[2] = child_node_data[COL_PARAM_3];
+                result_out[3] = child_node_data[COL_PARAM_4];
+                found_action = true;
+                break; // Action을 찾았으므로 더 이상 자식을 볼 필요 없음
+            }
+            else if (child_node_type == NODE_TYPE_DECISION) {
+                // [수정] 공유 메모리에 캐시된 피처 값을 사용
+                if (evaluate_node_device(child_node_data, feature_cache)) {
+                    if (queue_tail < max_nodes) {
+                        bfs_queue[queue_tail++] = child_idx;
                     }
                 }
             }
@@ -130,8 +143,11 @@ void launch_predict_kernel(
     const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
+    // [신규] 인접 리스트 포인터
+    const int* offset_ptr,
+    const int* child_indices_ptr,
     float* results_ptr,
-    int* bfs_queue_buffer_ptr, // [신규] 인자 추가
+    int* bfs_queue_buffer_ptr,
     int pop_size,
     int max_nodes,
     int num_features) {
@@ -140,18 +156,18 @@ void launch_predict_kernel(
 
     const int threads_per_block = 256;
     const int num_blocks = (pop_size + threads_per_block - 1) / threads_per_block;
-
+    
     predict_kernel<<<num_blocks, threads_per_block>>>(
         population_ptr,
         features_ptr,
         positions_ptr,
         next_indices_ptr,
+        offset_ptr,
+        child_indices_ptr,
         results_ptr,
-        bfs_queue_buffer_ptr, // [신규] 커널에 포인터 전달
+        bfs_queue_buffer_ptr,
         pop_size,
         max_nodes,
         num_features
     );
 }
-
-// --- END OF FILE csrc/predict_kernel.cu ---

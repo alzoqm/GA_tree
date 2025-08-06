@@ -1,4 +1,4 @@
-# training/trading_env.py
+# training/trading_env.py (수정된 전체 코드)
 
 import os
 import torch
@@ -8,21 +8,18 @@ from tqdm import tqdm
 from copy import deepcopy
 
 from models.model import GATreePop
-
 from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
-from training.predictor import predict_population_cuda
+# [수정] predictor에서 두 개의 함수를 임포트
+from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 
 # ##############################################################################
 #           거래 환경 및 시뮬레이션 핵심 로직 (수정됨)
 # ##############################################################################
 
-# --- [제거] 시뮬레이션 환경 설정을 위한 전역 상수 정의 제거 ---
-# TAKER_FEE_RATE, MAINTENANCE_MARGIN_RATE 등은 TradingEnvironment 클래스 내부로 이동
-
-# --- [수정 없음] GATree 예측에 필요한 포지션 정수 -> 문자열 변환 맵 ---
+# 포지션 정수 -> 문자열 변환 맵
 INT_TO_POSITION_MAP = {
     0: 'HOLD',
     1: 'SHORT',
@@ -32,19 +29,18 @@ INT_TO_POSITION_MAP = {
 
 class TradingEnvironment:
     """
-    [수정] 거래 환경 설정을 생성자에서 받아 초기화하는 방식으로 변경된 거래 시뮬레이션 환경 클래스.
+    거래 환경 설정을 생성자에서 받아 초기화하는 거래 시뮬레이션 환경 클래스.
+    (이 클래스 내부 로직은 변경되지 않았습니다.)
     """
     def __init__(self, chromosomes_size, env_config, device='cpu'):
         self.device = device
         self.chromosomes_size = chromosomes_size
         
-        # --- [신규] 시뮬레이션 환경 변수를 config에서 받아 인스턴스 변수로 저장 ---
         self.taker_fee_rate = env_config['taker_fee_rate']
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
-        self.funding_fee_hours = {0, 8, 16} # 펀딩피 시간은 일반적으로 고정이므로 유지
+        self.funding_fee_hours = {0, 8, 16}
 
-        # --- 나머지 변수들은 기존과 동일 ---
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
         self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
@@ -70,7 +66,7 @@ class TradingEnvironment:
     def _apply_funding_fees(self, current_timestamp, funding_rate):
         if self.last_timestamp is None:
             return
-        for hour in self.funding_fee_hours: # [수정] 인스턴스 변수 사용
+        for hour in self.funding_fee_hours:
             funding_time_today = self.last_timestamp.normalize().replace(hour=hour)
             funding_time_next_day = funding_time_today + pd.Timedelta(days=1)
             for ft in [funding_time_today, funding_time_next_day]:
@@ -98,7 +94,6 @@ class TradingEnvironment:
         pnl_percent[long_mask_local] = (curr_price - pos_price[long_mask_local]) / pos_price[long_mask_local]
         pnl_percent[short_mask_local] = (pos_price[short_mask_local] - curr_price) / pos_price[short_mask_local]
         margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-        # [수정] 인스턴스 변수 사용
         maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
         liquidation_mask_local = margin_balance <= maintenance_margin
         if not liquidation_mask_local.any():
@@ -114,7 +109,6 @@ class TradingEnvironment:
         self.holding_period[liquidated_indices] = 0
 
     def _execute_actions(self, actions_tensor, curr_close, curr_high, curr_low):
-        # [수정] 인스턴스 변수 사용
         buy_exec_price = curr_close * (1 + self.fixed_slippage_rate)
         sell_exec_price = curr_close * (1 - self.fixed_slippage_rate)
         currently_hold = (self.pos_list == 0)
@@ -125,7 +119,6 @@ class TradingEnvironment:
             if action_mask.any():
                 enter_ratio = actions_tensor[action_mask, 1]
                 leverage = actions_tensor[action_mask, 2].long()
-                # [수정] 인스턴스 변수 사용
                 fee = enter_ratio * leverage.float() * self.taker_fee_rate
                 self.profit[action_mask] -= fee
                 self.pos_list[action_mask] = target_pos
@@ -140,7 +133,6 @@ class TradingEnvironment:
                 entry_price = self.price_list[long_close_mask]
                 leverage = self.leverage_ratio[long_close_mask].float()
                 pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[long_close_mask]
-                # [수정] 인스턴스 변수 사용
                 fee = self.enter_ratio[long_close_mask] * leverage * self.taker_fee_rate
                 self.profit[long_close_mask] += (pnl - fee)
             short_close_mask = action_mask & currently_short
@@ -148,7 +140,6 @@ class TradingEnvironment:
                 entry_price = self.price_list[short_close_mask]
                 leverage = self.leverage_ratio[short_close_mask].float()
                 pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[short_close_mask]
-                # [수정] 인스턴스 변수 사용
                 fee = self.enter_ratio[short_close_mask] * leverage * self.taker_fee_rate
                 self.profit[short_close_mask] += (pnl - fee)
             self.pos_list[action_mask] = 0
@@ -166,7 +157,6 @@ class TradingEnvironment:
                 ratio = close_ratio[currently_long[action_mask]]
                 closed_margin = self.enter_ratio[long_p_close_mask] * ratio
                 pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * closed_margin
-                # [수정] 인스턴스 변수 사용
                 fee = closed_margin * leverage * self.taker_fee_rate
                 self.profit[long_p_close_mask] += (pnl - fee)
                 self.enter_ratio[long_p_close_mask] -= closed_margin
@@ -177,7 +167,6 @@ class TradingEnvironment:
                 ratio = close_ratio[currently_short[action_mask]]
                 closed_margin = self.enter_ratio[short_p_close_mask] * ratio
                 pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * closed_margin
-                # [수정] 인스턴스 변수 사용
                 fee = closed_margin * leverage * self.taker_fee_rate
                 self.profit[short_p_close_mask] += (pnl - fee)
                 self.enter_ratio[short_p_close_mask] -= closed_margin
@@ -188,7 +177,6 @@ class TradingEnvironment:
                 add_mask = action_mask & pos_cond
                 if add_mask.any():
                     ratio = add_ratio[pos_cond[action_mask]]
-                    # [수정] 인스턴스 변수 사용
                     fee = ratio * self.leverage_ratio[add_mask].float() * self.taker_fee_rate
                     self.profit[add_mask] -= fee
                     old_price = self.price_list[add_mask]
@@ -206,12 +194,10 @@ class TradingEnvironment:
                 entry_price = self.price_list[flip_to_short_mask]
                 leverage = self.leverage_ratio[flip_to_short_mask].float()
                 pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
-                # [수정] 인스턴스 변수 사용
                 fee_close = self.enter_ratio[flip_to_short_mask] * leverage * self.taker_fee_rate
                 self.profit[flip_to_short_mask] += (pnl - fee_close)
                 ratio = new_enter_ratio[currently_long[action_mask]]
                 lev = new_leverage[currently_long[action_mask]]
-                # [수정] 인스턴스 변수 사용
                 fee_open = ratio * lev.float() * self.taker_fee_rate
                 self.profit[flip_to_short_mask] -= fee_open
                 self.pos_list[flip_to_short_mask] = 1
@@ -224,12 +210,10 @@ class TradingEnvironment:
                 entry_price = self.price_list[flip_to_long_mask]
                 leverage = self.leverage_ratio[flip_to_long_mask].float()
                 pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
-                # [수정] 인스턴스 변수 사용
                 fee_close = self.enter_ratio[flip_to_long_mask] * leverage * self.taker_fee_rate
                 self.profit[flip_to_long_mask] += (pnl - fee_close)
                 ratio = new_enter_ratio[currently_short[action_mask]]
                 lev = new_leverage[currently_short[action_mask]]
-                # [수정] 인스턴스 변수 사용
                 fee_open = ratio * lev.float() * self.taker_fee_rate
                 self.profit[flip_to_long_mask] -= fee_open
                 self.pos_list[flip_to_long_mask] = 2
@@ -291,11 +275,9 @@ class TradingEnvironment:
 #           유틸리티 및 피트니스 계산 래퍼 함수 (수정됨)
 # ##############################################################################
 
-# --- [수정 없음] 전역 기울기 계산 비활성화 ---
 torch.set_grad_enabled(False)
 
 def calculate_fitness(metrics, weights):
-    """[수정] 피트니스 가중치를 외부 인자로 받도록 변경된 피트니스 계산 함수"""
     chromosomes_size = len(metrics)
     def normalize_metric(metric, higher_is_better=True):
         valid_mask = ~np.isin(metric, [-1e9, 1e9]) & ~np.isnan(metric)
@@ -319,7 +301,6 @@ def calculate_fitness(metrics, weights):
     normalized_metrics[:, 3] = normalize_metric(metrics[:, 3], higher_is_better=False)
     normalized_metrics[:, 4] = normalize_metric(metrics[:, 4], higher_is_better=True)
     
-    # [수정] 인자로 받은 가중치 사용
     fitness_values = np.sum(normalized_metrics * np.array(weights), axis=1)
     invalid_trade_mask = metrics[:, 0] == -1e9
     fitness_values[invalid_trade_mask] = -1.0
@@ -330,19 +311,20 @@ def fitness_fn(
     population: GATreePop,
     data: pd.DataFrame,
     all_feature_names: list,
+    # [신규] 인접 리스트 텐서를 인자로 받음
+    adj_offsets: torch.Tensor,
+    adj_indices: torch.Tensor,
     start_data_cnt: int,
     stop_data_cnt: int,
     device: str,
-    evaluation_config: dict # [신규] 평가 관련 전체 설정을 받음
+    evaluation_config: dict
 ):
     """
-    [수정] evaluation_config를 받아 TradingEnvironment와 get_final_metrics에
-    필요한 설정값을 전달하는 메인 피트니스 평가 래퍼 함수.
+    [수정] 인접 리스트를 받아 predict_population_cuda에 전달하는 래퍼 함수.
     """
     env_config = evaluation_config['simulation_env']
     fitness_cfg = evaluation_config['fitness_function']
 
-    # [수정] TradingEnvironment 생성 시 env_config 주입
     environment = TradingEnvironment(
         chromosomes_size=population.pop_size, 
         env_config=env_config, 
@@ -359,10 +341,13 @@ def fitness_fn(
         
         current_positions_str = [INT_TO_POSITION_MAP[pos.item()] for pos in environment.pos_list]
         
+        # [수정] 예측 함수 호출 시 인접 리스트 전달
         predicted_actions = predict_population_cuda(
             population=population,
             feature_values=feature_values_series,
             current_positions=current_positions_str,
+            adj_offsets=adj_offsets,
+            adj_indices=adj_indices,
             device=device
         )
         
@@ -373,7 +358,6 @@ def fitness_fn(
 
     pbar.close()
     
-    # [수정] get_final_metrics 호출 시 minimum_trades 값을 config에서 가져옴
     final_metrics = environment.get_final_metrics(minimum_date=fitness_cfg['minimum_trades'])
     return final_metrics
 
@@ -392,17 +376,16 @@ def generation_valid(
     elite_size: int,
     device: str,
     warming_step: int,
-    evaluation_config: dict, # [신규] 평가 설정
-    output_dir: str,         # [신규] 체크포인트 저장을 위한 경로
+    evaluation_config: dict,
+    output_dir: str,
     best_profit=None,
     best_chromosomes=None,
     start_gen: int = 0
 ):
-    """[수정] evaluation_config와 output_dir을 인자로 받아 사용하는 메인 학습 루프"""
+    """[수정] 세대마다 인접 리스트를 생성하여 fitness_fn에 전달하는 학습 루프"""
     
     best_profit = best_profit
     best_chromosomes = best_chromosomes
-    # [수정] 체크포인트 저장 경로를 output_dir 기준으로 설정
     checkpoint_dir = os.path.join(output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
     
@@ -411,17 +394,23 @@ def generation_valid(
 
     population = evolution.population
     all_feature_names = population.all_features
-    # [신규] 피트니스 가중치를 config에서 미리 추출
     fitness_weights = evaluation_config['fitness_function']['weights']
 
     for gen_idx in range(start_gen, gen_loop):
         print(f'generation {gen_idx}: ')
         
-        # [수정] fitness_fn 호출 시 evaluation_config 전달
+        # [신규] 세대 시작 시 인접 리스트 생성
+        adj_offsets, adj_indices = build_adjacency_list_cuda(population)
+        if adj_offsets is None:
+            raise RuntimeError("Failed to build adjacency list on GPU.")
+
+        # [수정] fitness_fn 호출 시 인접 리스트 전달
         train_metrics = fitness_fn(
             population=population,
             data=data_1m,
             all_feature_names=all_feature_names,
+            adj_offsets=adj_offsets,
+            adj_indices=adj_indices,
             start_data_cnt=skip_data_cnt,
             stop_data_cnt=valid_skip_data_cnt,
             device=device,
@@ -445,7 +434,6 @@ def generation_valid(
 
                 if len(best_chromosomes) > best_size:
                     print('check_discard')
-                    # [수정] calculate_fitness 호출 시 weights 전달
                     best_fitness_scores = calculate_fitness(best_profit.numpy(), weights=fitness_weights)
                     top_indices = torch.topk(torch.from_numpy(best_fitness_scores), k=best_size).indices
                     best_profit = best_profit[top_indices]
@@ -458,7 +446,6 @@ def generation_valid(
             "best_chromosomes": best_chromosomes,
         }
         
-        # [수정] calculate_fitness 호출 시 weights 전달
         train_fitness = calculate_fitness(train_metrics, weights=fitness_weights)
         torch.save(gen_data, os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt'))
         
@@ -473,20 +460,27 @@ def generation_test(
     start_data_cnt: int,
     end_data_cnt: int,
     device: str,
-    evaluation_config: dict # [신규] 평가 설정
+    evaluation_config: dict
 ):
-    """[수정] 저장된 최적의 GATree 집단을 사용하여 테스트를 수행 (evaluation_config 사용)"""
+    """[수정] 테스트 시에도 인접 리스트를 생성하여 사용"""
 
     if not isinstance(data_1m.index, pd.DatetimeIndex):
         data_1m.index = pd.to_datetime(data_1m.index)
 
     all_feature_names = population.all_features
     
-    # [수정] fitness_fn 호출 시 evaluation_config 전달
+    # [신규] 테스트 시작 전 인접 리스트 생성
+    adj_offsets, adj_indices = build_adjacency_list_cuda(population)
+    if adj_offsets is None:
+        raise RuntimeError("Failed to build adjacency list on GPU for test.")
+        
+    # [수정] fitness_fn 호출 시 인접 리스트 전달
     test_metrics = fitness_fn(
         population=population,
         data=data_1m,
         all_feature_names=all_feature_names,
+        adj_offsets=adj_offsets,
+        adj_indices=adj_indices,
         start_data_cnt=start_data_cnt,
         stop_data_cnt=end_data_cnt,
         device=device,
