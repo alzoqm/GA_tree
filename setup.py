@@ -1,4 +1,4 @@
-# setup.py
+# setup.py (수정됨)
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -10,12 +10,8 @@ setup(
             sources=[
                 'csrc/predict.cpp',
                 'csrc/predict_kernel.cu',
+                'csrc/adjacency_builder.cu', # [신규] 빌더 소스 파일 추가
             ],
-            # 디버깅이 필요할 경우 아래 주석을 해제하세요.
-            # extra_compile_args={
-            #     'cxx': ['-g'],
-            #     'nvcc': ['-G', '-g']
-            # }
         )
     ],
     cmdclass={
