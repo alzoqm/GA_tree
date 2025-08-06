@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include "constants.h"
 
-// --- Device-level Helper Function --- (수정 없음)
+// --- Device-level Helper Function ---
 __device__ bool evaluate_node_device(
     const float* node_data,
     const float* feature_values) {
@@ -33,13 +33,14 @@ __device__ bool evaluate_node_device(
 }
 
 
-// --- Main CUDA Kernel ---
+// --- [수정] Main CUDA Kernel ---
 __global__ void predict_kernel(
     const float* population_ptr,
-    const float* features_ptr, // 이 포인터는 이제 (num_features) 크기의 1D 배열을 가리킵니다.
+    const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
     float* results_ptr,
+    int* bfs_queue_buffer, // [신규] 버퍼 포인터 인자 추가
     int pop_size,
     int max_nodes,
     int num_features) {
@@ -52,11 +53,7 @@ __global__ void predict_kernel(
 
     // 2. Setup pointers and variables for the current tree
     const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
-    
-    // [수정] features 포인터를 인덱싱하지 않고 그대로 사용합니다.
-    // 모든 스레드는 동일한 features 포인터를 공유합니다.
     const float* features = features_ptr;
-    
     float* result_out = results_ptr + tree_idx * 4;
     const int next_idx = next_indices_ptr[tree_idx];
 
@@ -82,18 +79,20 @@ __global__ void predict_kernel(
         return;
     }
 
-    // 4. BFS(너비 우선 탐색)를 위한 로컬 원형 큐
-    int bfs_queue[2048];
+    // 4. [수정] BFS를 위한 로컬 포인터 및 큐 관리 변수 설정
+    // 고정 크기 로컬 배열 대신, 전달받은 버퍼에서 현재 스레드가 사용할 공간을 가리키는 포인터를 설정합니다.
+    int* bfs_queue = bfs_queue_buffer + tree_idx * max_nodes;
     int queue_head = 0;
     int queue_tail = 0;
 
-    if (queue_tail < 2048) {
+    // [수정] 큐 크기 검사를 max_nodes 기준으로 변경
+    if (queue_tail < max_nodes) {
         bfs_queue[queue_tail++] = start_node_idx;
     }
     
     bool found_action = false;
 
-    // 5. BFS 루프 시작 (수정 없음)
+    // 5. BFS 루프 시작
     while (queue_head < queue_tail && !found_action) {
         int current_node_idx = bfs_queue[queue_head++];
 
@@ -114,7 +113,8 @@ __global__ void predict_kernel(
                 
                 else if (child_node_type == NODE_TYPE_DECISION) {
                     if (evaluate_node_device(child_node_data, features)) {
-                        if (queue_tail < 2048) {
+                        // [수정] 큐 크기 검사를 max_nodes 기준으로 변경
+                        if (queue_tail < max_nodes) {
                             bfs_queue[queue_tail++] = child_idx;
                         }
                     }
@@ -124,13 +124,14 @@ __global__ void predict_kernel(
     }
 }
 
-// --- Kernel Launcher --- (수정 없음)
+// --- [수정] Kernel Launcher ---
 void launch_predict_kernel(
     const float* population_ptr,
     const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
     float* results_ptr,
+    int* bfs_queue_buffer_ptr, // [신규] 인자 추가
     int pop_size,
     int max_nodes,
     int num_features) {
@@ -146,6 +147,7 @@ void launch_predict_kernel(
         positions_ptr,
         next_indices_ptr,
         results_ptr,
+        bfs_queue_buffer_ptr, // [신규] 커널에 포인터 전달
         pop_size,
         max_nodes,
         num_features

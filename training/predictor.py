@@ -3,6 +3,7 @@
 import torch
 import pandas as pd
 from typing import List, Dict
+import random # 테스트 코드용
 
 # 프로젝트 구조에 따라 model, gatree_cuda 모듈을 임포트합니다.
 # 이 파일이 프로젝트 루트에서 실행된다고 가정합니다.
@@ -73,37 +74,40 @@ def predict_population_cuda(
     # 1. CUDA 커널에 전달할 텐서 준비
     
     # 1-1. population_tensor: (pop_size, max_nodes, 7), float32
-    # GATreePop 객체가 이미 가지고 있는 메인 텐서
     population_tensor = population.population_tensor.to(device)
 
     # 1-2. features_tensor: (num_features,), float32
-    # GATree가 인식하는 전체 피처 리스트 순서에 맞게 pandas Series를 정렬하고 텐서로 변환
-    # 이 과정을 통해 커널이 항상 일관된 순서의 피처 값을 받도록 보장
     ordered_features = feature_values.reindex(population.all_features).values
     features_tensor = torch.tensor(ordered_features, dtype=torch.float32, device=device)
 
     # 1-3. positions_tensor: (pop_size,), int64 (long)
-    # 문자열 리스트를 정수 리스트로 변환
     positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
     positions_tensor = torch.tensor(positions_int, dtype=torch.int64, device=device)
 
     # 1-4. next_indices_tensor: (pop_size,), int32
-    # 각 트리의 실제 사용 중인 노드 수
     next_indices = population.return_next_idx()
     next_indices_tensor = torch.tensor(next_indices, dtype=torch.int32, device=device)
     
     # 1-5. results_tensor: (pop_size, 4), float32
-    # CUDA 커널이 결과를 채워넣을 빈 출력 버퍼
     results_tensor = torch.zeros((population.pop_size, 4), dtype=torch.float32, device=device)
+
+    # [신규] 1-6. BFS 큐 버퍼 텐서 생성
+    # 각 트리가 최대 max_nodes만큼의 큐 공간을 가질 수 있도록 버퍼를 할당합니다.
+    bfs_queue_buffer = torch.zeros(
+        (population.pop_size, population.max_nodes), 
+        dtype=torch.int32, 
+        device=device
+    )
     
     # 2. 컴파일된 CUDA 확장 모듈 함수 호출
-    # 모든 텐서는 CUDA 장치 위에 있어야 하며, contiguous 메모리 구조여야 함 (GATreePop에서 보장)
+    # [수정] bfs_queue_buffer를 새로운 인자로 추가하여 호출
     gatree_cuda.predict(
         population_tensor,
         features_tensor,
         positions_tensor,
         next_indices_tensor,
-        results_tensor  # 이 텐서에 결과가 in-place로 채워짐
+        results_tensor,
+        bfs_queue_buffer  # [신규] 추가된 인자
     )
 
     # 3. 결과 반환
