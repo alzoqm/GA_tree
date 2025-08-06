@@ -4,7 +4,7 @@ import torch
 import random
 from typing import List, Dict, Any
 
-from models.model import (
+from models.constants import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1, COL_PARAM_2,
     COL_PARAM_3, COL_PARAM_4, NODE_TYPE_UNUSED, NODE_TYPE_DECISION,
     NODE_TYPE_ACTION, COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT, COMP_TYPE_FEAT_BOOL,

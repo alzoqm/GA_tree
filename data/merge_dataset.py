@@ -7,43 +7,11 @@ import data.ta_lib_feature_generator as talib_feat
 from typing import List, Dict, Any, Tuple
 
 # ==============================================================================
-#           [신규 추가] 모델 설정을 위한 피처 분류 템플릿
+#           [수정] 피처 분류 템플릿 제거
 # ==============================================================================
+# FEATURE_NUM_TEMPLATE, PRICE_AND_TREND_FEATURES_TEMPLATE, FEATURE_BOOL_TEMPLATE
+# 변수들이 여기서 삭제되었습니다. 이제 이 정보는 YAML 설정 파일에서 가져옵니다.
 
-# 1. 피처 vs. 숫자 (Feature vs. Number) 비교용 템플릿
-FEATURE_NUM_TEMPLATE = {
-    'close_change_pct': (-10, 10), 'body_size': (0, 100), 'upper_wick_size': (0, 100),
-    'lower_wick_size': (0, 100), 'total_range': (0, 200), 'body_to_range_ratio': (0, 1),
-    'RSI': (0, 100), '%K': (0, 100), '%D': (0, 100), 'Williams_R': (-100, 0),
-    'CCI': (-250, 250), 'STOCHRSI_K': (0, 100), 'STOCHRSI_D': (0, 100),
-    'PPO': (-50, 50), 'ROC': (-50, 50), 'ULTOSC': (0, 100), 'MOM': (-50, 50),
-    'MACD': (-100, 100), 'MACD_Signal': (-100, 100), 'MACD_Hist': (-50, 50),
-    'ADX': (0, 100), 'DI_plus': (0, 100), 'DI_minus': (0, 100), 'BB_Width': (0, 1),
-    'ATR': (0, 100), 'NATR': (0, 5), 'OBV': (-1e9, 1e9), 'CMF': (-1, 1),
-    'AD': (-1e9, 1e9), 'ADOSC': (-1e9, 1e9), 'HT_DCPERIOD': (0, 100),
-    'HT_SINE': (-1, 1), 'HT_LEADSINE': (-1, 1),
-}
-
-# 2. 피처 vs. 피처 (Feature vs. Feature) 비교용 템플릿
-PRICE_AND_TREND_FEATURES_TEMPLATE = [
-    'Open', 'High', 'Low', 'Close', 'SMA', 'EMA', 'VWMA', 'DEMA', 'TEMA', 'TRIMA',
-    'BB_Upper', 'BB_Mid', 'BB_Lower', 'Ichimoku_Tenkan', 'Ichimoku_Kijun',
-    'Ichimoku_SenkouA', 'Ichimoku_SenkouB', 'Ichimoku_Chikou', 'SAR',
-    'Support_MA', 'Resistance_MA', 'Pivot_Point', 'Support1_Pivot',
-    'Support2_Pivot', 'Resistance1_Pivot', 'Resistance2_Pivot'
-]
-
-# 3. 피처 vs. 불리언 (Feature vs. Boolean) 비교용 템플릿
-FEATURE_BOOL_TEMPLATE = [
-    'InvertedHammers', 'Hammers', 'HangingMen', 'DarkCloudCovers', 'Dojis',
-    'DragonflyDojis', 'GravestoneDojis', 'MorningStars', 'MorningStarDojis',
-    'PiercingPatterns', 'ShootingStars', '3BlackCrows', '3WhiteSoldiers', '3StarsInSouth',
-    'BullishHarami', 'BearishHarami', 'BullishEngulfing', 'BearishEngulfing',
-    'BullishDojiStar', 'BearishDojiStar', 'BullishTasukiGap', 'BearishTasukiGap',
-    'BullishXSideGap3Methods', 'BearishXSideGap3Methods', 'BullishSpinningTop',
-    'BearishSpinningTop', 'BullishRise3Methods', 'BearishFall3Methods',
-    'HT_TRENDMODE',
-]
 
 # ==============================================================================
 #                      기존 함수 (수정 없음)
@@ -155,41 +123,49 @@ def generate_multi_timeframe_features(
     return final_df, sorted(list(set(all_new_columns)))
 
 # ==============================================================================
-#           [신규 추가] 모델 설정을 동적으로 생성하는 헬퍼 함수
+#           [수정] 모델 설정을 동적으로 생성하는 헬퍼 함수
 # ==============================================================================
 
-def _generate_model_config_from_features(all_generated_cols: List[str]) -> Dict[str, Any]:
+def _generate_model_config_from_features(
+    all_generated_cols: List[str],
+    classification_config: Dict[str, Any]
+) -> Dict[str, Any]:
     """
-    생성된 전체 피처 목록을 받아 모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
+    생성된 전체 피처 목록과 YAML에서 로드한 '분류 설정'을 받아
+    모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
     """
-    print("\n--- 생성된 피처를 기반으로 모델 설정(config)을 동적으로 생성합니다 ---")
+    print("\n--- YAML 설정을 기반으로 모델 config를 동적으로 생성합니다 ---")
+    
+    # [수정] 하드코딩된 템플릿 대신, 인자로 받은 config에서 템플릿을 가져옵니다.
+    feature_num_template = classification_config.get('feature_num', {})
+    feature_comparison_template = classification_config.get('feature_comparison', [])
+    feature_bool_template = classification_config.get('feature_bool', [])
     
     final_feature_num = {}
     final_feature_bool = []
-    comparison_feature_list = [] # Feature-Feature 비교용 임시 리스트
-    
+    comparison_feature_list = []
     unclassified_cols = []
 
     for col_name in all_generated_cols:
         classified = False
-        # 1. 불리언 타입 피처 분류
-        for base_name in FEATURE_BOOL_TEMPLATE:
+        # 1. 불리언 타입 피처 분류 (YAML 설정 기반)
+        for base_name in feature_bool_template:
             if col_name.startswith(base_name):
                 final_feature_bool.append(col_name)
                 classified = True
                 break
         if classified: continue
 
-        # 2. 피처-피처 비교 타입 피처 분류
-        for base_name in PRICE_AND_TREND_FEATURES_TEMPLATE:
+        # 2. 피처-피처 비교 타입 피처 분류 (YAML 설정 기반)
+        for base_name in feature_comparison_template:
             if col_name.startswith(base_name):
                 comparison_feature_list.append(col_name)
                 classified = True
                 break
         if classified: continue
 
-        # 3. 피처-숫자 비교 타입 피처 분류
-        for base_name, value_range in FEATURE_NUM_TEMPLATE.items():
+        # 3. 피처-숫자 비교 타입 피처 분류 (YAML 설정 기반)
+        for base_name, value_range in feature_num_template.items():
             if col_name.startswith(base_name):
                 final_feature_num[col_name] = value_range
                 classified = True
@@ -228,7 +204,8 @@ def run_feature_generation_from_yaml(
     df: pd.DataFrame,
     timestamp_col: str,
     target_timeframes: list,
-    yaml_config_path: str
+    yaml_config_path: str,
+    classification_config: Dict[str, Any] # [신규] 피처 분류 설정을 인자로 받음
 ) -> Tuple[pd.DataFrame | None, Dict[str, Any] | None]:
     """
     YAML 설정 파일을 기반으로 Multi-Timeframe 피처 생성을 실행하고,
@@ -269,8 +246,8 @@ def run_feature_generation_from_yaml(
         feature_params=feature_generation_params
     )
     
-    # 4. [신규] 생성된 피처 목록으로 모델 설정(config) 생성
-    model_config = _generate_model_config_from_features(added_cols)
+    # 4. [수정] 생성된 피처 목록으로 모델 설정(config) 생성 시, YAML 설정을 전달
+    model_config = _generate_model_config_from_features(added_cols, classification_config)
 
     return final_dataframe, model_config
 
@@ -331,17 +308,37 @@ if __name__ == '__main__':
     with open(yaml_path, 'w') as f:
         f.write(yaml_content)
 
+    # [신규] 테스트를 위한 가상의 classification_config 딕셔너리 생성
+    # 실제 실행 시에는 main.py에서 experiment_config.yaml로부터 로드됩니다.
+    mock_classification_config = {
+        'feature_num': {
+            'close_change_pct': (-10, 10), 'body_size': (0, 100), 'upper_wick_size': (0, 100),
+            'lower_wick_size': (0, 100), 'total_range': (0, 200), 'body_to_range_ratio': (0, 1),
+            'RSI': (0, 100), '%K': (0, 100), '%D': (0, 100), 'Williams_R': (-100, 0),
+            'CCI': (-250, 250), 'MACD': (-100, 100), 'ADX': (0, 100), 'ATR': (0, 100)
+        },
+        'feature_comparison': [
+            'Open', 'High', 'Low', 'Close', 'SMA', 'EMA', 'BB_Upper', 'BB_Mid', 'BB_Lower',
+            'Ichimoku_Tenkan', 'Ichimoku_Kijun', 'Support_MA', 'Resistance_MA'
+        ],
+        'feature_bool': [
+            'InvertedHammers', 'Hammers', 'HangingMen', 'DarkCloudCovers', 'Dojis',
+            'MorningStars', 'ShootingStars', 'BullishHarami', 'BearishHarami'
+        ]
+    }
+
 
     # 3. [수정된] Multi-Timeframe 피처 생성 함수 호출
     print("\n2. Multi-Timeframe 피처 및 모델 설정 생성 시작...")
     target_timeframes_list = ['5m', '15m', '1h', '4h', '1d']
     
-    # 함수의 반환값이 (DataFrame, Dict)으로 변경됨
+    # [수정] 함수의 반환값이 (DataFrame, Dict)으로 변경되고, 새 인자가 추가됨
     final_dataframe, model_config = run_feature_generation_from_yaml(
         df=source_df,
         timestamp_col='Open time',
         target_timeframes=target_timeframes_list,
-        yaml_config_path=yaml_path
+        yaml_config_path=yaml_path,
+        classification_config=mock_classification_config # 가상 설정 전달
     )
     
     # 4. 결과 확인

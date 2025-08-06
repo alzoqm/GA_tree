@@ -5,7 +5,7 @@ from .base import BaseCrossover
 from typing import Dict, Tuple
 
 # 프로젝트 구조에 따라 model.py에서 상수 임포트
-from models.model import (
+from models.constants import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_PARAM_1, NODE_TYPE_UNUSED, 
     NODE_TYPE_ROOT_BRANCH,  # <--- [수정 1] 누락된 상수 추가
     NODE_TYPE_DECISION, NODE_TYPE_ACTION, ROOT_BRANCH_LONG, 
