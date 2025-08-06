@@ -82,6 +82,8 @@ def main():
     ga_cfg = config['ga_core']
     op_cfg = config['operators']
     eval_cfg = config['evaluation']
+    # [신규] 피처 분류 설정 로드
+    classification_cfg = config['feature_classification']
 
     set_seed(env_cfg['seed'])
     setup_environment(env_cfg['output_dir'])
@@ -120,11 +122,13 @@ def main():
         source_df = pd.read_csv(data_csv_path, parse_dates=['Open time'])
 
     logging.info("Generating multi-timeframe features from YAML config...")
+    # [수정] run_feature_generation_from_yaml 호출 시 classification_config 인자 전달
     final_df, model_config = run_feature_generation_from_yaml(
         df=source_df,
         timestamp_col='Open time',
         target_timeframes=data_cfg['feature_engineering']['target_timeframes'],
-        yaml_config_path=data_cfg['feature_engineering']['config_yaml_path']
+        yaml_config_path=data_cfg['feature_engineering']['config_yaml_path'],
+        classification_config=classification_cfg
     )
 
     if final_df is None:
