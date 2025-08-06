@@ -514,6 +514,193 @@ def calculate_all_candlestick_patterns(df):
     return df, candle_cols
 
 # ==============================================================================
+# 9. 신규 복합 특성 (Composite & Ratio Features)
+# 아래 함수들은 기존에 계산된 지표들을 조합하여 새로운 특성을 생성합니다.
+# YAML 설정 시, 이 함수들이 필요한 기본 지표들(RSI, ADX 등)보다 나중에 호출되도록 순서를 조정해야 합니다.
+# ==============================================================================
+
+def calculate_rsi_adx_ratio(df: pd.DataFrame, rsi_window: int, adx_window: int) -> tuple[pd.DataFrame, list[str]]:
+    """
+    RSI와 ADX의 비율을 계산하여 모멘텀과 추세의 상대적 강도를 파악합니다.
+
+    Args:
+        df (pd.DataFrame): 'RSI_{rsi_window}'와 'ADX_{adx_window}' 컬럼이 포함된 데이터프레임.
+        rsi_window (int): RSI 계산에 사용된 윈도우.
+        adx_window (int): ADX 계산에 사용된 윈도우.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    rsi_col = format_col_name('RSI', rsi_window)
+    adx_col = format_col_name('ADX', adx_window)
+    new_col = format_col_name('RSI_ADX_Ratio', f"{rsi_window}_{adx_window}")
+
+    if rsi_col in df and adx_col in df:
+        df[new_col] = df[rsi_col] / (df[adx_col] + 1e-9)
+        return df, [new_col]
+    else:
+        # 필요한 컬럼이 없는 경우 경고 메시지를 출력하고 아무 작업도 하지 않을 수 있습니다.
+        # print(f"Warning: Required columns '{rsi_col}' or '{adx_col}' not found for RSI/ADX Ratio.")
+        return df, []
+
+def calculate_macd_atr_ratio(df: pd.DataFrame, short_window: int, long_window: int, signal_window: int, atr_window: int) -> tuple[pd.DataFrame, list[str]]:
+    """
+    MACD를 ATR로 정규화하여 변동성 대비 추세 신호의 강도를 측정합니다.
+
+    Args:
+        df (pd.DataFrame): MACD와 ATR 컬럼이 포함된 데이터프레임.
+        short_window (int): MACD 단기 윈도우.
+        long_window (int): MACD 장기 윈도우.
+        signal_window (int): MACD 시그널 윈도우.
+        atr_window (int): ATR 윈도우.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    macd_col = format_col_name('MACD', f"{short_window}_{long_window}")
+    atr_col = format_col_name('ATR', atr_window)
+    new_col = format_col_name('MACD_ATR_Ratio', f"{short_window}_{long_window}_{atr_window}")
+
+    if macd_col in df and atr_col in df:
+        df[new_col] = df[macd_col] / (df[atr_col] + 1e-9)
+        return df, [new_col]
+    else:
+        return df, []
+
+def calculate_short_long_ratio(df: pd.DataFrame, indicator_name: str, short_window: int, long_window: int) -> tuple[pd.DataFrame, list[str]]:
+    """
+    단기 지표와 장기 지표의 비율을 계산합니다. (예: 단기/장기 RSI 비율)
+
+    Args:
+        df (pd.DataFrame): 지표 컬럼들이 포함된 데이터프레임.
+        indicator_name (str): 비율을 계산할 지표의 기본 이름 (예: 'RSI', 'BB_Width').
+        short_window (int): 단기 윈도우.
+        long_window (int): 장기 윈도우.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    # BB_Width는 파라미터가 2개이므로 특별 처리
+    if indicator_name == 'BB_Width':
+        # 이 예제에서는 num_std=2로 고정한다고 가정합니다. 필요 시 파라미터 추가 가능.
+        short_col = format_col_name(indicator_name, f"{short_window}_2")
+        long_col = format_col_name(indicator_name, f"{long_window}_2")
+    else:
+        short_col = format_col_name(indicator_name, short_window)
+        long_col = format_col_name(indicator_name, long_window)
+    
+    new_col = format_col_name(f"{indicator_name}_Ratio", f"{short_window}_{long_window}")
+
+    if short_col in df and long_col in df:
+        df[new_col] = df[short_col] / (df[long_col] + 1e-9)
+        return df, [new_col]
+    else:
+        return df, []
+
+def calculate_indicator_roc(df: pd.DataFrame, indicator_name: str, indicator_window: int, roc_period: int) -> tuple[pd.DataFrame, list[str]]:
+    """
+    주어진 지표의 변화율(Rate of Change)을 계산합니다.
+
+    Args:
+        df (pd.DataFrame): 지표 컬럼이 포함된 데이터프레임.
+        indicator_name (str): 변화율을 계산할 지표의 이름 (예: 'RSI', 'ATR').
+        indicator_window (int): 해당 지표 계산에 사용된 윈도우.
+        roc_period (int): 변화율을 계산할 기간.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    indicator_col = format_col_name(indicator_name, indicator_window)
+    new_col = format_col_name(f"{indicator_name}_ROC", f"{indicator_window}_{roc_period}")
+    
+    if indicator_col in df:
+        shifted_indicator = df[indicator_col].shift(roc_period)
+        df[new_col] = (df[indicator_col] - shifted_indicator) / (abs(shifted_indicator) + 1e-9) * 100
+        return df, [new_col]
+    else:
+        return df, []
+
+def calculate_volume_spike(df: pd.DataFrame, window: int, factor: float) -> tuple[pd.DataFrame, list[str]]:
+    """
+    거래량이 이동평균 대비 특정 배수 이상으로 급증했는지 여부를 판단합니다.
+
+    Args:
+        df (pd.DataFrame): 'Volume' 컬럼이 포함된 데이터프레임.
+        window (int): 거래량 이동평균을 계산할 윈도우.
+        factor (float): 급증을 판단할 배수 (예: 2.0).
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    new_col = format_col_name('Volume_Spike', f"{window}_{factor}")
+    avg_volume = df['Volume'].rolling(window=window).mean()
+    df[new_col] = df['Volume'] > (avg_volume * factor)
+    return df, [new_col]
+
+def calculate_consecutive_candles(df: pd.DataFrame, period: int, direction: str) -> tuple[pd.DataFrame, list[str]]:
+    """
+    연속적인 양봉 또는 음봉 캔들의 출현 여부를 판단합니다.
+
+    Args:
+        df (pd.DataFrame): 'Open', 'Close' 컬럼이 포함된 데이터프레임.
+        period (int): 연속으로 간주할 캔들의 수 (예: 3).
+        direction (str): 'bullish' 또는 'bearish'.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    if direction == 'bullish':
+        is_positive = df['Close'] > df['Open']
+        new_col = format_col_name('Consecutive_Bullish', period)
+    elif direction == 'bearish':
+        is_positive = df['Close'] < df['Open']
+        new_col = format_col_name('Consecutive_Bearish', period)
+    else:
+        return df, []
+
+    consecutive_count = is_positive.rolling(window=period).sum()
+    df[new_col] = (consecutive_count == period)
+    return df, [new_col]
+
+def calculate_confirmation_signal(df: pd.DataFrame, rsi_window: int, adx_window: int, macd_short: int, macd_long: int, rsi_threshold: int, adx_threshold: int, direction: str) -> tuple[pd.DataFrame, list[str]]:
+    """
+    여러 지표를 조합하여 강세 또는 약세 신호의 확인(Confirmation) 여부를 판단합니다.
+
+    Args:
+        df (pd.DataFrame): 필요한 지표 컬럼들이 포함된 데이터프레임.
+        rsi_window (int): RSI 윈도우.
+        adx_window (int): ADX 윈도우.
+        macd_short (int): MACD 단기 윈도우.
+        macd_long (int): MACD 장기 윈도우.
+        rsi_threshold (int): RSI 기준값.
+        adx_threshold (int): ADX 기준값.
+        direction (str): 'bullish' 또는 'bearish'.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: 특성이 추가된 데이터프레임과 새로운 컬럼명 리스트.
+    """
+    rsi_col = format_col_name('RSI', rsi_window)
+    adx_col = format_col_name('ADX', adx_window)
+    macd_col = format_col_name('MACD', f"{macd_short}_{macd_long}")
+
+    if not all(col in df for col in [rsi_col, adx_col, macd_col]):
+        return df, []
+
+    base_cond = df[adx_col] > adx_threshold
+
+    if direction == 'bullish':
+        cond = base_cond & (df[rsi_col] > rsi_threshold) & (df[macd_col] > 0)
+        new_col = format_col_name('Bullish_Confirmation', f"{rsi_window}_{adx_window}")
+    elif direction == 'bearish':
+        cond = base_cond & (df[rsi_col] < rsi_threshold) & (df[macd_col] < 0)
+        new_col = format_col_name('Bearish_Confirmation', f"{rsi_window}_{adx_window}")
+    else:
+        return df, []
+        
+    df[new_col] = cond
+    return df, [new_col]
+
+# ==============================================================================
 # 메인 실행 부분 (예시)
 # ==============================================================================
 if __name__ == '__main__':
