@@ -1,4 +1,4 @@
-# === 수정된 merge_dataset.py 파일의 전체 코드 ===
+# === 수정된 data/merge_dataset.py 파일의 전체 코드 ===
 
 import pandas as pd
 import numpy as np
