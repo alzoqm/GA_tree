@@ -7,9 +7,9 @@ import pandas as pd
 from tqdm import tqdm
 from copy import deepcopy
 
-# [수정 없음] GATree 모델 및 예측 함수, 상수 임포트
-from models.model import (
-    GATreePop,
+from models.model import GATreePop
+
+from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )

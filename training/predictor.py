@@ -6,7 +6,9 @@ from typing import List, Dict
 
 # 프로젝트 구조에 따라 model, gatree_cuda 모듈을 임포트합니다.
 # 이 파일이 프로젝트 루트에서 실행된다고 가정합니다.
-from models.model import GATreePop, ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
+from models.model import GATreePop
+# [수정] 상수는 constants 모듈에서 직접 임포트
+from models.constants import ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
 
 # setup.py를 통해 빌드된 CUDA 확장 모듈을 임포트합니다.
 # 이 모듈이 존재하지 않으면 ImportError가 발생합니다.
@@ -178,7 +180,7 @@ if __name__ == '__main__':
             print("Tree | Position | Action Type | Param 2 | Param 3 | Param 4")
             print("----------------------------------------------------------------")
             # 결과 해석을 위한 Action Type -> 이름 맵
-            from models.model import ACTION_TYPE_MAP, ACTION_NOT_FOUND
+            from models.constants import ACTION_TYPE_MAP, ACTION_NOT_FOUND
             ACTION_TYPE_MAP[ACTION_NOT_FOUND] = 'NOT_FOUND' # 0번 추가
 
             for i in range(min(POP_SIZE, 5)):

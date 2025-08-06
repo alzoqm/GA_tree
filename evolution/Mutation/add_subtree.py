@@ -6,7 +6,7 @@ from .utils import find_empty_slots, create_random_node
 from typing import Dict, Any, Tuple
 
 # model.py에서 상수 임포트
-from models.model import (
+from models.constants import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, NODE_TYPE_UNUSED, NODE_TYPE_DECISION, 
     NODE_TYPE_ACTION, NODE_TYPE_ROOT_BRANCH
 )

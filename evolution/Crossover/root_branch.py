@@ -5,7 +5,7 @@ from .base import BaseCrossover
 from ..Mutation.utils import find_subtree_nodes, find_empty_slots
 from typing import Tuple
 
-from models.model import (
+from models.constants import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1, NODE_INFO_DIM,
     NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, ROOT_BRANCH_LONG,
     ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT

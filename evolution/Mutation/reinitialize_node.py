@@ -7,7 +7,7 @@ from .utils import _create_random_action_params, _create_random_decision_params
 from typing import Dict, Any
 
 # model.py에서 상수 임포트
-from models.model import (
+from models.constants import (
     COL_NODE_TYPE, COL_PARAM_1, NODE_TYPE_DECISION, NODE_TYPE_ACTION
 )
 

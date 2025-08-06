@@ -5,7 +5,7 @@ from .base import BaseCrossover
 from typing import Dict, Tuple, Optional, List
 
 # 프로젝트 구조에 따라 model.py에서 상수 임포트
-from models.model import (
+from models.constants import (
     ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
 )
 
