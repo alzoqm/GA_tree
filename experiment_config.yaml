@@ -1,0 +1,185 @@
+# ==================================
+# GA Trading Bot Experiment Config
+# ==================================
+# 이 파일은 전체 실험의 하이퍼파라미터와 설정을 중앙에서 관리합니다.
+
+# 1. 환경 및 경로 설정
+environment:
+  device: 'cpu' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
+  seed: 42
+  output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
+  data_dir: "data"
+
+# 2. 데이터 설정
+data:
+  symbol: "BTCUSDT"
+  interval: "1h"
+  days_to_fetch: 365
+  train_ratio: 0.8 # 학습 데이터 비율
+  # 생성된 데이터가 저장될 경로
+  merged_csv_path: "data/BTCUSDT_1h_365d_merged.csv"
+  # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
+  feature_engineering:
+    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    config_yaml_path: "data/feature_config.yaml"
+
+# 3. GA 핵심 파라미터
+ga_core:
+  population:
+    size: 512
+    max_nodes: 2048
+    max_depth: 100
+    max_children: 50
+  evolution_loop:
+    generations: 200
+    parent_pool_size: 128 # 교배 풀(Mating Pool) 크기
+    elite_size: 8 # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 32 # 최종까지 보관할 누적 베스트 개체 수
+    warming_steps: 5 # 엘리트 누적 시작 전 초기 세대 수
+
+# 4. GA 연산자 상세 설정
+operators:
+  selection:
+    type: "RouletteSelection" # "TournamentSelection" 또는 "RouletteSelection"
+    tournament_k_size: 5
+
+  crossover:
+    # ChainCrossover에 전달될 가중치 (Subtree, Node, RootBranch 순서)
+    weights: [0.6, 0.2, 0.2]
+    # 각 교차 연산자별 세부 설정
+    subtree_crossover:
+      mode: 'context' # 'free' 또는 'context'
+    node_crossover:
+      mode: 'context' # 'free' 또는 'context'
+
+  mutation:
+    # ChainMutation에 전달될 각 변이의 확률
+    probabilities:
+      add_node: 0.1
+      delete_node: 0.1
+      add_subtree: 0.05
+      delete_subtree: 0.05
+      reinitialize_node: 0.05
+      node_param: 0.2
+    # 개별 변이 연산자의 세부 파라미터
+    node_param_mutation:
+      noise_ratio: 0.1
+      leverage_change: 5
+    add_node_mutation:
+      max_add_nodes: 5
+    delete_node_mutation:
+      max_delete_node: 5
+    add_subtree_mutation:
+      node_count_range: [2, 5]
+
+# 5. 평가 및 시뮬레이션 설정
+evaluation:
+  simulation_env:
+    taker_fee_rate: 0.0004
+    maintenance_margin_rate: 0.005
+    fixed_slippage_rate: 0.0005
+  fitness_function:
+    # Mean Return, Profit Factor, Win Rate, Max DD, Compound Value 순서
+    weights: [0.1, 0.2, 0.15, 0.15, 0.4]
+    minimum_trades: 40
+
+# 6. [신규] 피처 분류 및 모델 입력 설정
+feature_classification:
+  # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
+  # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
+  feature_num:
+    close_change_pct: [-10, 10]
+    body_size: [0, 100]
+    upper_wick_size: [0, 100]
+    lower_wick_size: [0, 100]
+    total_range: [0, 200]
+    body_to_range_ratio: [0, 1]
+    RSI: [0, 100]
+    '%K': [0, 100]
+    '%D': [0, 100]
+    Williams_R: [-100, 0]
+    CCI: [-250, 250]
+    STOCHRSI_K: [0, 100]
+    STOCHRSI_D: [0, 100]
+    PPO: [-50, 50]
+    ROC: [-50, 50]
+    ULTOSC: [0, 100]
+    MOM: [-50, 50]
+    MACD: [-100, 100]
+    MACD_Signal: [-100, 100]
+    MACD_Hist: [-50, 50]
+    ADX: [0, 100]
+    DI_plus: [0, 100]
+    DI_minus: [0, 100]
+    BB_Width: [0, 1]
+    ATR: [0, 100]
+    NATR: [0, 5]
+    OBV: [-1e9, 1e9]
+    CMF: [-1, 1]
+    AD: [-1e9, 1e9]
+    ADOSC: [-1e9, 1e9]
+    HT_DCPERIOD: [0, 100]
+    HT_SINE: [-1, 1]
+    HT_LEADSINE: [-1, 1]
+
+  # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
+  # 여기에 포함된 피처들은 서로 비교 대상이 됨
+  feature_comparison:
+    - Open
+    - High
+    - Low
+    - Close
+    - SMA
+    - EMA
+    - VWMA
+    - DEMA
+    - TEMA
+    - TRIMA
+    - BB_Upper
+    - BB_Mid
+    - BB_Lower
+    - Ichimoku_Tenkan
+    - Ichimoku_Kijun
+    - Ichimoku_SenkouA
+    - Ichimoku_SenkouB
+    - Ichimoku_Chikou
+    - SAR
+    - Support_MA
+    - Resistance_MA
+    - Pivot_Point
+    - Support1_Pivot
+    - Support2_Pivot
+    - Resistance1_Pivot
+    - Resistance2_Pivot
+
+  # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
+  feature_bool:
+    - InvertedHammers
+    - Hammers
+    - HangingMen
+    - DarkCloudCovers
+    - Dojis
+    - DragonflyDojis
+    - GravestoneDojis
+    - MorningStars
+    - MorningStarDojis
+    - PiercingPatterns
+    - ShootingStars
+    - '3BlackCrows'
+    - '3WhiteSoldiers'
+    - '3StarsInSouth'
+    - BullishHarami
+    - BearishHarami
+    - BullishEngulfing
+    - BearishEngulfing
+    - BullishDojiStar
+    - BearishDojiStar
+    - BullishTasukiGap
+    - BearishTasukiGap
+    - BullishXSideGap3Methods
+    - BearishXSideGap3Methods
+    - BullishSpinningTop
+    - BearishSpinningTop
+    - BullishRise3Methods
+    - BearishFall3Methods
+    - HT_TRENDMODE

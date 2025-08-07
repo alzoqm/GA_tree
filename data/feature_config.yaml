@@ -1,0 +1,743 @@
+# ==============================================================================
+# Multi-Timeframe 기술적 분석 지표 생성용 파라미터 설정 파일 (보고서 기반 전체 업데이트)
+# ==============================================================================
+# 각 시간 단위(5m, 30m, 1h, 4h, 1d)별로 생성할 지표와 파라미터를 정의합니다.
+# 보고서에서 추천된 모든 조합을 포함하도록 업데이트되었습니다.
+#
+# 구조:
+# [timeframe]:
+#   [function_name]:
+#     - {param1: value1, param2: value2}
+#     - {param1: valueA, param2: valueB} # 동일 함수 다른 파라미터로 여러 번 실행
+#
+# - [timeframe]: '5m', '30m', '1h', '4h', '1d' 등 pandas에서 인식 가능한 시간 단위 문자열
+# - [function_name]: ta_lib_feature_generator.py에 정의된 함수 이름
+# - 파라미터 딕셔너리: 각 함수에 전달될 인자들을 key-value 형태로 정의
+#   (예: window: 14, short_window: 12 등)
+#   인자가 없는 함수(calculate_obv 등)는 빈 딕셔너리 '{}'를 리스트에 포함합니다.
+# ==============================================================================
+
+# --- 5분봉 (5m): 단기 반응성 중심 ---
+5m:
+  calculate_price_change_features:
+    - {}
+  calculate_ma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_ema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_dema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_tema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_trima:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_vwma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_adx:
+    - {window: 7}
+    - {window: 14}
+    - {window: 28}
+  calculate_macd:
+    - {short_window: 5, long_window: 15, signal_window: 9}
+    - {short_window: 12, long_window: 26, signal_window: 9}
+    - {short_window: 24, long_window: 52, signal_window: 9}
+  calculate_ichimoku:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+  calculate_sar:
+    - {acceleration: 0.02, maximum: 0.2}
+  calculate_rsi:
+    - {window: 9}
+    - {window: 14}
+    - {window: 21}
+  calculate_stochastic_oscillator:
+    - {k_window: 5, d_window: 3}
+    - {k_window: 8, d_window: 3}
+    - {k_window: 14, d_window: 3}
+  calculate_williams_r:
+    - {window: 9}
+    - {window: 14}
+    - {window: 21}
+  calculate_cci:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_stochrsi:
+    - {window: 14, k_window: 5, d_window: 3}
+    - {window: 9, k_window: 5, d_window: 3}
+    - {window: 14, k_window: 14, d_window: 3}
+  calculate_ppo:
+    - {fast_window: 8, slow_window: 17}
+    - {fast_window: 12, slow_window: 26}
+    - {fast_window: 20, slow_window: 50}
+  calculate_roc:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_ultosc:
+    - {window1: 5, window2: 10, window3: 20}
+    - {window1: 7, window2: 14, window3: 28}
+    - {window1: 10, window2: 20, window3: 40}
+  calculate_mom:
+    - {window: 5}
+    - {window: 10}
+    - {window: 20}
+  calculate_bollinger_bands:
+    - {window: 10, num_std: 2}
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+  calculate_atr:
+    - {window: 7}
+    - {window: 14}
+    - {window: 28}
+  calculate_natr:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_cmf:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_adosc:
+    - {fast_window: 3, slow_window: 10}
+    - {fast_window: 5, slow_window: 20}
+    - {fast_window: 2, slow_window: 8}
+  calculate_obv:
+    - {}
+  calculate_ad:
+    - {}
+  calculate_ht_dcperiod:
+    - {}
+  calculate_ht_trendmode:
+    - {}
+  calculate_ht_sine:
+    - {}
+  calculate_support_resistance:
+    - {window: 5}
+    - {window: 20}
+    - {window: 50}
+  calculate_all_candlestick_patterns:
+    - {}
+  # --- [신규] 5분봉용 복합 특성 (아래 내용을 5m 블록 끝에 추가) ---
+  calculate_rsi_adx_ratio:
+    - {rsi_window: 9, adx_window: 7}
+    - {rsi_window: 14, adx_window: 14}
+    - {rsi_window: 21, adx_window: 14}
+  calculate_macd_atr_ratio:
+    - {short_window: 5, long_window: 15, signal_window: 9, atr_window: 7}
+    - {short_window: 12, long_window: 26, signal_window: 9, atr_window: 14}
+    - {short_window: 24, long_window: 52, signal_window: 9, atr_window: 28}
+  calculate_short_long_ratio:
+    - {indicator_name: 'RSI', short_window: 9, long_window: 21}
+    - {indicator_name: 'BB_Width', short_window: 10, long_window: 20}
+    - {indicator_name: 'BB_Width', short_window: 20, long_window: 50}
+  calculate_indicator_roc:
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 1}
+    - {indicator_name: 'ATR', indicator_window: 14, roc_period: 3}
+    - {indicator_name: 'RSI', indicator_window: 9, roc_period: 5}
+  calculate_volume_spike:
+    - {window: 10, factor: 3.0}
+    - {window: 20, factor: 2.0}
+    - {window: 50, factor: 1.5}
+  calculate_consecutive_candles:
+    - {period: 3, direction: 'bullish'}
+    - {period: 3, direction: 'bearish'}
+    - {period: 5, direction: 'bullish'}
+    - {period: 5, direction: 'bearish'}
+  calculate_confirmation_signal:
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bullish'}
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
+    - {rsi_window: 9, adx_window: 7, macd_short: 5, macd_long: 15, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
+    - {rsi_window: 9, adx_window: 7, macd_short: 5, macd_long: 15, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
+
+# --- 30분봉 (30m) ---
+30m:
+  calculate_price_change_features:
+    - {}
+  calculate_ma:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_ema:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_dema:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_tema:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_trima:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_vwma:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_adx:
+    - {window: 7}
+    - {window: 14}
+    - {window: 28}
+  calculate_macd:
+    - {short_window: 8, long_window: 17, signal_window: 9}
+    - {short_window: 12, long_window: 26, signal_window: 9}
+    - {short_window: 5, long_window: 35, signal_window: 5}
+  calculate_ichimoku:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+  calculate_sar:
+    - {acceleration: 0.02, maximum: 0.2}
+  calculate_rsi:
+    - {window: 9}
+    - {window: 14}
+    - {window: 20}
+  calculate_stochastic_oscillator:
+    - {k_window: 8, d_window: 3}
+    - {k_window: 14, d_window: 3}
+    - {k_window: 21, d_window: 5}
+  calculate_williams_r:
+    - {window: 14}
+    - {window: 20}
+    - {window: 28}
+  calculate_cci:
+    - {window: 14}
+    - {window: 20}
+    - {window: 50}
+  calculate_stochrsi:
+    - {window: 14, k_window: 14, d_window: 3}
+    - {window: 14, k_window: 5, d_window: 3}
+    - {window: 21, k_window: 5, d_window: 5}
+  calculate_ppo:
+    - {fast_window: 8, slow_window: 17}
+    - {fast_window: 12, slow_window: 26}
+    - {fast_window: 20, slow_window: 50}
+  calculate_roc:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_ultosc:
+    - {window1: 7, window2: 14, window3: 28}
+    - {window1: 10, window2: 20, window3: 30}
+    - {window1: 5, window2: 10, window3: 20}
+  calculate_mom:
+    - {window: 5}
+    - {window: 14}
+    - {window: 28}
+  calculate_bollinger_bands:
+    - {window: 10, num_std: 2}
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+  calculate_atr:
+    - {window: 7}
+    - {window: 14}
+    - {window: 28}
+  calculate_natr:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_cmf:
+    - {window: 20}
+    - {window: 50}
+    - {window: 100}
+  calculate_adosc:
+    - {fast_window: 3, slow_window: 10}
+    - {fast_window: 5, slow_window: 20}
+    - {fast_window: 2, slow_window: 8}
+  calculate_obv:
+    - {}
+  calculate_ad:
+    - {}
+  calculate_ht_dcperiod:
+    - {}
+  calculate_ht_trendmode:
+    - {}
+  calculate_ht_sine:
+    - {}
+  calculate_support_resistance:
+    - {window: 5}
+    - {window: 14}
+    - {window: 48}
+  calculate_all_candlestick_patterns:
+    - {}
+  calculate_rsi_adx_ratio:
+    - {rsi_window: 9, adx_window: 7}
+    - {rsi_window: 14, adx_window: 14}
+    - {rsi_window: 20, adx_window: 20}
+  calculate_macd_atr_ratio:
+    - {short_window: 8, long_window: 17, signal_window: 9, atr_window: 14}
+    - {short_window: 12, long_window: 26, signal_window: 9, atr_window: 20}
+    - {short_window: 5, long_window: 35, signal_window: 5, atr_window: 28}
+  calculate_short_long_ratio:
+    - {indicator_name: 'RSI', short_window: 9, long_window: 20}
+    - {indicator_name: 'BB_Width', short_window: 10, long_window: 20}
+    - {indicator_name: 'RSI', short_window: 14, long_window: 28}
+  calculate_indicator_roc:
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 2}
+    - {indicator_name: 'ATR', indicator_window: 14, roc_period: 3}
+    - {indicator_name: 'CCI', indicator_window: 20, roc_period: 1}
+  calculate_volume_spike:
+    - {window: 20, factor: 2.5}
+    - {window: 48, factor: 1.8}
+    - {window: 100, factor: 1.5}
+  calculate_consecutive_candles:
+    - {period: 3, direction: 'bullish'}
+    - {period: 3, direction: 'bearish'}
+    - {period: 4, direction: 'bullish'}
+    - {period: 4, direction: 'bearish'}
+  calculate_confirmation_signal:
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bullish'}
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
+    - {rsi_window: 20, adx_window: 20, macd_short: 8, macd_long: 17, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
+    - {rsi_window: 20, adx_window: 20, macd_short: 8, macd_long: 17, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
+
+# --- 1시간봉 (1h): 중기 추세 및 변동성 ---
+1h:
+  calculate_price_change_features:
+    - {}
+  calculate_ma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_ema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_dema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_tema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_trima:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_vwma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_adx:
+    - {window: 14}
+    - {window: 20}
+    - {window: 28}
+  calculate_macd:
+    - {short_window: 8, long_window: 17, signal_window: 9}
+    - {short_window: 12, long_window: 26, signal_window: 9}
+    - {short_window: 24, long_window: 52, signal_window: 9}
+  calculate_ichimoku:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 10, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_sar:
+    - {acceleration: 0.02, maximum: 0.2}
+  calculate_rsi:
+    - {window: 14}
+    - {window: 20}
+    - {window: 28}
+  calculate_stochastic_oscillator:
+    - {k_window: 14, d_window: 3}
+    - {k_window: 14, d_window: 5}
+    - {k_window: 21, d_window: 7}
+  calculate_williams_r:
+    - {window: 14}
+    - {window: 20}
+    - {window: 28}
+  calculate_cci:
+    - {window: 20}
+    - {window: 50}
+    - {window: 100}
+  calculate_stochrsi:
+    - {window: 14, k_window: 14, d_window: 3}
+    - {window: 20, k_window: 5, d_window: 3}
+    - {window: 14, k_window: 5, d_window: 5}
+  calculate_ppo:
+    - {fast_window: 8, slow_window: 17}
+    - {fast_window: 12, slow_window: 26}
+    - {fast_window: 24, slow_window: 52}
+  calculate_roc:
+    - {window: 12}
+    - {window: 20}
+    - {window: 50}
+  calculate_ultosc:
+    - {window1: 7, window2: 14, window3: 28}
+    - {window1: 10, window2: 20, window3: 50}
+    - {window1: 5, window2: 10, window3: 20}
+  calculate_mom:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 100, num_std: 2}
+  calculate_atr:
+    - {window: 14}
+    - {window: 20}
+    - {window: 28}
+  calculate_natr:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_cmf:
+    - {window: 20}
+    - {window: 50}
+    - {window: 100}
+  calculate_adosc:
+    - {fast_window: 3, slow_window: 10}
+    - {fast_window: 5, slow_window: 20}
+    - {fast_window: 2, slow_window: 8}
+  calculate_obv:
+    - {}
+  calculate_ad:
+    - {}
+  calculate_ht_dcperiod:
+    - {}
+  calculate_ht_trendmode:
+    - {}
+  calculate_ht_sine:
+    - {}
+  calculate_support_resistance:
+    - {window: 5}
+    - {window: 24}
+    - {window: 72}
+  calculate_all_candlestick_patterns:
+    - {}
+  # --- [신규] 1시간봉용 복합 특성 (아래 내용을 1h 블록 끝에 추가) ---
+  calculate_rsi_adx_ratio:
+    - {rsi_window: 14, adx_window: 14}
+    - {rsi_window: 20, adx_window: 20}
+    - {rsi_window: 28, adx_window: 28}
+  calculate_macd_atr_ratio:
+    - {short_window: 12, long_window: 26, signal_window: 9, atr_window: 14}
+    - {short_window: 24, long_window: 52, signal_window: 9, atr_window: 28}
+    - {short_window: 8, long_window: 17, signal_window: 9, atr_window: 20}
+  calculate_short_long_ratio:
+    - {indicator_name: 'RSI', short_window: 14, long_window: 28}
+    - {indicator_name: 'BB_Width', short_window: 20, long_window: 50}
+    - {indicator_name: 'RSI', short_window: 20, long_window: 50}
+  calculate_indicator_roc:
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
+    - {indicator_name: 'ATR', indicator_window: 14, roc_period: 5}
+    - {indicator_name: 'MACD_Hist', indicator_window: '12_26', roc_period: 1} # MACD Hist 변화율
+  calculate_volume_spike:
+    - {window: 24, factor: 2.0}
+    - {window: 48, factor: 1.8}
+    - {window: 72, factor: 1.5}
+  calculate_consecutive_candles:
+    - {period: 3, direction: 'bullish'}
+    - {period: 3, direction: 'bearish'}
+    - {period: 4, direction: 'bullish'}
+    - {period: 4, direction: 'bearish'}
+  calculate_confirmation_signal:
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bullish'}
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
+    - {rsi_window: 20, adx_window: 20, macd_short: 24, macd_long: 52, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
+    - {rsi_window: 20, adx_window: 20, macd_short: 24, macd_long: 52, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
+
+# --- 4시간봉 (4h): 중장기 추세 ---
+4h:
+  calculate_price_change_features:
+    - {}
+  calculate_ma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_ema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_dema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_tema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_trima:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_vwma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_adx:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_macd:
+    - {short_window: 12, long_window: 26, signal_window: 9}
+    - {short_window: 24, long_window: 52, signal_window: 9}
+    - {short_window: 8, long_window: 17, signal_window: 9}
+  calculate_ichimoku:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 10, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_sar:
+    - {acceleration: 0.02, maximum: 0.2}
+  calculate_rsi:
+    - {window: 14}
+    - {window: 20}
+    - {window: 30}
+  calculate_stochastic_oscillator:
+    - {k_window: 14, d_window: 3}
+    - {k_window: 21, d_window: 5}
+    - {k_window: 28, d_window: 7}
+  calculate_williams_r:
+    - {window: 14}
+    - {window: 28}
+    - {window: 42}
+  calculate_cci:
+    - {window: 20}
+    - {window: 50}
+    - {window: 120}
+  calculate_stochrsi:
+    - {window: 14, k_window: 14, d_window: 3}
+    - {window: 20, k_window: 5, d_window: 5}
+    - {window: 21, k_window: 14, d_window: 3}
+  calculate_ppo:
+    - {fast_window: 12, slow_window: 26}
+    - {fast_window: 24, slow_window: 52}
+    - {fast_window: 8, slow_window: 17}
+  calculate_roc:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_ultosc:
+    - {window1: 7, window2: 14, window3: 28}
+    - {window1: 10, window2: 20, window3: 50}
+    - {window1: 14, window2: 28, window3: 56}
+  calculate_mom:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 100, num_std: 2}
+  calculate_atr:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_natr:
+    - {window: 14}
+    - {window: 28}
+    - {window: 50}
+  calculate_cmf:
+    - {window: 20}
+    - {window: 50}
+    - {window: 120}
+  calculate_adosc:
+    - {fast_window: 3, slow_window: 10}
+    - {fast_window: 5, slow_window: 20}
+    - {fast_window: 2, slow_window: 8}
+  calculate_obv:
+    - {}
+  calculate_ad:
+    - {}
+  calculate_ht_dcperiod:
+    - {}
+  calculate_ht_trendmode:
+    - {}
+  calculate_ht_sine:
+    - {}
+  calculate_support_resistance:
+    - {window: 5}
+    - {window: 30}
+    - {window: 60}
+  calculate_all_candlestick_patterns:
+    - {}
+  # --- [신규] 4시간봉용 복합 특성 (아래 내용을 4h 블록 끝에 추가) ---
+  calculate_rsi_adx_ratio:
+    - {rsi_window: 14, adx_window: 14}
+    - {rsi_window: 20, adx_window: 20}
+    - {rsi_window: 30, adx_window: 28}
+  calculate_macd_atr_ratio:
+    - {short_window: 12, long_window: 26, signal_window: 9, atr_window: 14}
+    - {short_window: 24, long_window: 52, signal_window: 9, atr_window: 28}
+    - {short_window: 8, long_window: 17, signal_window: 9, atr_window: 14}
+  calculate_short_long_ratio:
+    - {indicator_name: 'RSI', short_window: 14, long_window: 30}
+    - {indicator_name: 'BB_Width', short_window: 20, long_window: 50}
+    - {indicator_name: 'RSI', short_window: 7, long_window: 20}
+  calculate_indicator_roc:
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
+    - {indicator_name: 'ATR', indicator_window: 14, roc_period: 5}
+    - {indicator_name: 'CCI', indicator_window: 20, roc_period: 2}
+  calculate_volume_spike:
+    - {window: 30, factor: 1.8}
+    - {window: 60, factor: 1.5}
+    - {window: 120, factor: 1.2}
+  calculate_consecutive_candles:
+    - {period: 2, direction: 'bullish'}
+    - {period: 2, direction: 'bearish'}
+    - {period: 3, direction: 'bullish'}
+    - {period: 3, direction: 'bearish'}
+  calculate_confirmation_signal:
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bullish'}
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
+    - {rsi_window: 20, adx_window: 28, macd_short: 24, macd_long: 52, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
+    - {rsi_window: 20, adx_window: 28, macd_short: 24, macd_long: 52, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
+
+
+# --- 일봉 (1d): 장기 추세 및 종합 패턴 ---
+1d:
+  calculate_price_change_features:
+    - {}
+  calculate_ma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_ema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_dema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_tema:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_trima:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_vwma:
+    - {window: 20}
+    - {window: 50}
+    - {window: 200}
+  calculate_adx:
+    - {window: 14}
+    - {window: 20}
+    - {window: 30}
+  calculate_macd:
+    - {short_window: 12, long_window: 26, signal_window: 9}
+    - {short_window: 5, long_window: 35, signal_window: 5}
+    - {short_window: 3, long_window: 10, signal_window: 16}
+  calculate_ichimoku:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 15, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_sar:
+    - {acceleration: 0.02, maximum: 0.2}
+  calculate_rsi:
+    - {window: 7}
+    - {window: 14}
+    - {window: 28}
+  calculate_stochastic_oscillator:
+    - {k_window: 14, d_window: 3}
+    - {k_window: 21, d_window: 7}
+    - {k_window: 9, d_window: 3}
+  calculate_williams_r:
+    - {window: 14}
+    - {window: 20}
+    - {window: 30}
+  calculate_cci:
+    - {window: 20}
+    - {window: 50}
+    - {window: 100}
+  calculate_stochrsi:
+    - {window: 14, k_window: 14, d_window: 3}
+    - {window: 21, k_window: 5, d_window: 3}
+    - {window: 14, k_window: 5, d_window: 3}
+  calculate_ppo:
+    - {fast_window: 12, slow_window: 26}
+    - {fast_window: 5, slow_window: 35}
+    - {fast_window: 8, slow_window: 17}
+  calculate_roc:
+    - {window: 12}
+    - {window: 20}
+    - {window: 50}
+  calculate_ultosc:
+    - {window1: 7, window2: 14, window3: 28}
+    - {window1: 5, window2: 10, window3: 20}
+    - {window1: 14, window2: 28, window3: 56}
+  calculate_mom:
+    - {window: 10}
+    - {window: 20}
+    - {window: 50}
+  calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 200, num_std: 2}
+  calculate_atr:
+    - {window: 14}
+    - {window: 20}
+    - {window: 30}
+  calculate_natr:
+    - {window: 14}
+    - {window: 20}
+    - {window: 30}
+  calculate_cmf:
+    - {window: 20}
+    - {window: 60}
+    - {window: 120}
+  calculate_adosc:
+    - {fast_window: 3, slow_window: 10}
+    - {fast_window: 5, slow_window: 20}
+    - {fast_window: 2, slow_window: 8}
+  calculate_obv:
+    - {}
+  calculate_ad:
+    - {}
+  calculate_ht_dcperiod:
+    - {}
+  calculate_ht_trendmode:
+    - {}
+  calculate_ht_sine:
+    - {}
+  calculate_support_resistance:
+    - {window: 5}
+    - {window: 20}
+    - {window: 60}
+  calculate_all_candlestick_patterns:
+    - {}
+  calculate_rsi_adx_ratio:
+    - {rsi_window: 7, adx_window: 14}
+    - {rsi_window: 14, adx_window: 14}
+    - {rsi_window: 28, adx_window: 20}
+  calculate_macd_atr_ratio:
+    - {short_window: 12, long_window: 26, signal_window: 9, atr_window: 14}
+    - {short_window: 5, long_window: 35, signal_window: 5, atr_window: 14}
+    - {short_window: 20, long_window: 50, signal_window: 10, atr_window: 20} # 가상의 장기 파라미터 조합
+  calculate_short_long_ratio:
+    - {indicator_name: 'RSI', short_window: 7, long_window: 14}
+    - {indicator_name: 'RSI', short_window: 14, long_window: 28}
+    - {indicator_name: 'BB_Width', short_window: 20, long_window: 50}
+  calculate_indicator_roc:
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 1}
+    - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
+    - {indicator_name: 'ATR', indicator_window: 14, roc_period: 7}
+  calculate_volume_spike:
+    - {window: 20, factor: 1.5} # 일봉에서는 1.5배도 의미가 큼
+    - {window: 50, factor: 1.2}
+    - {window: 100, factor: 1.1}
+  calculate_consecutive_candles:
+    - {period: 2, direction: 'bullish'}
+    - {period: 2, direction: 'bearish'}
+    - {period: 3, direction: 'bullish'}
+    - {period: 3, direction: 'bearish'}
+  calculate_confirmation_signal:
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bullish'}
+    - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
+    - {rsi_window: 7, adx_window: 20, macd_short: 5, macd_long: 35, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
+    - {rsi_window: 7, adx_window: 20, macd_short: 5, macd_long: 35, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
