@@ -113,93 +113,93 @@ def predict_population_cuda(
 
     return results_tensor
 
-# =======================================================
-# ---           이 함수들을 테스트하기 위한 예제         ---
-# =======================================================
-if __name__ == '__main__':
-    # 이 스크립트를 직접 실행하면 새로운 2단계 예측 파이프라인의 동작을 테스트합니다.
+# # =======================================================
+# # ---           이 함수들을 테스트하기 위한 예제         ---
+# # =======================================================
+# if __name__ == '__main__':
+#     # 이 스크립트를 직접 실행하면 새로운 2단계 예측 파이프라인의 동작을 테스트합니다.
     
-    if gatree_cuda is None:
-        print("\n테스트를 건너뜁니다.")
-    else:
-        print("===== [개선된] CUDA 예측 파이프라인 테스트 시작 =====")
-        # 1. 테스트용 GATreePop 객체 생성
-        POP_SIZE = 10
-        MAX_NODES = 512
-        MAX_DEPTH = 10
-        MAX_CHILDREN = 5
+#     if gatree_cuda is None:
+#         print("\n테스트를 건너뜁니다.")
+#     else:
+#         print("===== [개선된] CUDA 예측 파이프라인 테스트 시작 =====")
+#         # 1. 테스트용 GATreePop 객체 생성
+#         POP_SIZE = 10
+#         MAX_NODES = 512
+#         MAX_DEPTH = 10
+#         MAX_CHILDREN = 5
 
-        from models.model import FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL
+#         from models.model import FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL
         
-        print(f"\n1. {POP_SIZE}개체로 구성된 GATreePop 생성 중...")
-        population = GATreePop(
-            pop_size=POP_SIZE,
-            max_nodes=MAX_NODES,
-            max_depth=MAX_DEPTH,
-            max_children=MAX_CHILDREN,
-            feature_num=FEATURE_NUM,
-            feature_comparison_map=FEATURE_COMPARISON_MAP,
-            feature_bool=FEATURE_BOOL
-        )
-        population.make_population()
-        print("   GATreePop 생성 완료.")
+#         print(f"\n1. {POP_SIZE}개체로 구성된 GATreePop 생성 중...")
+#         population = GATreePop(
+#             pop_size=POP_SIZE,
+#             max_nodes=MAX_NODES,
+#             max_depth=MAX_DEPTH,
+#             max_children=MAX_CHILDREN,
+#             feature_num=FEATURE_NUM,
+#             feature_comparison_map=FEATURE_COMPARISON_MAP,
+#             feature_bool=FEATURE_BOOL
+#         )
+#         population.make_population()
+#         print("   GATreePop 생성 완료.")
 
-        # 2. [신규] 1단계: 인접 리스트 생성
-        print("\n2. `build_adjacency_list_cuda` 함수 호출 (준비 단계)...")
-        try:
-            if not torch.cuda.is_available():
-                 raise SystemExit("오류: CUDA를 사용할 수 있는 GPU가 없습니다. 테스트를 중단합니다.")
+#         # 2. [신규] 1단계: 인접 리스트 생성
+#         print("\n2. `build_adjacency_list_cuda` 함수 호출 (준비 단계)...")
+#         try:
+#             if not torch.cuda.is_available():
+#                  raise SystemExit("오류: CUDA를 사용할 수 있는 GPU가 없습니다. 테스트를 중단합니다.")
             
-            adj_offsets, adj_indices = build_adjacency_list_cuda(population)
+#             adj_offsets, adj_indices = build_adjacency_list_cuda(population)
             
-            print("   인접 리스트 생성 완료.")
-            print(f"   - 반환된 Offset 텐서 Shape: {adj_offsets.shape}")
-            print(f"   - 반환된 Child Indices 텐서 Shape: {adj_indices.shape}")
+#             print("   인접 리스트 생성 완료.")
+#             print(f"   - 반환된 Offset 텐서 Shape: {adj_offsets.shape}")
+#             print(f"   - 반환된 Child Indices 텐서 Shape: {adj_indices.shape}")
 
-        except Exception as e:
-            print(f"\n인접 리스트 생성 중 오류 발생: {e}")
-            exit()
+#         except Exception as e:
+#             print(f"\n인접 리스트 생성 중 오류 발생: {e}")
+#             exit()
 
-        # 3. 예측에 사용할 가상 데이터 생성
-        print("\n3. 예측에 사용할 가상 데이터 생성 중...")
-        all_feature_names = population.all_features
-        dummy_feature_data = {name: torch.randn(1).item() * 10 for name in all_feature_names}
-        feature_values = pd.Series(dummy_feature_data)
-        current_positions = [random.choice(['LONG', 'HOLD', 'SHORT']) for _ in range(POP_SIZE)]
-        print(f"   - 생성된 피처 수: {len(feature_values)}")
+#         # 3. 예측에 사용할 가상 데이터 생성
+#         print("\n3. 예측에 사용할 가상 데이터 생성 중...")
+#         all_feature_names = population.all_features
+#         dummy_feature_data = {name: torch.randn(1).item() * 10 for name in all_feature_names}
+#         feature_values = pd.Series(dummy_feature_data)
+#         current_positions = [random.choice(['LONG', 'HOLD', 'SHORT']) for _ in range(POP_SIZE)]
+#         print(f"   - 생성된 피처 수: {len(feature_values)}")
 
-        # 4. [수정] 2단계: 예측 함수 호출
-        print("\n4. `predict_population_cuda` 함수 호출 (실행 단계)...")
-        try:
-            action_results = predict_population_cuda(
-                population=population,
-                feature_values=feature_values,
-                current_positions=current_positions,
-                adj_offsets=adj_offsets,
-                adj_indices=adj_indices,
-                device='cuda'
-            )
+#         # 4. [수정] 2단계: 예측 함수 호출
+#         print("\n4. `predict_population_cuda` 함수 호출 (실행 단계)...")
+#         try:
+#             action_results = predict_population_cuda(
+#                 population=population,
+#                 feature_values=feature_values,
+#                 current_positions=current_positions,
+#                 adj_offsets=adj_offsets,
+#                 adj_indices=adj_indices,
+#                 device='cuda'
+#             )
             
-            print("   함수 실행 완료.")
+#             print("   함수 실행 완료.")
 
-            # 5. 결과 확인
-            print("\n5. 결과 확인...")
-            print(f"   - 반환된 텐서의 Shape: {action_results.shape}")
+#             # 5. 결과 확인
+#             print("\n5. 결과 확인...")
+#             print(f"   - 반환된 텐서의 Shape: {action_results.shape}")
             
-            print("\n--- 예측 결과 (일부) ---")
-            print("Tree | Position | Action Type | Param 2 | Param 3 | Param 4")
-            print("----------------------------------------------------------------")
-            ACTION_TYPE_MAP[ACTION_NOT_FOUND] = 'NOT_FOUND'
+#             print("\n--- 예측 결과 (일부) ---")
+#             print("Tree | Position | Action Type | Param 2 | Param 3 | Param 4")
+#             print("----------------------------------------------------------------")
+#             ACTION_TYPE_MAP[ACTION_NOT_FOUND] = 'NOT_FOUND'
 
-            for i in range(min(POP_SIZE, 5)):
-                pos = current_positions[i]
-                res = action_results[i]
-                action_type = int(res[0].item())
-                action_name = ACTION_TYPE_MAP.get(action_type, 'UNKNOWN')
+#             for i in range(min(POP_SIZE, 5)):
+#                 pos = current_positions[i]
+#                 res = action_results[i]
+#                 action_type = int(res[0].item())
+#                 action_name = ACTION_TYPE_MAP.get(action_type, 'UNKNOWN')
                 
-                print(f"{i:4d} | {pos:<8s} | {action_name:<11s} ({action_type:d}) | {res[1]:7.4f} | {res[2]:7.1f} | {res[3]:7.4f}")
+#                 print(f"{i:4d} | {pos:<8s} | {action_name:<11s} ({action_type:d}) | {res[1]:7.4f} | {res[2]:7.1f} | {res[3]:7.4f}")
 
-            print("\n===== 테스트 성공 =====")
+#             print("\n===== 테스트 성공 =====")
 
-        except Exception as e:
-            print(f"\n예측 실행 중 오류 발생: {e}")
+#         except Exception as e:
+#             print(f"\n예측 실행 중 오류 발생: {e}")
