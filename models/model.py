@@ -5,6 +5,9 @@ import random
 import os
 import webbrowser
 import networkx as nx
+import torch.multiprocessing as mp # [신규] 멀티프로세싱 라이브러리 임포트
+from itertools import repeat # [신규] 멀티프로세싱 인자 전달을 위한 임포트
+
 
 from .constants import *
 
@@ -35,12 +38,58 @@ FEATURE_COMPARISON_MAP = {
 }
 
 def get_all_features(feature_num, feature_map, feature_bool):
+    """[수정] 클래스 외부에서도 사용할 수 있도록 전역 함수로 변경"""
     comp_features = set(feature_map.keys())
     for v_list in feature_map.values():
         comp_features.update(v_list)
-    return list(feature_num.keys()) + sorted(list(comp_features)) + feature_bool
+    # [수정] 피처 리스트의 순서를 항상 동일하게 보장하기 위해 정렬 로직 추가
+    return sorted(list(feature_num.keys())) + sorted(list(comp_features)) + sorted(feature_bool)
 
 ALL_FEATURES = get_all_features(FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
+
+
+# ==============================================================================
+# [신규] 멀티프로세싱을 위한 최상위 레벨 워커 함수
+# ==============================================================================
+def _create_tree_worker(args):
+    """멀티프로세싱 워커: 단일 트리를 생성하고 공유 텐서에 기록합니다."""
+    i, population_tensor, config = args
+    tree_data_view = population_tensor[i]
+    
+    # GATree 생성 시 config에서 모든 필요 인자를 추출하여 전달
+    tree = GATree(
+        max_nodes=config['max_nodes'],
+        max_depth=config['max_depth'],
+        max_children=config['max_children'],
+        feature_num=config['feature_num'],
+        feature_comparison_map=config['feature_comparison_map'],
+        feature_bool=config['feature_bool'],
+        all_features=config['all_features'], # all_features 전달
+        data_tensor=tree_data_view
+    )
+    tree.make_tree()
+    # 반환값은 필요 없음 (공유 메모리에 직접 쓰기 때문)
+
+def _reorganize_worker(args):
+    """멀티프로세싱 워커: 단일 트리의 노드를 재구성합니다."""
+    i, population_tensor, config = args
+    tree_data_view = population_tensor[i]
+
+    tree = GATree(
+        max_nodes=config['max_nodes'],
+        max_depth=config['max_depth'],
+        max_children=config['max_children'],
+        feature_num=config['feature_num'],
+        feature_comparison_map=config['feature_comparison_map'],
+        feature_bool=config['feature_bool'],
+        all_features=config['all_features'], # all_features 전달
+        data_tensor=tree_data_view
+    )
+    # 로드 과정 없이 텐서 view만으로 객체 상태를 동기화
+    tree.set_next_idx()
+    tree.initialized = True
+    
+    tree.reorganize_nodes()
 
 
 class GATree:
@@ -48,9 +97,9 @@ class GATree:
     하나의 유전 알고리즘 트리를 나타내는 클래스.
     이 클래스의 데이터는 C++/CUDA에서 직접 처리할 수 있는 torch.Tensor 형식으로 저장됩니다.
     """
-    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, data_tensor=None):
+    def __init__(self, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, all_features, data_tensor=None):
         """
-        GATree 초기화.
+        [수정] GATree 초기화. all_features 리스트를 외부에서 주입받도록 변경.
 
         Args:
             max_nodes (int): 트리가 가질 수 있는 최대 노드 수.
@@ -59,6 +108,7 @@ class GATree:
             feature_num (dict): 숫자와 비교할 피쳐와 (min, max) 범위.
             feature_comparison_map (dict): 피처 간 비교 규칙을 정의한 맵.
             feature_bool (list): Boolean과 비교할 피쳐 리스트.
+            all_features (list): 전체 피처의 순서가 정의된 리스트. (중요)
             data_tensor (torch.Tensor, optional): 외부에서 생성된 텐서의 view.
                                                   None이면 자체적으로 텐서를 생성합니다.
         """
@@ -69,10 +119,10 @@ class GATree:
         self.feature_comparison_map = feature_comparison_map
         self.feature_bool = feature_bool
 
-        comp_features = set(self.feature_comparison_map.keys())
-        for v_list in self.feature_comparison_map.values():
-            comp_features.update(v_list)
-        self.all_features = list(feature_num.keys()) + sorted(list(comp_features)) + feature_bool
+        # [수정] all_features를 내부에서 계산하지 않고, 주입받은 것을 그대로 사용
+        self.all_features = all_features
+        if not self.all_features:
+            raise ValueError("all_features list cannot be empty.")
 
         self.initialized = False
         self.next_idx = 0
@@ -145,7 +195,11 @@ class GATree:
         if min_nodes_to_create > max_nodes_to_create:
             min_nodes_to_create = max_nodes_to_create
         
-        total_nodes = random.randint(min_nodes_to_create, max_nodes_to_create)
+        # [수정] total_nodes가 음수가 되지 않도록 방어 코드 추가
+        if max_nodes_to_create < 1:
+            total_nodes = 0
+        else:
+            total_nodes = random.randint(min_nodes_to_create, max_nodes_to_create)
 
         # [수정된 로직 2] 브랜치별 예산을 최대한 균등하게 분배
         nodes_per_branch = total_nodes // 3
@@ -160,7 +214,8 @@ class GATree:
 
         self._build_adjacency_list()
         self.initialized = True
-        print(f"Tree created with {self.next_idx} nodes.")
+        # 멀티프로세싱 환경에서는 print 출력이 섞일 수 있으므로 주석 처리하거나 logging 사용을 권장
+        # print(f"Tree created with {self.next_idx} nodes.")
 
     def _grow_branch(self, branch_root_id, budget):
         """
@@ -184,7 +239,7 @@ class GATree:
         while nodes_to_create > 0 and open_list:
             # [핵심 로직 1] 미래 예측 안전 점검 (Lookahead Safety Check)
             # 남은 예산이 모든 리프를 Action 노드로 덮기에도 빠듯하거나 부족한지 확인
-            if nodes_to_create <= len(leaf_list)+1:
+            if nodes_to_create <= len(leaf_list): # [수정] 논리 오류 수정 (+1 제거)
                 # "강제 종료 모드"로 전환하여 모든 리프에 Action 노드를 붙이고 종료
                 for parent_id in leaf_list:
                     if self.next_idx < self.max_nodes:
@@ -511,12 +566,13 @@ class GATree:
             'feature_num': self.feature_num,
             'feature_comparison_map': self.feature_comparison_map,
             'feature_bool': self.feature_bool,
+            'all_features': self.all_features, # [수정] all_features 저장
         }
         torch.save(state, filepath)
         print(f"Tree saved to {filepath}")
 
     def load(self, source):
-        """파일 또는 state_dict로부터 트리 상태를 로드합니다."""
+        """[수정] 파일 또는 state_dict로부터 트리 상태를 로드합니다."""
         if isinstance(source, str):
             if not os.path.exists(source):
                 raise FileNotFoundError(f"File not found: {source}")
@@ -526,22 +582,33 @@ class GATree:
         else:
             raise TypeError("source must be a filepath string or a state_dict")
 
-        feature_comparison_map = state.get('feature_comparison_map', {})
-        if not feature_comparison_map and 'feature_pair' in state:
-            print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
+        # [수정] __init__ 호출 시 `all_features`를 전달해야 하므로,
+        # state 딕셔너리에 `all_features`가 있는지 확인하고, 없으면 생성.
+        # 이는 하위 호환성을 위함.
+        if 'all_features' in state:
+            all_features = state['all_features']
+        else:
+            print("Warning: 'all_features' not found in state. Re-creating from components.")
+            feature_comparison_map = state.get('feature_comparison_map', {})
+            feature_bool = state.get('feature_bool', [])
+            all_features = get_all_features(state['feature_num'], feature_comparison_map, feature_bool)
 
-        feature_bool = state.get('feature_bool', [])
-
+        # GATree의 init을 다시 호출하여 객체를 재설정
         self.__init__(
-            state['max_nodes'], state['max_depth'], state['max_children'],
-            state['feature_num'], feature_comparison_map, feature_bool
+            max_nodes=state['max_nodes'],
+            max_depth=state['max_depth'],
+            max_children=state['max_children'],
+            feature_num=state['feature_num'],
+            feature_comparison_map=state.get('feature_comparison_map', {}),
+            feature_bool=state.get('feature_bool', []),
+            all_features=all_features # [수정] all_features 전달
         )
         self.data.copy_(state['data'])
         self.next_idx = state['next_idx']
         
         self._build_adjacency_list()
         self.initialized = True
-        print(f"Tree loaded successfully.")
+        # print(f"Tree loaded successfully.") # 개별 로드는 조용히 처리
 
     def _node_label_color(self, idx):
         """[수정] 시각화를 위한 노드의 레이블과 색상을 생성합니다."""
@@ -648,7 +715,7 @@ class GATreePop:
     GATree의 집단(Population)을 관리하는 클래스.
     """
     def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, all_features):
-        """GATreePop 초기화"""
+        """[수정] GATreePop 초기화. all_features를 명시적으로 받음."""
         self.pop_size = pop_size
         self.max_nodes = max_nodes
         self.max_depth = max_depth
@@ -656,40 +723,97 @@ class GATreePop:
         self.feature_num = feature_num
         self.feature_comparison_map = feature_comparison_map
         self.feature_bool = feature_bool
-        self.all_features = all_features  # [수정] all_features를 인스턴스 속성으로 저장
+        self.all_features = all_features
 
         self.initialized = False
         self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
         self.population = []
 
-    def make_population(self):
-        """설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다."""
-        # 추후 multiprocessing을 통한 생성
+    def make_population(self, num_processes: int = 1):
+        """
+        [수정] 설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다.
+        멀티프로세싱을 지원합니다.
+        """
         self.population = []
+
+        if num_processes > 1 and self.pop_size > 1:
+            print(f"--- Creating {self.pop_size} trees using {num_processes} processes ---")
+            
+            # 공유 메모리에 텐서 올리기
+            self.population_tensor.share_memory_()
+
+            # 워커에 전달할 설정 딕셔너리
+            config = self._get_config_dict()
+            
+            # 워커에 전달할 인자 리스트 생성
+            args = zip(range(self.pop_size), repeat(self.population_tensor), repeat(config))
+            
+            # 멀티프로세싱 풀 생성 및 실행
+            with mp.Pool(processes=num_processes) as pool:
+                # tqdm 등을 사용하려면 imap_unordered 사용 가능
+                list(pool.map(_create_tree_worker, args))
+        else:
+            print(f"--- Creating {self.pop_size} trees sequentially ---")
+            for i in range(self.pop_size):
+                tree_data_view = self.population_tensor[i]
+                tree = GATree(
+                    self.max_nodes, self.max_depth, self.max_children,
+                    self.feature_num, self.feature_comparison_map, self.feature_bool,
+                    self.all_features, # all_features 전달
+                    data_tensor=tree_data_view
+                )
+                tree.make_tree()
+        
+        # 멀티프로세싱 실행 후, self.population 리스트를 다시 채움
         for i in range(self.pop_size):
-            print(f"--- Creating Tree {i+1}/{self.pop_size} ---")
             tree_data_view = self.population_tensor[i]
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
                 self.feature_num, self.feature_comparison_map, self.feature_bool,
+                self.all_features, # all_features 전달
                 data_tensor=tree_data_view
             )
-            tree.make_tree()
+            # 텐서는 이미 채워져 있으므로, 내부 상태만 동기화
+            tree.load({
+                'data': tree_data_view,
+                'next_idx': (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item(),
+                'max_nodes': self.max_nodes, 'max_depth': self.max_depth, 'max_children': self.max_children,
+                'feature_num': self.feature_num, 'feature_comparison_map': self.feature_comparison_map,
+                'feature_bool': self.feature_bool, 'all_features': self.all_features
+            })
             self.population.append(tree)
+
         self.initialized = True
         print("\nPopulation created successfully.")
 
-    def reorganize_nodes(self):
+    def reorganize_nodes(self, num_processes: int = 1):
         """
-        집단 내의 모든 GATree 개체에 대해 노드 재조직을 수행합니다.
+        [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직을 수행합니다.
+        멀티프로세싱을 지원합니다.
         """
         if not self.initialized:
             print("Warning: Reorganizing an uninitialized population.")
             return
 
-        print(f"Reorganizing all {self.pop_size} trees in the population...")
-        for i, tree in enumerate(self.population):
-            tree.reorganize_nodes()
+        if num_processes > 1 and self.pop_size > 1:
+            print(f"Reorganizing all {self.pop_size} trees using {num_processes} processes...")
+            
+            self.population_tensor.share_memory_()
+            config = self._get_config_dict()
+            args = zip(range(self.pop_size), repeat(self.population_tensor), repeat(config))
+            
+            with mp.Pool(processes=num_processes) as pool:
+                list(pool.map(_reorganize_worker, args))
+        else:
+            print(f"Reorganizing all {self.pop_size} trees sequentially...")
+            for tree in self.population:
+                tree.reorganize_nodes()
+        
+        # 재구성 후 각 tree 객체의 next_idx 및 adjacency_list 업데이트
+        self.set_next_idx()
+        for tree in self.population:
+            tree._build_adjacency_list()
+
         print("Population reorganization complete.")
 
     def set_next_idx(self):
@@ -697,7 +821,7 @@ class GATreePop:
         집단 내의 모든 GATree 개체에 대해 next_idx를 재설정합니다.
         """
         if not self.initialized:
-            print("Warning: Setting next_idx for an uninitialized population.")
+            # print("Warning: Setting next_idx for an uninitialized population.")
             return
 
         for tree in self.population:
@@ -726,38 +850,33 @@ class GATreePop:
             'feature_num': self.feature_num,
             'feature_comparison_map': self.feature_comparison_map,
             'feature_bool': self.feature_bool,
-            'all_features': self.all_features,  # [수정] 저장할 상태에 all_features 추가
+            'all_features': self.all_features,
         }
         torch.save(state, filepath)
         print(f"Population saved to {filepath}")
 
     def load(self, filepath):
-        """파일로부터 집단 전체의 상태를 로드합니다."""
+        """[수정] 파일로부터 집단 전체의 상태를 로드합니다."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"File not found: {filepath}")
         state = torch.load(filepath)
 
-        feature_comparison_map = state.get('feature_comparison_map', {})
-        if not feature_comparison_map and 'feature_pair' in state:
-             print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
-
-        feature_bool = state.get('feature_bool', [])
+        # [수정] 하위 호환성을 위해 all_features가 없으면 생성
+        if 'all_features' not in state:
+             print("Warning: 'all_features' not found in state file. Re-creating.")
+             state['all_features'] = get_all_features(
+                 state['feature_num'], 
+                 state.get('feature_comparison_map', {}), 
+                 state.get('feature_bool', [])
+             )
         
-        # [수정] 로드된 state에서 all_features를 가져오도록 확인
-        all_features = state.get('all_features')
-        if all_features is None:
-             # 호환성을 위해 구버전 state 파일 로드 시 all_features 재생성
-             print("Warning: 'all_features' not found in state file. Re-creating from components.")
-             comp_features = set(feature_comparison_map.keys())
-             for v_list in feature_comparison_map.values():
-                 comp_features.update(v_list)
-             all_features = list(state['feature_num'].keys()) + sorted(list(comp_features)) + feature_bool
-
-        # [수정] __init__ 호출 시 all_features 전달
+        # __init__ 호출 시 all_features 전달
         self.__init__(
             state['pop_size'], state['max_nodes'], state['max_depth'],
-            state['max_children'], state['feature_num'], feature_comparison_map,
-            feature_bool, all_features
+            state['max_children'], state['feature_num'], 
+            state.get('feature_comparison_map', {}),
+            state.get('feature_bool', []), 
+            state['all_features']
         )
         self.population_tensor.copy_(state['population_tensor'])
 
@@ -767,9 +886,10 @@ class GATreePop:
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
                 self.feature_num, self.feature_comparison_map, self.feature_bool,
+                self.all_features, # [수정] all_features 전달
                 data_tensor=tree_data_view
             )
-            # GATree의 load 메서드는 내부적으로 all_features를 다시 계산하므로 수정 필요 없음
+            # GATree.load는 state dict를 받아 내부 상태를 채움
             tree.load({
                 'data': tree_data_view,
                 'next_idx': (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item(),
@@ -778,19 +898,38 @@ class GATreePop:
                 'max_children': self.max_children,
                 'feature_num': self.feature_num,
                 'feature_comparison_map': self.feature_comparison_map,
-                'feature_bool': self.feature_bool
+                'feature_bool': self.feature_bool,
+                'all_features': self.all_features # GATree.load에 전달
             })
             self.population.append(tree)
 
         self.initialized = True
         print(f"Population loaded successfully from {filepath}")
 
+    def _get_config_dict(self):
+        """멀티프로세싱 워커에 전달할 설정 딕셔너리를 반환합니다."""
+        return {
+            'max_nodes': self.max_nodes,
+            'max_depth': self.max_depth,
+            'max_children': self.max_children,
+            'feature_num': self.feature_num,
+            'feature_comparison_map': self.feature_comparison_map,
+            'feature_bool': self.feature_bool,
+            'all_features': self.all_features,
+        }
+
+
 if __name__ == '__main__':
+    # 멀티프로세싱 사용 시 main 진입점 보호
+    # Windows/macOS에서 "fork"가 아닌 "spawn" 시작 방식을 사용하므로 필수
+    mp.set_start_method("spawn", force=True)
+
     # --- 시뮬레이션 파라미터 ---
     MAX_NODES = 2048
     MAX_DEPTH = 200
     MAX_CHILDREN = 200
-    POP_SIZE = 5
+    POP_SIZE = 10 # 멀티프로세싱 테스트를 위해 크기 증가
+    NUM_PROCESSES = 4 # 사용할 프로세스 수
 
     # =======================================================
     # === 1. 단일 GATree 생성, 시각화, 저장 및 로드 테스트 ===
@@ -798,17 +937,20 @@ if __name__ == '__main__':
     print("===== [Phase 1] Single GATree Demo =====")
 
     print("\n1. Creating a standalone GATree...")
-    tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
+    # [수정] GATree 생성자에 all_features 전달
+    tree1 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES)
     tree1.make_tree()
-    tree1.visualize_graph(file="single_tree_generated.html")
+    tree1.visualize_graph(file="single_tree_generated.html", open_browser=False)
     tree1.save("single_tree.pth")
 
     print("\n2. Loading the tree into a new GATree object...")
-    tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
+    # [수정] 로드 전 객체 생성 시에도 all_features 전달
+    tree2 = GATree(MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES)
     tree2.load("single_tree.pth")
-    tree2.visualize_graph(file="single_tree_loaded.html")
+    # tree2.visualize_graph(file="single_tree_loaded.html", open_browser=False)
 
     assert torch.equal(tree1.data, tree2.data), "Saved and Loaded trees are not identical!"
+    assert tree1.all_features == tree2.all_features, "Saved and Loaded trees have different all_features list!"
     print("\nStandalone GATree save/load test PASSED.")
 
     print("\n3. Testing the new BFS predict method...")
@@ -831,25 +973,33 @@ if __name__ == '__main__':
     # =====================================================
     print("\n\n===== [Phase 2] GATreePop Demo =====")
 
-    print("\n1. Creating a population of GATrees...")
-    population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
-    population1.make_population()
+    print(f"\n1. Creating a population of GATrees using {NUM_PROCESSES} processes...")
+    # [수정] GATreePop 생성자에 all_features 전달
+    population1 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES)
+    population1.make_population(num_processes=NUM_PROCESSES)
 
     print("\nVisualizing the first tree from the population...")
     first_tree_from_pop = population1.population[0]
-    first_tree_from_pop.visualize_graph(file="population_tree_generated.html")
+    first_tree_from_pop.visualize_graph(file="population_tree_generated.html", open_browser=False)
     population1.save("population.pth")
 
     print("\n2. Loading the population into a new GATreePop object...")
-    population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL)
+    # [수정] GATreePop 생성자에 all_features 전달
+    population2 = GATreePop(POP_SIZE, MAX_NODES, MAX_DEPTH, MAX_CHILDREN, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES)
     population2.load("population.pth")
 
-    print("\nVisualizing the first tree from the loaded population...")
-    first_tree_from_loaded_pop = population2.population[0]
-    first_tree_from_loaded_pop.visualize_graph(file="population_tree_loaded.html")
+    # print("\nVisualizing the first tree from the loaded population...")
+    # first_tree_from_loaded_pop = population2.population[0]
+    # first_tree_from_loaded_pop.visualize_graph(file="population_tree_loaded.html", open_browser=False)
 
     assert torch.equal(population1.population_tensor, population2.population_tensor), "Saved and Loaded populations are not identical!"
+    assert population1.all_features == population2.all_features, "Saved and loaded populations have different all_features lists!"
     print("\nGATreePop save/load test PASSED.")
 
     assert torch.equal(population1.population[0].data, population2.population[0].data)
     print("Memory view reference in loaded population confirmed.")
+
+    # [신규] 멀티프로세싱 재구성 테스트
+    print(f"\n3. Testing reorganize_nodes with {NUM_PROCESSES} processes...")
+    population1.reorganize_nodes(num_processes=NUM_PROCESSES)
+    print("Reorganization test finished.")
