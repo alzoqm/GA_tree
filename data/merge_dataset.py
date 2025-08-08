@@ -27,6 +27,7 @@ def generate_multi_timeframe_features(
     서로 다른 시간 단위의 기술적 분석 지표를 생성하고 기준 데이터프레임에 통합합니다.
     (이전 코드와 동일하며, 수정되지 않았습니다)
     """
+    # ... (내부 코드는 변경 없음) ...
     # --- 0. 입력 유효성 검사 및 초기 설정 ---
     if not target_timeframes:
         raise ValueError("`target_timeframes` 리스트는 비어 있을 수 없습니다.")
@@ -133,13 +134,20 @@ def _generate_model_config_from_features(
     """
     생성된 전체 피처 목록과 YAML에서 로드한 '분류 설정'을 받아
     모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
+    [수정] `startswith`로 인한 오분류를 막기 위해 템플릿을 이름 길이순으로 정렬합니다.
     """
     print("\n--- YAML 설정을 기반으로 모델 config를 동적으로 생성합니다 ---")
     
-    # [수정] 하드코딩된 템플릿 대신, 인자로 받은 config에서 템플릿을 가져옵니다.
     feature_num_template = classification_config.get('feature_num', {})
     feature_comparison_template = classification_config.get('feature_comparison', [])
     feature_bool_template = classification_config.get('feature_bool', [])
+    
+    # --- [수정] 가장 긴 이름부터 매칭되도록 템플릿 키를 정렬 (오분류 방지) ---
+    # 예: 'SMA_Ratio'가 'SMA'보다 먼저 검사되도록 하여 정확한 타입으로 분류
+    sorted_bool_keys = sorted(feature_bool_template, key=len, reverse=True)
+    sorted_comparison_keys = sorted(feature_comparison_template, key=len, reverse=True)
+    sorted_num_keys = sorted(feature_num_template.keys(), key=len, reverse=True)
+    # --- [수정] 끝 ---
     
     final_feature_num = {}
     final_feature_bool = []
@@ -148,31 +156,31 @@ def _generate_model_config_from_features(
 
     for col_name in all_generated_cols:
         classified = False
-        # 1. 불리언 타입 피처 분류 (YAML 설정 기반)
-        for base_name in feature_bool_template:
+        
+        # 1. 불리언 타입 피처 분류 (정렬된 키 사용)
+        for base_name in sorted_bool_keys:
             if col_name.startswith(base_name):
                 final_feature_bool.append(col_name)
                 classified = True
                 break
         if classified: continue
 
-        # 2. 피처-피처 비교 타입 피처 분류 (YAML 설정 기반)
-        for base_name in feature_comparison_template:
+        # 2. 피처-피처 비교 타입 피처 분류 (정렬된 키 사용)
+        for base_name in sorted_comparison_keys:
             if col_name.startswith(base_name):
                 comparison_feature_list.append(col_name)
                 classified = True
                 break
         if classified: continue
 
-        # 3. 피처-숫자 비교 타입 피처 분류 (YAML 설정 기반)
-        for base_name, value_range in feature_num_template.items():
+        # 3. 피처-숫자 비교 타입 피처 분류 (정렬된 키 사용)
+        for base_name in sorted_num_keys:
             if col_name.startswith(base_name):
-                final_feature_num[col_name] = value_range
+                final_feature_num[col_name] = feature_num_template[base_name]
                 classified = True
                 break
         if classified: continue
         
-        # 4. 분류되지 않은 피처 기록
         if not classified:
             unclassified_cols.append(col_name)
 
@@ -197,20 +205,20 @@ def _generate_model_config_from_features(
 
 
 # ==============================================================================
-#            [수정된] 메인 래퍼 함수 및 테스트 실행 부분
+#            메인 래퍼 함수 및 테스트 실행 부분 (변경 없음)
 # ==============================================================================
-
 def run_feature_generation_from_yaml(
     df: pd.DataFrame,
     timestamp_col: str,
     target_timeframes: list,
     yaml_config_path: str,
-    classification_config: Dict[str, Any] # [신규] 피처 분류 설정을 인자로 받음
+    classification_config: Dict[str, Any]
 ) -> Tuple[pd.DataFrame | None, Dict[str, Any] | None]:
     """
     YAML 설정 파일을 기반으로 Multi-Timeframe 피처 생성을 실행하고,
     모델에 필요한 설정 딕셔너리까지 함께 반환하는 래퍼 함수입니다.
     """
+    # ... (내부 코드는 변경 없음) ...
     # 1. YAML 설정 파일 로드
     print(f"'{yaml_config_path}' 에서 피처 생성 설정을 로드합니다.")
     try:
@@ -246,7 +254,7 @@ def run_feature_generation_from_yaml(
         feature_params=feature_generation_params
     )
     
-    # 4. [수정] 생성된 피처 목록으로 모델 설정(config) 생성 시, YAML 설정을 전달
+    # 4. 생성된 피처 목록으로 모델 설정(config) 생성
     model_config = _generate_model_config_from_features(added_cols, classification_config)
 
     return final_dataframe, model_config

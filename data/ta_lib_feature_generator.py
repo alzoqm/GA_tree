@@ -129,7 +129,7 @@ def calculate_ichimoku(df, short_window=9, mid_window=26, long_window=52):
     """
     일목균형표 (Ichimoku Cloud) 지표들을 계산합니다.
     - 참고: TA-Lib는 일목균형표를 지원하지 않으므로 기존 pandas 구현을 유지합니다.
-    - [수정] Chikou 컬럼명에 mid_window 값을 포함하여 중복을 방지합니다.
+    - [수정] Chikou Span의 미래 데이터 참조 버그를 수정했습니다.
     """
     high = df['High']
     low = df['Low']
@@ -140,18 +140,25 @@ def calculate_ichimoku(df, short_window=9, mid_window=26, long_window=52):
     senkou_a_col = format_col_name('Ichimoku_SenkouA', f"{short_window}_{mid_window}")
     senkou_b_col = format_col_name('Ichimoku_SenkouB', long_window)
     
-    # --- 수정된 부분 시작 ---
-    # Chikou 컬럼명에 mid_window를 추가하여 고유성을 보장
-    chikou_col = format_col_name('Ichimoku_Chikou', mid_window)
-    # --- 수정된 부분 끝 ---
+    # --- [수정] 미래 데이터 참조 버그 수정 ---
+    # 원인: close.shift(-mid_window)는 미래 데이터를 참조하는 심각한 Lookahead Bias를 유발합니다.
+    # 해결: Chikou Span의 본래 목적인 '현재 가격과 과거 가격의 비교'를 위해, 
+    #       '현재 종가 / 과거 종가' 비율을 새로운 피처로 정의합니다. 이는 과거 데이터만 참조합니다.
+    chikou_ratio_col = format_col_name('Ichimoku_Chikou_Ratio', mid_window)
+    # --- [수정] 끝 ---
 
     df[tenkan_sen_col] = (high.rolling(window=short_window).max() + low.rolling(window=short_window).min()) / 2
     df[kijun_sen_col] = (high.rolling(window=mid_window).max() + low.rolling(window=mid_window).min()) / 2
     df[senkou_a_col] = ((df[tenkan_sen_col] + df[kijun_sen_col]) / 2).shift(mid_window)
     df[senkou_b_col] = ((high.rolling(window=long_window).max() + low.rolling(window=long_window).min()) / 2).shift(mid_window)
-    df[chikou_col] = close.shift(-mid_window)
+    
+    # --- [수정] 실제 계산 로직 변경 ---
+    past_close = close.shift(mid_window) # 양수 값을 사용하여 과거 데이터를 가져옵니다.
+    df[chikou_ratio_col] = close / (past_close + 1e-9) # 0으로 나누기 방지
+    # --- [수정] 끝 ---
 
-    return df, [tenkan_sen_col, kijun_sen_col, senkou_a_col, senkou_b_col, chikou_col]
+    # 반환되는 컬럼 리스트에 수정된 컬럼명 포함
+    return df, [tenkan_sen_col, kijun_sen_col, senkou_a_col, senkou_b_col, chikou_ratio_col]
 
 def calculate_dema(df, window):
     """DEMA (이중 지수 이동평균)를 계산합니다."""
@@ -512,6 +519,7 @@ def calculate_all_candlestick_patterns(df):
     ]
     
     return df, candle_cols
+
 
 # ==============================================================================
 # 9. 신규 복합 특성 (Composite & Ratio Features)
