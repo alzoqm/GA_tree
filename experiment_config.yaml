@@ -142,7 +142,7 @@ feature_classification:
     - Ichimoku_Kijun
     - Ichimoku_SenkouA
     - Ichimoku_SenkouB
-    - Ichimoku_Chikou
+    - Ichimoku_Chikou_Ratio
     - SAR
     - Support_MA
     - Resistance_MA
