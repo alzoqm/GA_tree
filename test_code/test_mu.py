@@ -6,8 +6,8 @@ import shutil
 
 # 모델 관련
 # [수정] FEATURE_PAIR 대신 FEATURE_COMPARISON_MAP과 ALL_FEATURES를 직접 임포트
-from models.model import (GATree, GATreePop, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES,
-                   COL_NODE_TYPE, NODE_TYPE_UNUSED)
+from models.model import (GATree, GATreePop, FEATURE_NUM, FEATURE_COMPARISON_MAP, FEATURE_BOOL, ALL_FEATURES)
+from models.constants import *
 
 # 변이 연산자 관련
 from evolution.Mutation.base import BaseMutation

@@ -81,7 +81,6 @@ six==1.17.0
 soupsieve==2.7
 stack_data==0.6.3
 sympy==1.14.0
-ta-lib==0.5.1
 tinycss2==1.4.0
 torch==2.7.1
 tornado==6.5.1

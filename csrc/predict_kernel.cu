@@ -1,15 +1,14 @@
-// csrc/predict_kernel.cu (수정됨)
+// csrc/predict_kernel.cu (수정된 최종본)
 #include <cuda_runtime.h>
 #include "constants.h"
 
-// [신규] 공유 메모리에 캐싱할 피처의 최대 개수.
-// 실제 피처 수가 이보다 많으면 에러가 발생합니다. (C++ 래퍼에서 체크)
-constexpr int MAX_FEATURES_IN_SHARED_MEM = 1024;
+// [삭제] 고정된 공유 메모리 크기 상수를 제거합니다.
+// constexpr int MAX_FEATURES_IN_SHARED_MEM = 1024;
 
 // --- Device-level Helper Function ---
 __device__ bool evaluate_node_device(
     const float* node_data,
-    const float* feature_values) { // 이제 feature_values는 공유 메모리 포인터가 됩니다.
+    const float* feature_values) {
 
     int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
     int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
@@ -35,13 +34,12 @@ __device__ bool evaluate_node_device(
 }
 
 
-// --- [수정] Main CUDA Kernel ---
+// --- Main CUDA Kernel ---
 __global__ void predict_kernel(
     const float* population_ptr,
     const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
-    // [신규] 인접 리스트 포인터
     const int* offset_ptr,
     const int* child_indices_ptr,
     float* results_ptr,
@@ -50,8 +48,8 @@ __global__ void predict_kernel(
     int max_nodes,
     int num_features) {
 
-    // [신규] 공유 메모리 선언
-    __shared__ float feature_cache[MAX_FEATURES_IN_SHARED_MEM];
+    // [수정] 동적 공유 메모리 선언
+    extern __shared__ float feature_cache[];
 
     // 1. Thread-to-Tree Mapping
     const int tree_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -59,17 +57,16 @@ __global__ void predict_kernel(
         return;
     }
     
-    // [신규] 블록의 첫 번째 스레드가 피처 값을 공유 메모리로 캐싱
-    if (threadIdx.x < num_features) {
-        feature_cache[threadIdx.x] = features_ptr[threadIdx.x];
+    // [수정] 그리드-스트라이드 루프(Grid-Stride Loop)를 사용하여 모든 피처를 공유 메모리로 복사
+    for (int i = threadIdx.x; i < num_features; i += blockDim.x) {
+        feature_cache[i] = features_ptr[i];
     }
-    __syncthreads(); // 블록 내 모든 스레드가 캐싱 완료까지 대기
+    __syncthreads(); // 블록 내 모든 스레드가 복사 작업을 마칠 때까지 대기
 
     // 2. Setup pointers and variables for the current tree
     const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
     float* result_out = results_ptr + tree_idx * 4;
     const int next_idx = next_indices_ptr[tree_idx];
-    // [신규] 현재 트리에 해당하는 오프셋 배열 부분 포인터 설정
     const int* tree_offset_ptr = offset_ptr + tree_idx * max_nodes;
 
     // 3. Find the starting node (root branch)
@@ -107,8 +104,6 @@ __global__ void predict_kernel(
     // 5. BFS 루프 시작
     while (queue_head < queue_tail && !found_action) {
         int current_node_idx = bfs_queue[queue_head++];
-
-        // [수정] 비효율적인 선형 탐색을 인접 리스트 조회로 변경 (핵심 최적화)
         int start_offset = tree_offset_ptr[current_node_idx];
         int end_offset = tree_offset_ptr[current_node_idx + 1];
 
@@ -123,10 +118,9 @@ __global__ void predict_kernel(
                 result_out[2] = child_node_data[COL_PARAM_3];
                 result_out[3] = child_node_data[COL_PARAM_4];
                 found_action = true;
-                break; // Action을 찾았으므로 더 이상 자식을 볼 필요 없음
+                break;
             }
             else if (child_node_type == NODE_TYPE_DECISION) {
-                // [수정] 공유 메모리에 캐시된 피처 값을 사용
                 if (evaluate_node_device(child_node_data, feature_cache)) {
                     if (queue_tail < max_nodes) {
                         bfs_queue[queue_tail++] = child_idx;
@@ -137,13 +131,12 @@ __global__ void predict_kernel(
     }
 }
 
-// --- [수정] Kernel Launcher ---
+// --- Kernel Launcher ---
 void launch_predict_kernel(
     const float* population_ptr,
     const float* features_ptr,
     const long* positions_ptr,
     const int* next_indices_ptr,
-    // [신규] 인접 리스트 포인터
     const int* offset_ptr,
     const int* child_indices_ptr,
     float* results_ptr,
@@ -157,7 +150,11 @@ void launch_predict_kernel(
     const int threads_per_block = 256;
     const int num_blocks = (pop_size + threads_per_block - 1) / threads_per_block;
     
-    predict_kernel<<<num_blocks, threads_per_block>>>(
+    // [수정] 커널에 전달할 동적 공유 메모리 크기 계산
+    const size_t shared_mem_size = num_features * sizeof(float);
+
+    // [수정] 커널 실행 시 세 번째 인자로 공유 메모리 크기를 전달
+    predict_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
         population_ptr,
         features_ptr,
         positions_ptr,

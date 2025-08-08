@@ -450,6 +450,7 @@ def generation_valid(
         torch.save(gen_data, os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt'))
         
         evolution.evolve(torch.from_numpy(train_fitness).to(device))
+        population.reorganize_nodes()
         
     return best_chromosomes, best_profit
 

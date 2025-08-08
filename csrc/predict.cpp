@@ -5,8 +5,8 @@
 #include "adjacency_builder.cuh"
 #include "constants.h"
 
-// 공유 메모리 캐싱을 위한 피처 수 한계 (컴파일 타임 상수)
-constexpr int MAX_FEATURES_IN_SHARED_MEM_CPP = 1024;
+// [삭제] 공유 메모리 크기 관련 상수를 제거합니다.
+// constexpr int MAX_FEATURES_IN_SHARED_MEM_CPP = 1024;
 
 // ==============================================================================
 //           Helper 1: 예측 커널에 전달될 텐서 유효성 검사 함수
@@ -60,8 +60,10 @@ void check_predict_tensors(
     const int pop_size = population.size(0);
     const int max_nodes = population.size(1);
 
-    TORCH_CHECK(features.size(0) <= MAX_FEATURES_IN_SHARED_MEM_CPP, 
-                "Number of features exceeds shared memory limit defined in C++");
+    // [삭제] 고정된 크기 검사를 제거합니다. 이제 동적으로 할당되므로 필요 없습니다.
+    // TORCH_CHECK(features.size(0) <= MAX_FEATURES_IN_SHARED_MEM_CPP, 
+    //             "Number of features exceeds shared memory limit defined in C++");
+                
     TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
     TORCH_CHECK(next_indices.size(0) == pop_size, "Next_indices tensor pop_size mismatch");
     TORCH_CHECK(offset_array.size(0) == (pop_size * max_nodes + 1), "Offset array size mismatch");

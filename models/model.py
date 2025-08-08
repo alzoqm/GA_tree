@@ -647,7 +647,7 @@ class GATreePop:
     """
     GATree의 집단(Population)을 관리하는 클래스.
     """
-    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool):
+    def __init__(self, pop_size, max_nodes, max_depth, max_children, feature_num, feature_comparison_map, feature_bool, all_features):
         """GATreePop 초기화"""
         self.pop_size = pop_size
         self.max_nodes = max_nodes
@@ -656,6 +656,7 @@ class GATreePop:
         self.feature_num = feature_num
         self.feature_comparison_map = feature_comparison_map
         self.feature_bool = feature_bool
+        self.all_features = all_features  # [수정] all_features를 인스턴스 속성으로 저장
 
         self.initialized = False
         self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
@@ -725,6 +726,7 @@ class GATreePop:
             'feature_num': self.feature_num,
             'feature_comparison_map': self.feature_comparison_map,
             'feature_bool': self.feature_bool,
+            'all_features': self.all_features,  # [수정] 저장할 상태에 all_features 추가
         }
         torch.save(state, filepath)
         print(f"Population saved to {filepath}")
@@ -740,11 +742,22 @@ class GATreePop:
              print("Warning: Loading legacy 'feature_pair'. Converting to an empty map.")
 
         feature_bool = state.get('feature_bool', [])
+        
+        # [수정] 로드된 state에서 all_features를 가져오도록 확인
+        all_features = state.get('all_features')
+        if all_features is None:
+             # 호환성을 위해 구버전 state 파일 로드 시 all_features 재생성
+             print("Warning: 'all_features' not found in state file. Re-creating from components.")
+             comp_features = set(feature_comparison_map.keys())
+             for v_list in feature_comparison_map.values():
+                 comp_features.update(v_list)
+             all_features = list(state['feature_num'].keys()) + sorted(list(comp_features)) + feature_bool
 
+        # [수정] __init__ 호출 시 all_features 전달
         self.__init__(
             state['pop_size'], state['max_nodes'], state['max_depth'],
             state['max_children'], state['feature_num'], feature_comparison_map,
-            feature_bool
+            feature_bool, all_features
         )
         self.population_tensor.copy_(state['population_tensor'])
 
@@ -756,6 +769,7 @@ class GATreePop:
                 self.feature_num, self.feature_comparison_map, self.feature_bool,
                 data_tensor=tree_data_view
             )
+            # GATree의 load 메서드는 내부적으로 all_features를 다시 계산하므로 수정 필요 없음
             tree.load({
                 'data': tree_data_view,
                 'next_idx': (tree_data_view[:, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item(),
@@ -770,7 +784,6 @@ class GATreePop:
 
         self.initialized = True
         print(f"Population loaded successfully from {filepath}")
-
 
 if __name__ == '__main__':
     # --- 시뮬레이션 파라미터 ---
