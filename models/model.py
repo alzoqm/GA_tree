@@ -729,7 +729,7 @@ class GATreePop:
         self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
         self.population = []
 
-    def make_population(self, num_processes: int = 1):
+    def make_population(self, num_processes: int = os.cpu_count()):
         """
         [수정] 설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다.
         멀티프로세싱을 지원합니다.
@@ -786,7 +786,7 @@ class GATreePop:
         self.initialized = True
         print("\nPopulation created successfully.")
 
-    def reorganize_nodes(self, num_processes: int = 1):
+    def reorganize_nodes(self, num_processes: int = os.cpu_count()):
         """
         [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직을 수행합니다.
         멀티프로세싱을 지원합니다.
