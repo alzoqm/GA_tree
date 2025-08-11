@@ -38,7 +38,7 @@ class TradingEnvironment:
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
         self.funding_fee_hours = {0, 8, 16}
-        self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.01)
+        self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.05)
         self.max_additional_entries = env_config.get('max_additional_entries', 1e9)
 
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)

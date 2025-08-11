@@ -78,6 +78,8 @@ evaluation:
     taker_fee_rate: 0.0004
     maintenance_margin_rate: 0.005
     fixed_slippage_rate: 0.0005
+    min_additional_enter_ratio: 0.05
+    max_additional_entries: 5
   fitness_function:
     # Mean Return, Profit Factor, Win Rate, Max DD, Compound Value 순서
     weights: [0.1, 0.2, 0.15, 0.15, 0.4]
