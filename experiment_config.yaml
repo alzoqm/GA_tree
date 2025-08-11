@@ -8,19 +8,23 @@ environment:
   device: 'cpu' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 42
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
-  data_dir: "data"
+  data_dir: "dataset"
 
 # 2. 데이터 설정
 data:
   symbol: "BTCUSDT"
-  interval: "1h"
-  days_to_fetch: 365
+  interval: "5m"
+  days_to_fetch: 30
   train_ratio: 0.8 # 학습 데이터 비율
   # 생성된 데이터가 저장될 경로
-  merged_csv_path: "data/BTCUSDT_1h_365d_merged.csv"
+  merged_csv_path: "BTCUSDT_5m_30d.csv"
+  # --- 최종 전처리 완료된 데이터 및 모델 설정 경로 ---
+  final_features_path: "final_test_features.csv"
+  model_config_path: "model_test_config.yaml"
+  # --------------------------------------------------------
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
-    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    target_timeframes: ['5m', '30m', '1h']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
@@ -85,7 +89,7 @@ evaluation:
     weights: [0.1, 0.2, 0.15, 0.15, 0.4]
     minimum_trades: 40
 
-# 6. [신규] 피처 분류 및 모델 입력 설정
+# 6. 피처 분류 및 모델 입력 설정 (수정됨)
 feature_classification:
   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
@@ -123,6 +127,16 @@ feature_classification:
     HT_DCPERIOD: [0, 100]
     HT_SINE: [-1, 1]
     HT_LEADSINE: [-1, 1]
+    # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+    RSI_ADX_Ratio: [-10, 10]
+    MACD_ATR_Ratio: [-50, 50]
+    RSI_Ratio: [0, 5]
+    BB_Width_Ratio: [0, 5]
+    RSI_ROC: [-100, 100]
+    ATR_ROC: [-100, 100]
+    MACD_Hist_ROC: [-100, 100]
+    CCI_ROC: [-100, 100]
+    # ----------------------------------------------
 
   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
   # 여기에 포함된 피처들은 서로 비교 대상이 됨
@@ -185,3 +199,10 @@ feature_classification:
     - BullishRise3Methods
     - BearishFall3Methods
     - HT_TRENDMODE
+    # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+    - Volume_Spike
+    - Consecutive_Bullish
+    - Consecutive_Bearish
+    - Bullish_Confirmation
+    - Bearish_Confirmation
+    # ---------------------------------------------

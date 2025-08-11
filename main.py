@@ -89,54 +89,85 @@ def main():
     setup_environment(env_cfg['output_dir'])
     
     # ==========================================================================
-    #             Phase 1: 데이터 준비 및 피처 생성
+    #             Phase 1: 데이터 준비 및 피처 생성 (수정됨)
     # ==========================================================================
     logging.info("--- Phase 1: Data Preparation & Feature Generation ---")
 
-    data_csv_path = os.path.join(env_cfg['data_dir'], data_cfg['merged_csv_path'])
+    final_features_path = os.path.join(env_cfg['data_dir'], data_cfg['final_features_path'])
+    model_config_path = os.path.join(env_cfg['data_dir'], data_cfg['model_config_path'])
 
-    if not os.path.exists(data_csv_path):
-        logging.warning(f"Data file not found at '{data_csv_path}'. Starting download...")
-        kline_df = fetch_historical_data(data_cfg['symbol'], data_cfg['interval'], data_cfg['days_to_fetch'])
-        if kline_df is None:
-            logging.error("Failed to download K-line data. Exiting.")
+    # --- 최종 전처리된 데이터가 있는지 확인 ---
+    if os.path.exists(final_features_path) and os.path.exists(model_config_path):
+        logging.info(f"Loading pre-processed data from '{final_features_path}'")
+        final_df = pd.read_csv(final_features_path, parse_dates=['Open time'])
+        
+        logging.info(f"Loading model config from '{model_config_path}'")
+        with open(model_config_path, 'r', encoding='utf-8') as f:
+            model_config = yaml.safe_load(f)
+
+        if final_df.empty or not model_config:
+            logging.error("Loaded data or config is empty. Please check the files or delete them to regenerate.")
             return
-        
-        funding_df = fetch_funding_rate_history(data_cfg['symbol'], data_cfg['days_to_fetch'])
-        if funding_df is None:
-            logging.warning("Failed to download funding rate data. Proceeding without it.")
-            merged_df = kline_df
-        else:
-            kline_df = kline_df.sort_values('Open time')
-            funding_df = funding_df.sort_values('fundingTime')
-            merged_df = pd.merge_asof(
-                kline_df, funding_df,
-                left_on='Open time', right_on='fundingTime', direction='backward'
-            )
-        
-        merged_df.to_csv(data_csv_path, index=False)
-        logging.info(f"Downloaded and merged data saved to '{data_csv_path}'")
-        source_df = merged_df
+
     else:
-        logging.info(f"Loading data from '{data_csv_path}'")
-        source_df = pd.read_csv(data_csv_path, parse_dates=['Open time'])
+        logging.info("Pre-processed data not found. Starting data download and feature generation pipeline...")
+        
+        # --- 원본 데이터 로드 또는 다운로드 (기존 로직) ---
+        data_csv_path = os.path.join(env_cfg['data_dir'], data_cfg['merged_csv_path'])
 
-    logging.info("Generating multi-timeframe features from YAML config...")
-    # [수정] run_feature_generation_from_yaml 호출 시 classification_config 인자 전달
-    final_df, model_config = run_feature_generation_from_yaml(
-        df=source_df,
-        timestamp_col='Open time',
-        target_timeframes=data_cfg['feature_engineering']['target_timeframes'],
-        yaml_config_path=data_cfg['feature_engineering']['config_yaml_path'],
-        classification_config=classification_cfg
-    )
+        if not os.path.exists(data_csv_path):
+            logging.warning(f"Data file not found at '{data_csv_path}'. Starting download...")
+            kline_df = fetch_historical_data(data_cfg['symbol'], data_cfg['interval'], data_cfg['days_to_fetch'])
+            if kline_df is None:
+                logging.error("Failed to download K-line data. Exiting.")
+                return
+            
+            funding_df = fetch_funding_rate_history(data_cfg['symbol'], data_cfg['days_to_fetch'])
+            if funding_df is None:
+                logging.warning("Failed to download funding rate data. Proceeding without it.")
+                merged_df = kline_df
+            else:
+                kline_df = kline_df.sort_values('Open time')
+                funding_df = funding_df.sort_values('fundingTime')
+                merged_df = pd.merge_asof(
+                    kline_df, funding_df,
+                    left_on='Open time', right_on='fundingTime', direction='backward'
+                )
+            
+            os.makedirs(env_cfg['data_dir'], exist_ok=True)
+            merged_df.to_csv(data_csv_path, index=False)
+            logging.info(f"Downloaded and merged data saved to '{data_csv_path}'")
+            source_df = merged_df
+        else:
+            logging.info(f"Loading data from '{data_csv_path}'")
+            source_df = pd.read_csv(data_csv_path, parse_dates=['Open time'])
 
-    if final_df is None:
-        logging.error("Feature generation failed. Exiting.")
-        return
+        # --- 피처 생성 (기존 로직) ---
+        logging.info("Generating multi-timeframe features from YAML config...")
+        final_df, model_config = run_feature_generation_from_yaml(
+            df=source_df,
+            timestamp_col='Open time',
+            target_timeframes=data_cfg['feature_engineering']['target_timeframes'],
+            yaml_config_path=data_cfg['feature_engineering']['config_yaml_path'],
+            classification_config=classification_cfg
+        )
 
+        if final_df is None or model_config is None:
+            logging.error("Feature generation failed. Exiting.")
+            return
+
+        # --- 생성된 최종 데이터 및 설정 저장 ---
+        logging.info(f"Saving generated feature data to '{final_features_path}'")
+        final_df.to_csv(final_features_path, index=False)
+        
+        logging.info(f"Saving generated model config to '{model_config_path}'")
+        with open(model_config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(model_config, f, default_flow_style=False, allow_unicode=True)
+
+    # --- 후처리 (공통) ---
     final_df.set_index('Open time', inplace=True)
-    logging.info(f"Feature generation complete. Final data shape: {final_df.shape}")
+    logging.info(f"Data preparation complete. Final data shape: {final_df.shape}")
+
 
     # ==========================================================================
     #             Phase 2: 유전 알고리즘(GA) 집단 초기화
