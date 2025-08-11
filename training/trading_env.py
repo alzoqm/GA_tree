@@ -1,4 +1,4 @@
-# training/trading_env.py (수정된 전체 코드)
+# /training/trading_env.py
 
 import os
 import torch
@@ -12,7 +12,6 @@ from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
-# [수정] predictor에서 두 개의 함수를 임포트
 from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 
 # ##############################################################################
@@ -30,7 +29,6 @@ INT_TO_POSITION_MAP = {
 class TradingEnvironment:
     """
     거래 환경 설정을 생성자에서 받아 초기화하는 거래 시뮬레이션 환경 클래스.
-    (이 클래스 내부 로직은 변경되지 않았습니다.)
     """
     def __init__(self, chromosomes_size, env_config, device='cpu'):
         self.device = device
@@ -40,6 +38,8 @@ class TradingEnvironment:
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
         self.funding_fee_hours = {0, 8, 16}
+        self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.01)
+        self.max_additional_entries = env_config.get('max_additional_entries', 1e9)
 
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
@@ -81,36 +81,60 @@ class TradingEnvironment:
                     self.profit[short_mask] += funding_pnl[short_mask] * self.enter_ratio[short_mask]
                     break
 
-    def _check_liquidation(self, curr_price):
-        active_pos_mask = self.pos_list != 0
-        if not active_pos_mask.any():
-            return
-        pos_price = self.price_list[active_pos_mask]
-        leverage = self.leverage_ratio[active_pos_mask].float()
-        enter_ratio = self.enter_ratio[active_pos_mask]
-        pnl_percent = torch.zeros_like(pos_price)
-        long_mask_local = self.pos_list[active_pos_mask] == 2
-        short_mask_local = self.pos_list[active_pos_mask] == 1
-        pnl_percent[long_mask_local] = (curr_price - pos_price[long_mask_local]) / pos_price[long_mask_local]
-        pnl_percent[short_mask_local] = (pos_price[short_mask_local] - curr_price) / pos_price[short_mask_local]
-        margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-        maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
-        liquidation_mask_local = margin_balance <= maintenance_margin
-        if not liquidation_mask_local.any():
-            return
-        active_indices = torch.where(active_pos_mask)[0]
-        liquidated_indices = active_indices[liquidation_mask_local]
-        self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
-        self.pos_list[liquidated_indices] = 0
-        self.price_list[liquidated_indices] = -1.0
-        self.leverage_ratio[liquidated_indices] = -1
-        self.enter_ratio[liquidated_indices] = -1.0
-        self.additional_count[liquidated_indices] = 0
-        self.holding_period[liquidated_indices] = 0
+    def _check_liquidation(self, curr_low, curr_high):
+        # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> curr_low 기준)
+        long_mask = self.pos_list == 2
+        if long_mask.any():
+            pos_price = self.price_list[long_mask]
+            leverage = self.leverage_ratio[long_mask].float()
+            enter_ratio = self.enter_ratio[long_mask]
 
-    def _execute_actions(self, actions_tensor, curr_close, curr_high, curr_low):
-        buy_exec_price = curr_close * (1 + self.fixed_slippage_rate)
-        sell_exec_price = curr_close * (1 - self.fixed_slippage_rate)
+            pnl_percent = (curr_low - pos_price) / pos_price
+            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
+            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
+            
+            liquidation_mask_local = margin_balance <= maintenance_margin
+            if liquidation_mask_local.any():
+                long_indices = torch.where(long_mask)[0]
+                liquidated_indices = long_indices[liquidation_mask_local]
+                
+                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
+                self.pos_list[liquidated_indices] = 0
+                self.price_list[liquidated_indices] = -1.0
+                self.leverage_ratio[liquidated_indices] = -1
+                self.enter_ratio[liquidated_indices] = -1.0
+                self.additional_count[liquidated_indices] = 0
+                self.holding_period[liquidated_indices] = 0
+
+        # 2. 숏 포지션 청산 검사 (가격 상승 시 위험 -> curr_high 기준)
+        short_mask = self.pos_list == 1
+        if short_mask.any():
+            pos_price = self.price_list[short_mask]
+            leverage = self.leverage_ratio[short_mask].float()
+            enter_ratio = self.enter_ratio[short_mask]
+            
+            pnl_percent = (pos_price - curr_high) / pos_price
+            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
+            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
+
+            liquidation_mask_local = margin_balance <= maintenance_margin
+            if liquidation_mask_local.any():
+                short_indices = torch.where(short_mask)[0]
+                liquidated_indices = short_indices[liquidation_mask_local]
+
+                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
+                self.pos_list[liquidated_indices] = 0
+                self.price_list[liquidated_indices] = -1.0
+                self.leverage_ratio[liquidated_indices] = -1
+                self.enter_ratio[liquidated_indices] = -1.0
+                self.additional_count[liquidated_indices] = 0
+                self.holding_period[liquidated_indices] = 0
+    
+    # [수정 시작] 보고서 1번 항목: 거래 체결 가격 현실성 강화
+    def _execute_actions(self, actions_tensor, exec_base_price, curr_high, curr_low):
+        buy_exec_price = exec_base_price * (1 + self.fixed_slippage_rate)
+        sell_exec_price = exec_base_price * (1 - self.fixed_slippage_rate)
+    # [수정 종료]
         currently_hold = (self.pos_list == 0)
         currently_short = (self.pos_list == 1)
         currently_long = (self.pos_list == 2)
@@ -170,21 +194,41 @@ class TradingEnvironment:
                 fee = closed_margin * leverage * self.taker_fee_rate
                 self.profit[short_p_close_mask] += (pnl - fee)
                 self.enter_ratio[short_p_close_mask] -= closed_margin
+        
         action_mask = (actions_tensor[:, 0] == ACTION_ADD_POSITION) & (self.pos_list != 0)
         if action_mask.any():
-            add_ratio = actions_tensor[action_mask, 1]
+            requested_add_ratio = actions_tensor[action_mask, 1]
+            
             for pos_type, pos_cond, exec_price in [(2, currently_long, buy_exec_price), (1, currently_short, sell_exec_price)]:
-                add_mask = action_mask & pos_cond
+                add_mask = action_mask & pos_cond & (self.additional_count < self.max_additional_entries)
                 if add_mask.any():
-                    ratio = add_ratio[pos_cond[action_mask]]
-                    fee = ratio * self.leverage_ratio[add_mask].float() * self.taker_fee_rate
-                    self.profit[add_mask] -= fee
-                    old_price = self.price_list[add_mask]
-                    old_ratio = self.enter_ratio[add_mask]
-                    new_avg_price = (old_price * old_ratio + exec_price * ratio) / (old_ratio + ratio + 1e-9)
-                    self.price_list[add_mask] = new_avg_price
-                    self.enter_ratio[add_mask] += ratio
-                    self.additional_count[add_mask] += 1
+                    current_enter_ratio = self.enter_ratio[add_mask]
+                    current_requested_ratio = requested_add_ratio[pos_cond[action_mask]]
+                    
+                    # [수정 시작] 보고서 2번 항목: '물타기' 로직 명확화
+                    # 추가 진입량을 전체 자본 대비 요청 비율로 해석
+                    intended_add_amount = current_requested_ratio
+                    # [수정 종료]
+                    
+                    remaining_capital = 1.0 - current_enter_ratio
+                    actual_add_ratio = torch.min(intended_add_amount, remaining_capital)
+                    valid_add_mask = actual_add_ratio > self.min_additional_enter_ratio
+                    
+                    if valid_add_mask.any():
+                        final_add_mask = torch.where(add_mask)[0][valid_add_mask]
+                        final_add_ratio = actual_add_ratio[valid_add_mask]
+
+                        fee = final_add_ratio * self.leverage_ratio[final_add_mask].float() * self.taker_fee_rate
+                        self.profit[final_add_mask] -= fee
+                        
+                        old_price = self.price_list[final_add_mask]
+                        old_ratio = self.enter_ratio[final_add_mask]
+                        new_avg_price = (old_price * old_ratio + exec_price * final_add_ratio) / (old_ratio + final_add_ratio + 1e-9)
+                        
+                        self.price_list[final_add_mask] = new_avg_price
+                        self.enter_ratio[final_add_mask] += final_add_ratio
+                        self.additional_count[final_add_mask] += 1
+
         action_mask = (actions_tensor[:, 0] == ACTION_FLIP_POSITION) & (self.pos_list != 0)
         if action_mask.any():
             new_enter_ratio = actions_tensor[action_mask, 1]
@@ -222,18 +266,21 @@ class TradingEnvironment:
                 self.leverage_ratio[flip_to_long_mask] = lev
                 self.additional_count[flip_to_long_mask] = 0
 
-    def step(self, market_data, predicted_actions):
+    # [수정 시작] 보고서 1번 항목: step 함수 시그니처 변경
+    def step(self, market_data, next_open_price, predicted_actions):
         current_timestamp = market_data.name
-        curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
+        # curr_close는 더 이상 체결 가격으로 사용되지 않음
         curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
         curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
         funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
+        
         self._apply_funding_fees(current_timestamp, funding_rate)
-        liquidation_price_long = curr_low
-        liquidation_price_short = curr_high
-        self._check_liquidation(liquidation_price_long)
-        self._check_liquidation(liquidation_price_short)
-        self._execute_actions(predicted_actions, curr_close, curr_high, curr_low)
+        self._check_liquidation(curr_low, curr_high)
+        
+        # 체결 기준 가격으로 next_open_price 전달
+        self._execute_actions(predicted_actions, next_open_price, curr_high, curr_low)
+    # [수정 종료]
+        
         self.holding_period[self.pos_list != 0] += 1
         self.holding_period[self.pos_list == 0] = 0
         non_zero_mask = self.profit != 0
@@ -253,14 +300,23 @@ class TradingEnvironment:
             self.running_max = torch.maximum(self.running_max, self.cum_sum)
             current_drawdown = self.running_max - self.cum_sum
             self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
-            self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask] / 100.0)
+            self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask])
         self.profit.zero_()
         self.last_timestamp = current_timestamp
 
     def get_final_metrics(self, minimum_date=40):
         count_returns_f = self.count_returns.float()
         mean_returns = torch.where(count_returns_f > 0, self.sum_returns / count_returns_f, torch.full_like(self.sum_returns, -1e9))
-        profit_factors = torch.where(self.total_loss_agg > 0, self.total_profit_agg / (self.total_loss_agg + 1e-9), torch.full_like(self.total_profit_agg, -1e9))
+        
+        # [수정 시작] 보고서 3번 항목: Profit Factor 지표 왜곡 방지
+        # 손실이 0일 경우를 대비해 PF의 최대값을 100.0으로 설정하고, 계산된 값에도 상한을 적용
+        profit_factors = torch.full_like(self.total_profit_agg, 100.0)
+        has_loss_mask = self.total_loss_agg > 0
+        if has_loss_mask.any():
+            calculated_pf = self.total_profit_agg[has_loss_mask] / (self.total_loss_agg[has_loss_mask] + 1e-9)
+            profit_factors[has_loss_mask] = torch.clamp(calculated_pf, max=100.0)
+        # [수정 종료]
+
         win_rates = torch.where(count_returns_f > 0, self.count_wins.float() / count_returns_f, torch.full_like(count_returns_f, -1e9))
         invalid_mask = self.count_returns < minimum_date
         mean_returns[invalid_mask] = -1e9
@@ -272,7 +328,7 @@ class TradingEnvironment:
         return metrics.cpu().numpy()
 
 # ##############################################################################
-#           유틸리티 및 피트니스 계산 래퍼 함수 (수정됨)
+#           유틸리티 및 피트니스 계산 래퍼 함수 (수정 없음)
 # ##############################################################################
 
 torch.set_grad_enabled(False)
@@ -311,7 +367,6 @@ def fitness_fn(
     population: GATreePop,
     data: pd.DataFrame,
     all_feature_names: list,
-    # [신규] 인접 리스트 텐서를 인자로 받음
     adj_offsets: torch.Tensor,
     adj_indices: torch.Tensor,
     start_data_cnt: int,
@@ -320,7 +375,7 @@ def fitness_fn(
     evaluation_config: dict
 ):
     """
-    [수정] 인접 리스트를 받아 predict_population_cuda에 전달하는 래퍼 함수.
+    [수정 없음]
     """
     env_config = evaluation_config['simulation_env']
     fitness_cfg = evaluation_config['fitness_function']
@@ -331,17 +386,21 @@ def fitness_fn(
         device=device
     )
     
-    pbar = tqdm(range(start_data_cnt, stop_data_cnt), desc="Fitness Simulation (Time-driven)")
+    # [수정 시작] 보고서 1번 항목: 다음 캔들 Open가로 거래하기 위해 루프 범위 수정
+    pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Fitness Simulation (Time-driven)")
+    # [수정 종료]
     
     feature_data = data[all_feature_names]
 
     for entry_index in pbar:
+        # [수정 시작] 보고서 1번 항목: 다음 캔들 Open 가격 조회 및 전달
         market_data_row = data.iloc[entry_index]
+        next_open_price = torch.tensor(data['Open'].iloc[entry_index + 1], dtype=torch.float32, device=device)
         feature_values_series = feature_data.iloc[entry_index]
+        # [수정 종료]
         
         current_positions_str = [INT_TO_POSITION_MAP[pos.item()] for pos in environment.pos_list]
         
-        # [수정] 예측 함수 호출 시 인접 리스트 전달
         predicted_actions = predict_population_cuda(
             population=population,
             feature_values=feature_values_series,
@@ -354,7 +413,9 @@ def fitness_fn(
         if predicted_actions is None:
             raise RuntimeError("CUDA prediction failed. Check if gatree_cuda module is compiled and available.")
             
-        environment.step(market_data_row, predicted_actions)
+        # [수정 시작] 보고서 1번 항목: step 함수에 next_open_price 전달
+        environment.step(market_data_row, next_open_price, predicted_actions)
+        # [수정 종료]
 
     pbar.close()
     
@@ -362,7 +423,7 @@ def fitness_fn(
     return final_metrics
 
 # ##############################################################################
-#           메인 학습/테스트 루프 (수정됨)
+#           메인 학습/테스트 루프 (수정 없음)
 # ##############################################################################
 
 def generation_valid(
@@ -382,7 +443,7 @@ def generation_valid(
     best_chromosomes=None,
     start_gen: int = 0
 ):
-    """[수정] 세대마다 인접 리스트를 생성하여 fitness_fn에 전달하는 학습 루프"""
+    """[수정 없음]"""
     
     best_profit = best_profit
     best_chromosomes = best_chromosomes
@@ -399,12 +460,10 @@ def generation_valid(
     for gen_idx in range(start_gen, gen_loop):
         print(f'generation {gen_idx}: ')
         
-        # [신규] 세대 시작 시 인접 리스트 생성
         adj_offsets, adj_indices = build_adjacency_list_cuda(population)
         if adj_offsets is None:
             raise RuntimeError("Failed to build adjacency list on GPU.")
 
-        # [수정] fitness_fn 호출 시 인접 리스트 전달
         train_metrics = fitness_fn(
             population=population,
             data=data_1m,
@@ -463,19 +522,17 @@ def generation_test(
     device: str,
     evaluation_config: dict
 ):
-    """[수정] 테스트 시에도 인접 리스트를 생성하여 사용"""
+    """[수정 없음]"""
 
     if not isinstance(data_1m.index, pd.DatetimeIndex):
         data_1m.index = pd.to_datetime(data_1m.index)
 
     all_feature_names = population.all_features
     
-    # [신규] 테스트 시작 전 인접 리스트 생성
     adj_offsets, adj_indices = build_adjacency_list_cuda(population)
     if adj_offsets is None:
         raise RuntimeError("Failed to build adjacency list on GPU for test.")
         
-    # [수정] fitness_fn 호출 시 인접 리스트 전달
     test_metrics = fitness_fn(
         population=population,
         data=data_1m,
