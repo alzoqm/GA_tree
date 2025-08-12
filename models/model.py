@@ -71,7 +71,10 @@ def _create_tree_worker(args):
     # 반환값은 필요 없음 (공유 메모리에 직접 쓰기 때문)
 
 def _reorganize_worker(args):
-    """멀티프로세싱 워커: 단일 트리의 노드를 재구성합니다."""
+    """
+    [수정] 멀티프로세싱 워커: 단일 트리의 노드를 재구성하고,
+    새로운 인접 리스트와 next_idx를 계산하여 반환합니다.
+    """
     i, population_tensor, config = args
     tree_data_view = population_tensor[i]
 
@@ -82,14 +85,22 @@ def _reorganize_worker(args):
         feature_num=config['feature_num'],
         feature_comparison_map=config['feature_comparison_map'],
         feature_bool=config['feature_bool'],
-        all_features=config['all_features'], # all_features 전달
+        all_features=config['all_features'],
         data_tensor=tree_data_view
     )
-    # 로드 과정 없이 텐서 view만으로 객체 상태를 동기화
+    # 텐서 뷰만으로 객체 상태를 동기화
     tree.set_next_idx()
     tree.initialized = True
     
+    # 1. 노드 재구성 수행
     tree.reorganize_nodes()
+    
+    # 2. 재구성된 텐서 기반으로 새로운 인접 리스트와 next_idx 계산
+    new_adj_list = tree._adjacency_list
+    new_next_idx = tree.next_idx
+    
+    # 3. 객체 ID와 함께 결과 반환
+    return (i, new_next_idx, new_adj_list)
 
 
 class GATree:
@@ -363,7 +374,7 @@ class GATree:
             feat_name = random.choice(list(self.feature_num.keys()))
             feat_idx = self.all_features.index(feat_name)
             min_val, max_val = self.feature_num[feat_name]
-            comp_val = random.uniform(float(min_val), float(max_val))
+            comp_val = random.uniform(min_val, max_val)
 
             self.data[idx, COL_PARAM_1] = feat_idx
             self.data[idx, COL_PARAM_4] = comp_val
@@ -729,7 +740,7 @@ class GATreePop:
         self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
         self.population = []
 
-    def make_population(self, num_processes: int = os.cpu_count()):
+    def make_population(self, num_processes: int = 1):
         """
         [수정] 설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다.
         멀티프로세싱을 지원합니다.
@@ -786,10 +797,10 @@ class GATreePop:
         self.initialized = True
         print("\nPopulation created successfully.")
 
-    def reorganize_nodes(self, num_processes: int = os.cpu_count()):
+    def reorganize_nodes(self, num_processes: int = 1):
         """
-        [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직을 수행합니다.
-        멀티프로세싱을 지원합니다.
+        [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직 및 인접 리스트 생성을 병렬로 수행합니다.
+        멀티프로세싱 시 CUDA 교착 상태를 피하기 위해 텐서를 CPU로 이동 후 처리합니다.
         """
         if not self.initialized:
             print("Warning: Reorganizing an uninitialized population.")
@@ -797,22 +808,44 @@ class GATreePop:
 
         if num_processes > 1 and self.pop_size > 1:
             print(f"Reorganizing all {self.pop_size} trees using {num_processes} processes...")
-            
+
+            # 1. 원본 장치 저장 및 텐서를 CPU로 이동
+            original_device = self.population_tensor.device
+            is_cuda = original_device.type == 'cuda'
+            if is_cuda:
+                self.population_tensor = self.population_tensor.to('cpu')
+                # 각 GATree 객체가 가진 텐서 view도 새로운 CPU 텐서를 가리키도록 업데이트
+                for i, tree in enumerate(self.population):
+                    tree.data = self.population_tensor[i]
+                print("    - Tensor moved to CPU for safe multiprocessing.")
+
+            # 2. CPU에서 병렬로 재구성 및 후처리 작업 수행
             self.population_tensor.share_memory_()
             config = self._get_config_dict()
             args = zip(range(self.pop_size), repeat(self.population_tensor), repeat(config))
-            
+
             with mp.Pool(processes=num_processes) as pool:
-                list(pool.map(_reorganize_worker, args))
-        else:
+                # 워커로부터 (tree_index, next_idx, adjacency_list) 튜플 리스트를 받음
+                results = list(pool.map(_reorganize_worker, args))
+
+            # 3. 작업이 완료된 텐서를 다시 원본 장치로 이동
+            if is_cuda:
+                self.population_tensor = self.population_tensor.to(original_device)
+                # GATree 객체의 view도 다시 GPU 텐서를 가리키도록 업데이트
+                for i, tree in enumerate(self.population):
+                    tree.data = self.population_tensor[i]
+                print("    - Tensor moved back to original device.")
+            
+            # 4. [신규] 병렬 처리 결과를 각 GATree 객체에 반영
+            for tree_idx, new_next_idx, new_adj_list in results:
+                self.population[tree_idx].next_idx = new_next_idx
+                self.population[tree_idx]._adjacency_list = new_adj_list
+
+        else: # 순차 실행 (프로세스 1개)
             print(f"Reorganizing all {self.pop_size} trees sequentially...")
             for tree in self.population:
                 tree.reorganize_nodes()
-        
-        # 재구성 후 각 tree 객체의 next_idx 및 adjacency_list 업데이트
-        self.set_next_idx()
-        for tree in self.population:
-            tree._build_adjacency_list()
+            # 순차 실행 시에는 reorganize_nodes가 내부적으로 next_idx와 adj_list를 모두 업데이트하므로 추가 작업 불필요
 
         print("Population reorganization complete.")
 
