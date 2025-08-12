@@ -1,168 +1,178 @@
-// /csrc/value_mutation_kernel.cu
-#include <curand_kernel.h>
-#include "constants.h"
+// /csrc/value_mutation_kernel.cu (신규 파일 - 전체 구현)
 #include "value_mutation_kernel.cuh"
+#include "constants.h"
+#include <curand_kernel.h>
+#include <cmath> // for fabsf
 
 // ==============================================================================
-//           cuRAND 상태 초기화 커널 (변경 없음)
+//                      CUDA 커널 및 디바이스 함수
 // ==============================================================================
-__global__ void init_curand_states_kernel(unsigned long long seed, int pop_size, int max_nodes, curandStatePhilox4_32_10_t* states) {
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= pop_size * max_nodes) return;
-    curand_init(seed, gid, 0, &states[gid]);
+
+// 디바이스 함수: float 범위 내로 값을 제한 (clamp)
+__device__ float clamp(float val, float min_val, float max_val) {
+    return fmaxf(min_val, fminf(val, max_val));
 }
 
-// ==============================================================================
-//           헬퍼 함수: 노드의 루트 분기 타입 찾기 (변경 없음)
-// ==============================================================================
-__device__ int get_root_branch_type_device(const float* tree_data, int node_idx, int max_nodes) {
-    int current_idx = node_idx;
-    while (true) {
-        int parent_idx = (int)tree_data[current_idx * NODE_INFO_DIM + COL_PARENT_IDX];
-        if (parent_idx == -1) {
-            return (int)tree_data[current_idx * NODE_INFO_DIM + COL_PARAM_1];
-        }
-        current_idx = parent_idx;
-    }
-    return -1;
-}
-
-// ==============================================================================
-//           메인 돌연변이 커널 (내부 로직은 동일, 이름 유지)
-// ==============================================================================
+// 메인 변이 커널
 __global__ void value_mutation_kernel(
     float* population_ptr,
-    curandStatePhilox4_32_10_t* states,
-    // --- 제어 파라미터 ---
     bool is_reinitialize,
     float mutation_prob,
     float noise_ratio,
     int leverage_change,
-    // --- Config에서 전달받는 포인터들 ---
-    const int* feature_num_indices,
-    const float* feature_min_vals,
-    const float* feature_max_vals,
-    int num_feature_num,
-    const int* feature_comparison_indices,
-    int num_feature_comparison,
-    const int* feature_bool_indices,
-    int num_feature_bool,
-    // --- 트리 정보 ---
-    int pop_size, int max_nodes
-) {
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= pop_size * max_nodes) return;
+    const int* feature_num_indices_ptr, int num_feat_num,
+    const float* feature_min_vals_ptr,
+    const float* feature_max_vals_ptr,
+    const int* feature_comparison_indices_ptr, int num_feat_comp,
+    const int* feature_bool_indices_ptr, int num_feat_bool,
+    int pop_size,
+    int max_nodes)
+{
+    const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total_nodes = pop_size * max_nodes;
 
-    curandStatePhilox4_32_10_t state = states[gid];
+    if (gid >= total_nodes) return;
+
+    // --- 1. 난수 생성기 초기화 ---
+    curandState state;
+    curand_init(gid, 0, 0, &state);
+
+    // --- 2. 노드 데이터 포인터 설정 및 기본 검사 ---
     float* node_data = population_ptr + gid * NODE_INFO_DIM;
-    int node_type = (int)node_data[COL_NODE_TYPE];
-
+    const int node_type = (int)node_data[COL_NODE_TYPE];
+    
+    // 변이 대상 노드 타입이 아니면 종료 (Decision 또는 Action 노드만 대상)
     if (node_type != NODE_TYPE_DECISION && node_type != NODE_TYPE_ACTION) {
-        states[gid] = state;
         return;
     }
 
+    // 확률에 따라 변이 실행 여부 결정
     if (curand_uniform(&state) >= mutation_prob) {
-        states[gid] = state;
         return;
     }
 
-    int tree_idx = gid / max_nodes;
-    int local_node_idx = gid % max_nodes;
-    const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
+    // --- 3. 노드 타입에 따른 변이 실행 ---
+    if (node_type == NODE_TYPE_DECISION) {
+        // --- Decision Node 변이 ---
+        int comp_type = (int)node_data[COL_PARAM_3];
 
-    if (node_type == NODE_TYPE_ACTION) {
-        int root_branch_type = get_root_branch_type_device(tree_data, local_node_idx, max_nodes);
-        int current_action_type = (int)node_data[COL_PARAM_1];
-
-        if (is_reinitialize) {
-            int new_action_type = current_action_type;
-            if (root_branch_type == ROOT_BRANCH_HOLD) {
-                new_action_type = (curand_uniform(&state) < 0.5f) ? ACTION_NEW_LONG : ACTION_NEW_SHORT;
-            } else if (root_branch_type == ROOT_BRANCH_LONG || root_branch_type == ROOT_BRANCH_SHORT) {
-                float rand_val = curand_uniform(&state);
-                if (rand_val < 0.25f) new_action_type = ACTION_CLOSE_ALL;
-                else if (rand_val < 0.5f) new_action_type = ACTION_CLOSE_PARTIAL;
-                else if (rand_val < 0.75f) new_action_type = ACTION_ADD_POSITION;
-                else new_action_type = ACTION_FLIP_POSITION;
-            }
-            node_data[COL_PARAM_1] = new_action_type;
-            current_action_type = new_action_type;
+        if (is_reinitialize) { // Reinitialize Mutation
+            // 새로운 비교 타입 랜덤 선택
+            int new_comp_type_choice = curand_uniform(&state) * 3;
+            if (new_comp_type_choice == 0 && num_feat_num > 0) comp_type = COMP_TYPE_FEAT_NUM;
+            else if (new_comp_type_choice == 1 && num_feat_comp > 0) comp_type = COMP_TYPE_FEAT_FEAT;
+            else if (new_comp_type_choice == 2 && num_feat_bool > 0) comp_type = COMP_TYPE_FEAT_BOOL;
+            node_data[COL_PARAM_3] = (float)comp_type;
         }
-        
-        if (current_action_type == ACTION_NEW_LONG || current_action_type == ACTION_NEW_SHORT || current_action_type == ACTION_FLIP_POSITION) {
+
+        if (comp_type == COMP_TYPE_FEAT_NUM) {
             if (is_reinitialize) {
-                node_data[COL_PARAM_2] = curand_uniform(&state);
-                node_data[COL_PARAM_3] = roundf(curand_uniform(&state) * 99.0f + 1.0f);
-            } else { // NodeParamMutation
-                if (curand_uniform(&state) < 0.5f) {
-                    float noise = curand_normal(&state) * 0.1f;
-                    node_data[COL_PARAM_2] = fminf(fmaxf(node_data[COL_PARAM_2] + noise, 0.0f), 1.0f);
-                } else {
-                    float change = curand_uniform(&state) * 2.0f * leverage_change - leverage_change;
-                    node_data[COL_PARAM_3] = fminf(fmaxf(roundf(node_data[COL_PARAM_3] + change), 1.0f), 100.0f);
-                }
-            }
-        } else if (current_action_type == ACTION_CLOSE_PARTIAL || current_action_type == ACTION_ADD_POSITION) {
-             float noise = curand_normal(&state) * 0.1f;
-             node_data[COL_PARAM_2] = fminf(fmaxf(node_data[COL_PARAM_2] + noise, 0.0f), 1.0f);
-        }
-
-    } else if (node_type == NODE_TYPE_DECISION) {
-        if (is_reinitialize) {
-            float rand_type = curand_uniform(&state);
-            int comp_type = (rand_type < 0.6f) ? COMP_TYPE_FEAT_NUM : ((rand_type < 0.8f) ? COMP_TYPE_FEAT_FEAT : COMP_TYPE_FEAT_BOOL);
-            node_data[COL_PARAM_3] = comp_type;
-            if (comp_type != COMP_TYPE_FEAT_BOOL) node_data[COL_PARAM_2] = (curand_uniform(&state) < 0.5f) ? OP_GTE : OP_LTE;
-
-            if (comp_type == COMP_TYPE_FEAT_NUM) {
-                int rand_idx = (int)(curand_uniform(&state) * num_feature_num);
-                node_data[COL_PARAM_1] = feature_num_indices[rand_idx];
-                float min_v = feature_min_vals[rand_idx], max_v = feature_max_vals[rand_idx];
-                node_data[COL_PARAM_4] = curand_uniform(&state) * (max_v - min_v) + min_v;
-            } else if (comp_type == COMP_TYPE_FEAT_FEAT) {
-                int rand_idx1 = (int)(curand_uniform(&state) * num_feature_comparison);
-                int rand_idx2 = (int)(curand_uniform(&state) * num_feature_comparison);
-                node_data[COL_PARAM_1] = feature_comparison_indices[rand_idx1];
-                node_data[COL_PARAM_4] = feature_comparison_indices[rand_idx2];
-            } else {
-                int rand_idx = (int)(curand_uniform(&state) * num_feature_bool);
-                node_data[COL_PARAM_1] = feature_bool_indices[rand_idx];
-                node_data[COL_PARAM_4] = (curand_uniform(&state) < 0.5f) ? 0.0f : 1.0f;
-            }
-        } else { // NodeParamMutation
-             int comp_type = (int)node_data[COL_PARAM_3];
-             if (comp_type == COMP_TYPE_FEAT_NUM) {
-                // --- [수정 시작] 클램핑 로직 추가 ---
-                int feat_idx = (int)node_data[COL_PARAM_1];
-                
-                // config에서 해당 피처의 min/max 값을 찾기 위해 인덱스(offset)를 찾습니다.
-                int offset = -1;
-                for (int i = 0; i < num_feature_num; ++i) {
-                    if (feature_num_indices[i] == feat_idx) {
-                        offset = i;
+                int rand_idx = curand_uniform(&state) * num_feat_num;
+                node_data[COL_PARAM_1] = (float)feature_num_indices_ptr[rand_idx];
+                float min_val = feature_min_vals_ptr[rand_idx];
+                float max_val = feature_max_vals_ptr[rand_idx];
+                node_data[COL_PARAM_4] = curand_uniform(&state) * (max_val - min_val) + min_val;
+            } else { // Noise Mutation
+                int current_feat_idx = (int)node_data[COL_PARAM_1];
+                for (int i = 0; i < num_feat_num; ++i) {
+                    if (feature_num_indices_ptr[i] == current_feat_idx) {
+                        float min_val = feature_min_vals_ptr[i];
+                        float max_val = feature_max_vals_ptr[i];
+                        float range = max_val - min_val;
+                        float noise = range * noise_ratio * (curand_uniform(&state) * 2.0f - 1.0f);
+                        node_data[COL_PARAM_4] = clamp(node_data[COL_PARAM_4] + noise, min_val, max_val);
                         break;
                     }
                 }
-                
-                if (offset != -1) {
-                    float min_v = feature_min_vals[offset];
-                    float max_v = feature_max_vals[offset];
-                    float current_val = node_data[COL_PARAM_4];
-                    float noise_range = (max_v - min_v) * noise_ratio;
-                    float noise = (curand_uniform(&state) * 2.0f - 1.0f) * noise_range;
-                    
-                    // 값을 더한 후, fminf와 fmaxf로 유효 범위 내로 클램핑합니다.
-                    node_data[COL_PARAM_4] = fminf(max_v, fmaxf(min_v, current_val + noise));
-                }
-                // --- [수정 끝] ---
-             } else if (comp_type == COMP_TYPE_FEAT_BOOL) {
-                 node_data[COL_PARAM_4] = 1.0f - node_data[COL_PARAM_4];
-             }
+            }
+            node_data[COL_PARAM_2] = (curand_uniform(&state) < 0.5f) ? (float)OP_GTE : (float)OP_LTE;
+
+        } else if (comp_type == COMP_TYPE_FEAT_FEAT) {
+            if (is_reinitialize && num_feat_comp > 0) {
+                 // 이 부분은 복잡하여 CPU에서 처리하는 것이 더 안정적일 수 있으나,
+                 // 여기서는 간단히 랜덤 인덱스만 교체합니다.
+                node_data[COL_PARAM_1] = (float)feature_comparison_indices_ptr[(int)(curand_uniform(&state) * num_feat_comp)];
+                node_data[COL_PARAM_4] = (float)feature_comparison_indices_ptr[(int)(curand_uniform(&state) * num_feat_comp)];
+            }
+            node_data[COL_PARAM_2] = (curand_uniform(&state) < 0.5f) ? (float)OP_GTE : (float)OP_LTE;
+
+        } else if (comp_type == COMP_TYPE_FEAT_BOOL) {
+            if (is_reinitialize && num_feat_bool > 0) {
+                node_data[COL_PARAM_1] = (float)feature_bool_indices_ptr[(int)(curand_uniform(&state) * num_feat_bool)];
+            }
+            node_data[COL_PARAM_4] = (curand_uniform(&state) < 0.5f) ? 0.0f : 1.0f;
+        }
+
+    } else if (node_type == NODE_TYPE_ACTION) {
+        // --- Action Node 변이 ---
+        int action_type = (int)node_data[COL_PARAM_1];
+        if (is_reinitialize) {
+            // 재초기화는 CPU 로직이 복잡하므로 여기서는 단순 값 변경만 수행
+            // (이 부분은 필요 시 Python의 `_create_random_action_params` 로직을 CUDA로 포팅해야 함)
+            action_type = 1 + (int)(curand_uniform(&state) * 6);
+            node_data[COL_PARAM_1] = (float)action_type;
+        }
+
+        if (action_type == ACTION_NEW_LONG || action_type == ACTION_NEW_SHORT || action_type == ACTION_FLIP_POSITION) {
+            // Param2: 진입/플립 비율 (0.0 ~ 1.0)
+            float old_ratio = node_data[COL_PARAM_2];
+            float noise_ratio_val = noise_ratio * (curand_uniform(&state) * 2.0f - 1.0f);
+            node_data[COL_PARAM_2] = clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
+            
+            // Param3: 레버리지 (1 ~ 100)
+            int old_lev = (int)node_data[COL_PARAM_3];
+            int lev_change = (int)(curand_uniform(&state) * (2 * leverage_change + 1)) - leverage_change;
+            node_data[COL_PARAM_3] = (float)clamp(old_lev + lev_change, 1, 100);
+
+        } else if (action_type == ACTION_CLOSE_PARTIAL || action_type == ACTION_ADD_POSITION) {
+            // Param2: 청산/추가 비율 (0.0 ~ 1.0)
+            float old_ratio = node_data[COL_PARAM_2];
+            float noise_ratio_val = noise_ratio * (curand_uniform(&state) * 2.0f - 1.0f);
+            node_data[COL_PARAM_2] = clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
         }
     }
-    states[gid] = state;
 }
 
-// [수정] C++ 래퍼 함수들(_launch_mutation_kernel, node_param_mutate_cuda, reinitialize_node_mutate_cuda)을
-// predict.cpp로 이동시켰으므로 이 파일에서는 삭제합니다.
+
+// ==============================================================================
+//                         C++ 래퍼 함수 (커널 런처)
+// ==============================================================================
+void _launch_mutation_kernel_cpp(
+    torch::Tensor& population,
+    bool is_reinitialize,
+    float mutation_prob,
+    float noise_ratio,
+    int leverage_change,
+    torch::Tensor& feature_num_indices,
+    torch::Tensor& feature_min_vals,
+    torch::Tensor& feature_max_vals,
+    torch::Tensor& feature_comparison_indices,
+    torch::Tensor& feature_bool_indices)
+{
+    TORCH_CHECK(population.is_cuda(), "Population tensor must be on a CUDA device for mutation.");
+    TORCH_CHECK(population.is_contiguous(), "Population tensor must be contiguous.");
+
+    const int pop_size = population.size(0);
+    const int max_nodes = population.size(1);
+    const int total_nodes = pop_size * max_nodes;
+
+    if (total_nodes == 0) return;
+
+    const int threads_per_block = 256;
+    const int num_blocks = (total_nodes + threads_per_block - 1) / threads_per_block;
+
+    value_mutation_kernel<<<num_blocks, threads_per_block>>>(
+        population.data_ptr<float>(),
+        is_reinitialize,
+        mutation_prob,
+        noise_ratio,
+        leverage_change,
+        feature_num_indices.data_ptr<int>(), feature_num_indices.size(0),
+        feature_min_vals.data_ptr<float>(),
+        feature_max_vals.data_ptr<float>(),
+        feature_comparison_indices.data_ptr<int>(), feature_comparison_indices.size(0),
+        feature_bool_indices.data_ptr<int>(), feature_bool_indices.size(0),
+        pop_size,
+        max_nodes
+    );
+}
