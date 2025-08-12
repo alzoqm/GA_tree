@@ -1,3 +1,5 @@
+# --- START OF FILE main.py ---
+
 # main.py
 import os
 import sys
@@ -7,10 +9,11 @@ import pandas as pd
 import logging
 import random
 import numpy as np
+import torch.multiprocessing as mp # 멀티프로세싱 임포트
 
 # --- 0. 모듈 임포트 ---
-# from data.data_download import fetch_historical_data, fetch_funding_rate_history
-# from data.merge_dataset import run_feature_generation_from_yaml
+from data.data_download import fetch_historical_data, fetch_funding_rate_history
+from data.merge_dataset import run_feature_generation_from_yaml
 from models.model import GATreePop
 from evolution import Evolution
 from evolution.Selection import TournamentSelection, RouletteSelection
@@ -187,7 +190,9 @@ def main():
     )
     
     logging.info("Creating initial random population...")
-    population.make_population()
+    # 멀티프로세싱을 사용하므로 CPU 코어 수를 기반으로 프로세스 수 결정 (예시)
+    num_processes = os.cpu_count() or 1
+    population.make_population(num_processes=num_processes)
     logging.info("Population initialized successfully.")
 
     # ==========================================================================
@@ -336,4 +341,14 @@ def main():
     logging.info("Main script finished.")
 
 if __name__ == "__main__":
+    # [수정] CUDA와 멀티프로세싱을 함께 사용할 때 교착 상태를 방지하기 위해 
+    # 프로세스 시작 방식을 'spawn'으로 명시적으로 설정합니다.
+    # 이 코드는 main() 함수가 호출되기 전에 실행되어야 합니다.
+    try:
+        mp.set_start_method('spawn', force=True)
+        logging.info("Multiprocessing start method set to 'spawn'.")
+    except RuntimeError:
+        # 이미 설정된 경우 오류가 발생할 수 있으므로 무시합니다.
+        pass
+    
     main()
