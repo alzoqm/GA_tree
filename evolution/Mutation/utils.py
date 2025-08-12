@@ -128,9 +128,15 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
         feature_num = config['feature_num']
         feat_name = random.choice(list(feature_num.keys()))
         feat_idx = all_features.index(feat_name)
-        min_val, max_val = feature_num[feat_name]
-        comp_val = random.uniform(min_val, max_val)
         
+        min_val, max_val = feature_num[feat_name]
+        
+        # [수정 시작] YAML에서 읽어온 값이 문자열일 수 있으므로 float으로 강제 변환
+        min_val_f = float(min_val)
+        max_val_f = float(max_val)
+        comp_val = random.uniform(min_val_f, max_val_f)
+        # [수정 끝]
+
         tree_tensor[node_idx, COL_PARAM_1] = feat_idx
         tree_tensor[node_idx, COL_PARAM_4] = comp_val
         
@@ -144,7 +150,13 @@ def _create_random_decision_params(tree_tensor: torch.Tensor, node_idx: int, con
             feat_name = random.choice(list(feature_num.keys()))
             feat_idx = all_features.index(feat_name)
             min_val, max_val = feature_num[feat_name]
-            comp_val = random.uniform(min_val, max_val)
+            
+            # [수정 시작] YAML에서 읽어온 값이 문자열일 수 있으므로 float으로 강제 변환
+            min_val_f = float(min_val)
+            max_val_f = float(max_val)
+            comp_val = random.uniform(min_val_f, max_val_f)
+            # [수정 끝]
+
             tree_tensor[node_idx, COL_PARAM_1] = feat_idx
             tree_tensor[node_idx, COL_PARAM_4] = comp_val
             return

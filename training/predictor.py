@@ -1,6 +1,7 @@
 # training/predictor.py (수정된 전체 코드)
 
 import torch
+import numpy as np
 import pandas as pd
 from typing import List, Dict, Tuple
 
@@ -88,7 +89,10 @@ def predict_population_cuda(
 
     population_tensor = population.population_tensor.to(device)
     ordered_features = feature_values.reindex(population.all_features).values
-    features_tensor = torch.tensor(ordered_features, dtype=torch.float32, device=device)
+    # numpy.object_ 타입의 배열을 torch.tensor로 변환하기 전에, 명시적으로 float32로 변환합니다.
+    # 이는 DataFrame/Series에 bool과 float이 섞여 있을 때 발생하는 TypeError를 해결합니다.
+    numeric_features = ordered_features.astype(np.float32)
+    features_tensor = torch.tensor(numeric_features, dtype=torch.float32, device=device)
     positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
     positions_tensor = torch.tensor(positions_int, dtype=torch.int64, device=device)
     next_indices = population.return_next_idx()

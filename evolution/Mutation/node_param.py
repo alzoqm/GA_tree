@@ -96,8 +96,14 @@ class NodeParamMutation(BaseMutation):
                             feat_idx = int(node[COL_PARAM_1].item())
                             feat_name = self.config['all_features'][feat_idx]
                             min_val, max_val = self.config['feature_num'][feat_name]
-                            noise_range = (max_val - min_val) * self.noise_ratio
+
+                            # [수정 시작] YAML에서 읽어온 값이 문자열일 수 있으므로 float으로 강제 변환
+                            min_val_f = float(min_val)
+                            max_val_f = float(max_val)
+                            
+                            noise_range = (max_val_f - min_val_f) * self.noise_ratio
                             noise = random.uniform(-noise_range, noise_range)
-                            node[COL_PARAM_4] = torch.clamp(node[COL_PARAM_4] + noise, min_val, max_val)
+                            node[COL_PARAM_4] = torch.clamp(node[COL_PARAM_4] + noise, min_val_f, max_val_f)
+                            # [수정 끝]
         
         return mutated_chromosomes

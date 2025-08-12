@@ -43,7 +43,7 @@ class TradingEnvironment:
 
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
-        self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
+        self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.long, device=device)
         self.enter_ratio = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
         self.additional_count = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
@@ -130,14 +130,15 @@ class TradingEnvironment:
                 self.additional_count[liquidated_indices] = 0
                 self.holding_period[liquidated_indices] = 0
     
-    # [수정 시작] 보고서 1번 항목: 거래 체결 가격 현실성 강화
+    # [수정 시작] _execute_actions 함수 전체가 수정되었습니다.
     def _execute_actions(self, actions_tensor, exec_base_price, curr_high, curr_low):
         buy_exec_price = exec_base_price * (1 + self.fixed_slippage_rate)
         sell_exec_price = exec_base_price * (1 - self.fixed_slippage_rate)
-    # [수정 종료]
+
         currently_hold = (self.pos_list == 0)
         currently_short = (self.pos_list == 1)
         currently_long = (self.pos_list == 2)
+
         for action_type, target_pos, pos_cond, exec_price in [(ACTION_NEW_LONG, 2, currently_hold, buy_exec_price), (ACTION_NEW_SHORT, 1, currently_hold, sell_exec_price)]:
             action_mask = (actions_tensor[:, 0] == action_type) & pos_cond
             if action_mask.any():
@@ -150,6 +151,7 @@ class TradingEnvironment:
                 self.leverage_ratio[action_mask] = leverage
                 self.enter_ratio[action_mask] = enter_ratio
                 self.additional_count[action_mask] = 0
+
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_ALL) & (self.pos_list != 0)
         if action_mask.any():
             long_close_mask = action_mask & currently_long
@@ -171,14 +173,14 @@ class TradingEnvironment:
             self.leverage_ratio[action_mask] = -1
             self.enter_ratio[action_mask] = -1.0
             self.additional_count[action_mask] = 0
+
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_PARTIAL) & (self.pos_list != 0)
         if action_mask.any():
-            close_ratio = actions_tensor[action_mask, 1]
             long_p_close_mask = action_mask & currently_long
             if long_p_close_mask.any():
+                ratio = actions_tensor[long_p_close_mask, 1] # 수정된 부분
                 entry_price = self.price_list[long_p_close_mask]
                 leverage = self.leverage_ratio[long_p_close_mask].float()
-                ratio = close_ratio[currently_long[action_mask]]
                 closed_margin = self.enter_ratio[long_p_close_mask] * ratio
                 pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * closed_margin
                 fee = closed_margin * leverage * self.taker_fee_rate
@@ -186,9 +188,9 @@ class TradingEnvironment:
                 self.enter_ratio[long_p_close_mask] -= closed_margin
             short_p_close_mask = action_mask & currently_short
             if short_p_close_mask.any():
+                ratio = actions_tensor[short_p_close_mask, 1] # 수정된 부분
                 entry_price = self.price_list[short_p_close_mask]
                 leverage = self.leverage_ratio[short_p_close_mask].float()
-                ratio = close_ratio[currently_short[action_mask]]
                 closed_margin = self.enter_ratio[short_p_close_mask] * ratio
                 pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * closed_margin
                 fee = closed_margin * leverage * self.taker_fee_rate
@@ -197,19 +199,13 @@ class TradingEnvironment:
         
         action_mask = (actions_tensor[:, 0] == ACTION_ADD_POSITION) & (self.pos_list != 0)
         if action_mask.any():
-            requested_add_ratio = actions_tensor[action_mask, 1]
-            
             for pos_type, pos_cond, exec_price in [(2, currently_long, buy_exec_price), (1, currently_short, sell_exec_price)]:
                 add_mask = action_mask & pos_cond & (self.additional_count < self.max_additional_entries)
                 if add_mask.any():
                     current_enter_ratio = self.enter_ratio[add_mask]
-                    current_requested_ratio = requested_add_ratio[pos_cond[action_mask]]
+                    current_requested_ratio = actions_tensor[add_mask, 1] # 수정된 부분
                     
-                    # [수정 시작] 보고서 2번 항목: '물타기' 로직 명확화
-                    # 추가 진입량을 전체 자본 대비 요청 비율로 해석
                     intended_add_amount = current_requested_ratio
-                    # [수정 종료]
-                    
                     remaining_capital = 1.0 - current_enter_ratio
                     actual_add_ratio = torch.min(intended_add_amount, remaining_capital)
                     valid_add_mask = actual_add_ratio > self.min_additional_enter_ratio
@@ -231,17 +227,15 @@ class TradingEnvironment:
 
         action_mask = (actions_tensor[:, 0] == ACTION_FLIP_POSITION) & (self.pos_list != 0)
         if action_mask.any():
-            new_enter_ratio = actions_tensor[action_mask, 1]
-            new_leverage = actions_tensor[action_mask, 2].long()
             flip_to_short_mask = action_mask & currently_long
             if flip_to_short_mask.any():
+                ratio = actions_tensor[flip_to_short_mask, 1] # 수정된 부분
+                lev = actions_tensor[flip_to_short_mask, 2].long() # 수정된 부분
                 entry_price = self.price_list[flip_to_short_mask]
                 leverage = self.leverage_ratio[flip_to_short_mask].float()
                 pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
                 fee_close = self.enter_ratio[flip_to_short_mask] * leverage * self.taker_fee_rate
                 self.profit[flip_to_short_mask] += (pnl - fee_close)
-                ratio = new_enter_ratio[currently_long[action_mask]]
-                lev = new_leverage[currently_long[action_mask]]
                 fee_open = ratio * lev.float() * self.taker_fee_rate
                 self.profit[flip_to_short_mask] -= fee_open
                 self.pos_list[flip_to_short_mask] = 1
@@ -251,13 +245,13 @@ class TradingEnvironment:
                 self.additional_count[flip_to_short_mask] = 0
             flip_to_long_mask = action_mask & currently_short
             if flip_to_long_mask.any():
+                ratio = actions_tensor[flip_to_long_mask, 1] # 수정된 부분
+                lev = actions_tensor[flip_to_long_mask, 2].long() # 수정된 부분
                 entry_price = self.price_list[flip_to_long_mask]
                 leverage = self.leverage_ratio[flip_to_long_mask].float()
                 pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
                 fee_close = self.enter_ratio[flip_to_long_mask] * leverage * self.taker_fee_rate
                 self.profit[flip_to_long_mask] += (pnl - fee_close)
-                ratio = new_enter_ratio[currently_short[action_mask]]
-                lev = new_leverage[currently_short[action_mask]]
                 fee_open = ratio * lev.float() * self.taker_fee_rate
                 self.profit[flip_to_long_mask] -= fee_open
                 self.pos_list[flip_to_long_mask] = 2
@@ -265,6 +259,7 @@ class TradingEnvironment:
                 self.enter_ratio[flip_to_long_mask] = ratio
                 self.leverage_ratio[flip_to_long_mask] = lev
                 self.additional_count[flip_to_long_mask] = 0
+    # [수정 종료]
 
     # [수정 시작] 보고서 1번 항목: step 함수 시그니처 변경
     def step(self, market_data, next_open_price, predicted_actions):

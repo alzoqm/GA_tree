@@ -73,42 +73,46 @@ class Evolution:
         pop_size = self.population.pop_size
         
         # 1. 엘리트 선택 (Elitism)
+        # 'fitness'는 GPU에 있으므로, 'elite_indices'도 GPU에 생성됩니다.
         elite_indices = self.selection.select_elites(fitness, self.num_elites)
-        # 엘리트 개체의 텐서 데이터를 깊은 복사하여 보존
-        elite_chromosomes = self.population.population_tensor[elite_indices].clone()
-        
+        # CPU에 있는 population_tensor를 인덱싱하기 전에 인덱스를 CPU로 이동시킵니다.
+        elite_chromosomes = self.population.population_tensor[elite_indices.to('cpu')].clone()
+        print('start evo')
         # 2. 자식(offspring) 생성
         num_offspring = pop_size - self.num_elites
         if num_offspring > 0:
             # --- [수정] 부모 선택 로직 전체 변경 ---
             
             # 2a. 교배 풀(Mating Pool) 선택
-            # 전체 집단에서 적합도가 높은 parent_size개의 고유한 개체를 선택하여 교배 풀을 구성합니다.
+            # 'fitness'는 GPU에 있으므로, 'mating_pool_indices'도 GPU에 생성됩니다.
             mating_pool_indices = self.selection.select_elites(fitness, self.parent_size)
             
             # 2b. 교배 풀 내에서 실제 교배할 부모 선택
-            # 교배 풀에 속한 개체들의 적합도 정보만 추출합니다.
+            # 'mating_pool_indices'가 GPU에 있으므로, 'mating_pool_fitness'도 GPU에 있게 됩니다.
             mating_pool_fitness = fitness[mating_pool_indices]
             
-            # 교배 풀의 적합도를 이용해, 자손을 생성할 부모를 (중복 허용하여) 선택합니다.
-            # 이때 반환되는 인덱스는 '교배 풀 내에서의 상대적 인덱스'입니다.
+            # 'mating_pool_fitness'가 GPU에 있으므로, 'relative_parent_indices'도 GPU에 생성됩니다.
             relative_parent_indices = self.selection.pick_parents(
                 mating_pool_fitness, num_offspring * 2
             )
             
-            # 상대적 인덱스를 전체 집단에서의 절대적 인덱스로 변환합니다.
+            # GPU에 있는 인덱스들로 절대 인덱스를 계산하므로, 'absolute_parent_indices'도 GPU에 있습니다.
             absolute_parent_indices = mating_pool_indices[relative_parent_indices]
             
-            # 최종 선택된 부모의 텐서 데이터를 가져옵니다.
-            parents = self.population.population_tensor[absolute_parent_indices]
+            # CPU에 있는 population_tensor에서 부모 데이터를 가져오기 전에 인덱스를 CPU로 이동시킵니다.
+            parents = self.population.population_tensor[absolute_parent_indices.to('cpu')]
 
             # --- 수정된 로직 끝 ---
             
             # 2c. 교차 (Crossover)
+            print('start crossover')
             offspring_chromosomes = self.crossover(parents)
+            print('end crossover')
             
             # 2d. 변이 (Mutation)
+            print('start mutation')
             mutated_offspring = self.mutation(offspring_chromosomes)
+            print('end mutation')
         else:
             mutated_offspring = torch.empty((0, *self.population.population_tensor.shape[1:]))
 
@@ -119,4 +123,5 @@ class Evolution:
         # 4. 집단 업데이트
         # GATreePop의 텐서 데이터를 새로운 세대의 텐서로 덮어씀
         self.population.population_tensor.copy_(new_population_tensor)
+        print('end evo')
         # print(f"Evolution complete. {self.num_elites} elites preserved. {num_offspring} new offsprings created from a mating pool of size {self.parent_size}.")
