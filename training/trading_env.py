@@ -43,7 +43,7 @@ class TradingEnvironment:
 
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
-        self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
+        self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.long, device=device)
         self.enter_ratio = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
         self.additional_count = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)

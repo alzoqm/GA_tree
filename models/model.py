@@ -363,7 +363,7 @@ class GATree:
             feat_name = random.choice(list(self.feature_num.keys()))
             feat_idx = self.all_features.index(feat_name)
             min_val, max_val = self.feature_num[feat_name]
-            comp_val = random.uniform(min_val, max_val)
+            comp_val = random.uniform(float(min_val), float(max_val))
 
             self.data[idx, COL_PARAM_1] = feat_idx
             self.data[idx, COL_PARAM_4] = comp_val
