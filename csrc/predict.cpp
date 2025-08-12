@@ -1,15 +1,16 @@
 // csrc/predict.cpp (수정된 최종 전체 코드)
 
 #include <torch/extension.h>
+#include <random> // [수정] <random> 헤더 추가
 #include "predict_kernel.cuh"
 #include "adjacency_builder.cuh"
+#include "value_mutation_kernel.cuh"
+#include "reorganize_kernel.cuh"
 #include "constants.h"
 
-// [삭제] 공유 메모리 크기 관련 상수를 제거합니다.
-// constexpr int MAX_FEATURES_IN_SHARED_MEM_CPP = 1024;
 
 // ==============================================================================
-//           Helper 1: 예측 커널에 전달될 텐서 유효성 검사 함수
+//           Helper 1: 예측 커널에 전달될 텐서 유효성 검사 함수 (변경 없음)
 // ==============================================================================
 void check_predict_tensors(
     const torch::Tensor& population,
@@ -60,10 +61,6 @@ void check_predict_tensors(
     const int pop_size = population.size(0);
     const int max_nodes = population.size(1);
 
-    // [삭제] 고정된 크기 검사를 제거합니다. 이제 동적으로 할당되므로 필요 없습니다.
-    // TORCH_CHECK(features.size(0) <= MAX_FEATURES_IN_SHARED_MEM_CPP, 
-    //             "Number of features exceeds shared memory limit defined in C++");
-                
     TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
     TORCH_CHECK(next_indices.size(0) == pop_size, "Next_indices tensor pop_size mismatch");
     TORCH_CHECK(offset_array.size(0) == (pop_size * max_nodes + 1), "Offset array size mismatch");
@@ -75,7 +72,7 @@ void check_predict_tensors(
 }
 
 // ==============================================================================
-//           Helper 2: CUDA 커널을 호출하는 C++ 래퍼 함수
+//           Helper 2: CUDA 커널을 호출하는 C++ 래퍼 함수 (변경 없음)
 // ==============================================================================
 void predict_cuda(
     torch::Tensor population_tensor,
@@ -86,7 +83,7 @@ void predict_cuda(
     torch::Tensor child_indices_tensor,
     torch::Tensor results_tensor,
     torch::Tensor bfs_queue_buffer) {
-    
+
     // 1. 모든 입력 텐서 유효성 검사
     check_predict_tensors(population_tensor, features_tensor, positions_tensor, next_indices_tensor,
                           offset_array_tensor, child_indices_tensor, results_tensor, bfs_queue_buffer);
@@ -113,6 +110,55 @@ void predict_cuda(
 }
 
 // ==============================================================================
+//           [신규] Helper 3: 변이 커널을 위한 시드 생성 및 실행 헬퍼
+// ==============================================================================
+
+// 고품질 난수 생성을 위한 정적 객체
+static std::random_device rd;
+static std::mt19937_64 gen(rd());
+static std::uniform_int_distribution<unsigned long long> distrib;
+
+void _launch_mutation_kernel_cpp(
+    torch::Tensor& population, bool is_reinitialize, float mutation_prob,
+    float noise_ratio, int leverage_change,
+    torch::Tensor& feature_num_indices, torch::Tensor& feature_min_vals, torch::Tensor& feature_max_vals,
+    torch::Tensor& feature_comparison_indices, torch::Tensor& feature_bool_indices
+) {
+    const int pop_size = population.size(0);
+    const int max_nodes = population.size(1);
+    const int total_nodes = pop_size * max_nodes;
+
+    if (total_nodes == 0) return;
+
+    auto options = torch::TensorOptions().device(population.device()).dtype(torch::kInt64);
+    torch::Tensor curand_states = torch::empty({total_nodes, sizeof(curandStatePhilox4_32_10_t) / sizeof(int64_t)}, options);
+
+    const int threads = 256;
+    const int blocks = (total_nodes + threads - 1) / threads;
+
+    // [수정] 고품질 시드 생성
+    unsigned long long seed = distrib(gen);
+
+    init_curand_states_kernel<<<blocks, threads>>>(
+        seed, // 생성된 시드 사용
+        pop_size, max_nodes, (curandStatePhilox4_32_10_t*)curand_states.data_ptr()
+    );
+    cudaDeviceSynchronize();
+
+    value_mutation_kernel<<<blocks, threads>>>(
+        population.data_ptr<float>(),
+        (curandStatePhilox4_32_10_t*)curand_states.data_ptr(),
+        is_reinitialize, mutation_prob, noise_ratio, leverage_change,
+        feature_num_indices.data_ptr<int>(), feature_min_vals.data_ptr<float>(), feature_max_vals.data_ptr<float>(), feature_num_indices.size(0),
+        feature_comparison_indices.data_ptr<int>(), feature_comparison_indices.size(0),
+        feature_bool_indices.data_ptr<int>(), feature_bool_indices.size(0),
+        pop_size, max_nodes
+    );
+    cudaDeviceSynchronize();
+}
+
+
+// ==============================================================================
 //               Pybind11 모듈 정의: Python과 C++ 연결
 // ==============================================================================
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -120,31 +166,63 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // --- 구조 관련 함수 ---
     m.def("count_and_create_offsets", &count_and_create_offsets_cuda, "Build adjacency list step 1");
-    m.def("fill_child_indices", &fill_child_indices_cuda, "Build adjacency list step 2");
+    
+    // [수정] fill_child_indices 바인딩 수정 (max_children 받도록)
+    m.def("fill_child_indices", &fill_child_indices_cuda, 
+          "Build adjacency list step 2: fill and sort child indices",
+          py::arg("population_tensor"),
+          py::arg("offset_array"),
+          py::arg("child_indices"),
+          py::arg("max_children")
+    );
 
     // --- 예측 함수 ---
     m.def("predict", &predict_cuda, "GATree Prediction on CUDA");
 
-    // --- [신규] 값 기반 돌연변이 함수 바인딩 ---
-    m.def("node_param_mutate", &node_param_mutate_cuda,
-          "Perform NodeParamMutation on GPU.",
-          py::arg("population"),
-          py::arg("mutation_prob"),
-          py::arg("noise_ratio"),
-          py::arg("leverage_change"),
-          py::arg("feature_num_indices"),
-          py::arg("feature_min_vals"),
-          py::arg("feature_max_vals")
+    // --- [수정] 값 기반 돌연변이 함수 바인딩 ---
+    m.def("node_param_mutate", 
+        [](torch::Tensor population, float mutation_prob, float noise_ratio, int leverage_change,
+           torch::Tensor feature_num_indices, torch::Tensor feature_min_vals, torch::Tensor feature_max_vals) {
+            
+            auto empty_int_tensor = torch::empty({0}, torch::dtype(torch::kInt32).device(population.device()));
+            _launch_mutation_kernel_cpp(
+                population, false, mutation_prob, noise_ratio, leverage_change,
+                feature_num_indices, feature_min_vals, feature_max_vals,
+                empty_int_tensor, empty_int_tensor
+            );
+        },
+        "Perform NodeParamMutation on GPU.",
+        py::arg("population"),
+        py::arg("mutation_prob"),
+        py::arg("noise_ratio"),
+        py::arg("leverage_change"),
+        py::arg("feature_num_indices"),
+        py::arg("feature_min_vals"),
+        py::arg("feature_max_vals")
     );
 
-    m.def("reinitialize_node_mutate", &reinitialize_node_mutate_cuda,
-          "Perform ReinitializeNodeMutation on GPU.",
-          py::arg("population"),
-          py::arg("mutation_prob"),
-          py::arg("feature_num_indices"),
-          py::arg("feature_min_vals"),
-          py::arg("feature_max_vals"),
-          py::arg("feature_comparison_indices"),
-          py::arg("feature_bool_indices")
+    m.def("reinitialize_node_mutate", 
+        [](torch::Tensor population, float mutation_prob,
+           torch::Tensor feature_num_indices, torch::Tensor feature_min_vals, torch::Tensor feature_max_vals,
+           torch::Tensor feature_comparison_indices, torch::Tensor feature_bool_indices) {
+           
+           _launch_mutation_kernel_cpp(
+               population, true, mutation_prob, 0.0, 0,
+               feature_num_indices, feature_min_vals, feature_max_vals,
+               feature_comparison_indices, feature_bool_indices
+           );
+        },
+        "Perform ReinitializeNodeMutation on GPU.",
+        py::arg("population"),
+        py::arg("mutation_prob"),
+        py::arg("feature_num_indices"),
+        py::arg("feature_min_vals"),
+        py::arg("feature_max_vals"),
+        py::arg("feature_comparison_indices"),
+        py::arg("feature_bool_indices")
     );
+    
+    // --- [신규] 재구성 함수 바인딩 ---
+    m.def("reorganize_population", &reorganize_population_cuda, 
+          "Reorganize the population tensor on GPU to remove fragmentation.");
 }

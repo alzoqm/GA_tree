@@ -1,6 +1,7 @@
 // csrc/adjacency_builder.cu (수정된 파일)
 #include "adjacency_builder.cuh"
 #include "constants.h"
+#include <cuda_runtime.h>
 
 // ==============================================================================
 //           커널 1: 각 노드의 자식 수를 병렬로 계산하는 커널 (변경 없음)
@@ -62,48 +63,75 @@ __global__ void fill_adjacency_list_kernel(
     }
 }
 
+
 // ==============================================================================
-// [신규] 커널 3: 각 부모의 자식 리스트를 정렬하는 커널
+// [신규] 커널 3 헬퍼 함수: 공유 메모리 내에서 Bitonic Sort의 한 단계를 수행
+// ==============================================================================
+__device__ void bitonic_sort_step(int* data, int j, int k, int thread_id) {
+    int ixj = thread_id ^ j;
+
+    if (ixj > thread_id) {
+        if ((thread_id & k) == 0) { // 오름차순
+            if (data[thread_id] > data[ixj]) {
+                int temp = data[thread_id];
+                data[thread_id] = data[ixj];
+                data[ixj] = temp;
+            }
+        } else { // 내림차순
+            if (data[thread_id] < data[ixj]) {
+                int temp = data[thread_id];
+                data[thread_id] = data[ixj];
+                data[ixj] = temp;
+            }
+        }
+    }
+}
+
+// ==============================================================================
+// [전면 수정] 커널 3: 각 부모의 자식 리스트를 Bitonic Sort로 병렬 정렬하는 커널
 // ==============================================================================
 __global__ void sort_children_kernel(
     const int* offset_ptr,
     int* child_indices_ptr,
     int pop_size,
-    int max_nodes) {
+    int max_nodes,
+    int max_children) {
 
-    // 각 스레드는 하나의 부모 노드를 담당합니다.
-    const int parent_gid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total_parent_nodes = pop_size * max_nodes;
+    // 정렬을 위한 공유 메모리 할당
+    extern __shared__ int s_children[];
 
-    if (parent_gid >= total_parent_nodes) {
-        return;
-    }
+    // 각 스레드 블록이 하나의 부모 노드를 담당합니다.
+    const int parent_gid = blockIdx.x;
+    if (parent_gid >= pop_size * max_nodes) return;
 
-    // `offset_ptr`을 사용하여 이 부모의 자식 리스트 범위를 찾습니다.
     const int start_idx = offset_ptr[parent_gid];
     const int end_idx = offset_ptr[parent_gid + 1];
     const int num_children = end_idx - start_idx;
 
-    // 자식이 1개 이하면 정렬할 필요가 없습니다.
-    if (num_children <= 1) {
-        return;
+    if (num_children <= 1) return;
+
+    // 1. 전역 메모리 -> 공유 메모리로 자식 리스트 복사
+    int local_tid = threadIdx.x;
+    if (local_tid < num_children) {
+        s_children[local_tid] = child_indices_ptr[start_idx + local_tid];
     }
+    __syncthreads();
 
-    // 자식 리스트의 시작 포인터를 가져옵니다.
-    int* children_list = child_indices_ptr + start_idx;
-
-    // 간단한 삽입 정렬(Insertion Sort)을 수행합니다.
-    // 자식의 수는 일반적으로 매우 적기 때문에 삽입 정렬이 효율적입니다.
-    for (int i = 1; i < num_children; i++) {
-        int key = children_list[i];
-        int j = i - 1;
-        while (j >= 0 && children_list[j] > key) {
-            children_list[j + 1] = children_list[j];
-            j = j - 1;
+    // 2. Bitonic Sort 수행 (공유 메모리 내에서)
+    for (int k = 2; k <= blockDim.x; k <<= 1) { // blockDim.x는 max_children의 다음 2의 거듭제곱
+        for (int j = k >> 1; j > 0; j = j >> 1) {
+            __syncthreads(); // 이전 스텝의 모든 비교/교환이 끝날 때까지 대기
+            bitonic_sort_step(s_children, j, k, local_tid);
         }
-        children_list[j + 1] = key;
+    }
+    __syncthreads();
+
+    // 3. 정렬된 공유 메모리 -> 전역 메모리로 결과 복사
+    if (local_tid < num_children) {
+        child_indices_ptr[start_idx + local_tid] = s_children[local_tid];
     }
 }
+
 
 // ==============================================================================
 //         1단계 C++ 래퍼 함수: 카운팅 및 오프셋 생성 (변경 없음)
@@ -138,27 +166,49 @@ std::pair<long, torch::Tensor> count_and_create_offsets_cuda(const torch::Tensor
     return {total_children, offset_array};
 }
 
+// [수정] 헬퍼 함수: x보다 크거나 같은 가장 작은 2의 거듭제곱을 계산
+unsigned int next_power_of_2(unsigned int n) {
+    if (n == 0) return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n++;
+    return n;
+}
+
+
 // ==============================================================================
-// [신규] 3단계 정렬 커널을 호출하는 C++ 런처 함수
+// [수정] 3단계 정렬 커널을 호출하는 C++ 런처 함수
 // ==============================================================================
 void launch_sort_children_kernel(
     const int* offset_ptr,
     int* child_indices_ptr,
     int pop_size,
-    int max_nodes) {
+    int max_nodes,
+    int max_children) {
     
     const int total_parent_nodes = pop_size * max_nodes;
     if (total_parent_nodes == 0) return;
 
-    const int threads_per_block = 256;
-    const int num_blocks = (total_parent_nodes + threads_per_block - 1) / threads_per_block;
+    // [수정] Bitonic Sort를 위한 스레드 블록 및 공유 메모리 설정
+    // 스레드 수는 max_children보다 크거나 같은 최소 2의 거듭제곱으로 설정
+    const int threads_per_block = next_power_of_2(max_children);
+    const int num_blocks = total_parent_nodes; // 각 블록이 부모 노드 하나를 담당
 
-    sort_children_kernel<<<num_blocks, threads_per_block>>>(
+    // 공유 메모리 크기 계산
+    const size_t shared_mem_size = threads_per_block * sizeof(int);
+
+    sort_children_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
         offset_ptr,
         child_indices_ptr,
         pop_size,
-        max_nodes
+        max_nodes,
+        max_children
     );
+    cudaDeviceSynchronize();
 }
 
 // ==============================================================================
@@ -167,7 +217,8 @@ void launch_sort_children_kernel(
 void fill_child_indices_cuda(
     const torch::Tensor& population_tensor,
     const torch::Tensor& offset_array,
-    torch::Tensor& child_indices // Python에서 생성된 텐서를 참조로 받음
+    torch::Tensor& child_indices, // Python에서 생성된 텐서를 참조로 받음
+    int max_children // [수정] max_children 파라미터 추가
 ) {
     TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device");
     TORCH_CHECK(offset_array.is_cuda(), "Offset array must be on a CUDA device");
@@ -182,11 +233,11 @@ void fill_child_indices_cuda(
     torch::Tensor temp_offset = offset_array.clone();
 
     if (total_children > 0) {
-        const int threads_per_block = 256;
-        const int num_blocks = (total_nodes + threads_per_block - 1) / threads_per_block;
+        const int threads_per_block_fill = 256;
+        const int num_blocks_fill = (total_nodes + threads_per_block_fill - 1) / threads_per_block_fill;
         
         // Step 2a: 비결정적으로 자식 리스트를 채웁니다. (기존 로직)
-        fill_adjacency_list_kernel<<<num_blocks, threads_per_block>>>(
+        fill_adjacency_list_kernel<<<num_blocks_fill, threads_per_block_fill>>>(
             population_tensor.data_ptr<float>(),
             offset_array.data_ptr<int>(),
             temp_offset.data_ptr<int>(),
@@ -196,13 +247,14 @@ void fill_child_indices_cuda(
         );
         cudaDeviceSynchronize(); // 채우기 완료까지 대기
 
-        // [수정] Step 2b: 채워진 자식 리스트를 결정적으로 정렬합니다.
+        // [수정] Step 2b: 채워진 자식 리스트를 병렬로 정렬합니다.
         launch_sort_children_kernel(
             offset_array.data_ptr<int>(),
             child_indices.data_ptr<int>(),
             pop_size,
-            max_nodes
+            max_nodes,
+            max_children // 추가된 파라미터 전달
         );
-        cudaDeviceSynchronize(); // 정렬 완료까지 대기
+        // cudaDeviceSynchronize()는 launch_sort_children_kernel 내부에 이미 있으므로 생략 가능
     }
 }

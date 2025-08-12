@@ -10,7 +10,9 @@ setup(
             sources=[
                 'csrc/predict.cpp',
                 'csrc/predict_kernel.cu',
-                'csrc/adjacency_builder.cu', # [신규] 빌더 소스 파일 추가
+                'csrc/adjacency_builder.cu',
+                'csrc/value_mutation_kernel.cu',
+                'csrc/reorganize_kernel.cu', # <--- [수정] 이 줄을 추가하세요.
             ],
         )
     ],

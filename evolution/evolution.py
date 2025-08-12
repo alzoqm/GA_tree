@@ -111,13 +111,19 @@ class Evolution:
             
             # 2d. 변이 (Mutation)
             print('start mutation')
-            mutated_offspring = self.mutation(offspring_chromosomes)
+            # ==================================================================
+            # [수정된 부분]
+            # CUDA 커널을 사용하는 변이 연산을 위해 텐서를 GPU로 이동시킨 후,
+            # 다시 CPU로 가져와 다음 단계를 준비합니다.
+            mutated_offspring = self.mutation(offspring_chromosomes.to(fitness.device)).to('cpu')
+            # ==================================================================
             print('end mutation')
         else:
-            mutated_offspring = torch.empty((0, *self.population.population_tensor.shape[1:]))
+            mutated_offspring = torch.empty((0, *self.population.population_tensor.shape[1:]), device='cpu')
 
         # 3. 다음 세대 구성
         # 엘리트와 변이된 자식들을 합쳐 새로운 집단 텐서를 만듦
+        # 이제 elite_chromosomes와 mutated_offspring 모두 CPU에 있으므로 안전하게 합칠 수 있습니다.
         new_population_tensor = torch.cat([elite_chromosomes, mutated_offspring], dim=0)
         
         # 4. 집단 업데이트

@@ -1,7 +1,7 @@
 // /csrc/value_mutation_kernel.cu
 #include <curand_kernel.h>
 #include "constants.h"
-#include "value_mutation_kernel.cuh" // [수정] 헤더 파일명 변경
+#include "value_mutation_kernel.cuh"
 
 // ==============================================================================
 //           cuRAND 상태 초기화 커널 (변경 없음)
@@ -50,7 +50,6 @@ __global__ void value_mutation_kernel(
     // --- 트리 정보 ---
     int pop_size, int max_nodes
 ) {
-    // ... (이 커널의 내부 로직은 이전 답변과 동일하게 유지) ...
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= pop_size * max_nodes) return;
 
@@ -134,10 +133,29 @@ __global__ void value_mutation_kernel(
         } else { // NodeParamMutation
              int comp_type = (int)node_data[COL_PARAM_3];
              if (comp_type == COMP_TYPE_FEAT_NUM) {
-                 float noise = curand_normal(&state) * noise_ratio;
-                 // Note: Clamping requires finding the correct min/max, which is complex here.
-                 // For simplicity in this example, we just add noise.
-                 node_data[COL_PARAM_4] += noise;
+                // --- [수정 시작] 클램핑 로직 추가 ---
+                int feat_idx = (int)node_data[COL_PARAM_1];
+                
+                // config에서 해당 피처의 min/max 값을 찾기 위해 인덱스(offset)를 찾습니다.
+                int offset = -1;
+                for (int i = 0; i < num_feature_num; ++i) {
+                    if (feature_num_indices[i] == feat_idx) {
+                        offset = i;
+                        break;
+                    }
+                }
+                
+                if (offset != -1) {
+                    float min_v = feature_min_vals[offset];
+                    float max_v = feature_max_vals[offset];
+                    float current_val = node_data[COL_PARAM_4];
+                    float noise_range = (max_v - min_v) * noise_ratio;
+                    float noise = (curand_uniform(&state) * 2.0f - 1.0f) * noise_range;
+                    
+                    // 값을 더한 후, fminf와 fmaxf로 유효 범위 내로 클램핑합니다.
+                    node_data[COL_PARAM_4] = fminf(max_v, fmaxf(min_v, current_val + noise));
+                }
+                // --- [수정 끝] ---
              } else if (comp_type == COMP_TYPE_FEAT_BOOL) {
                  node_data[COL_PARAM_4] = 1.0f - node_data[COL_PARAM_4];
              }
@@ -146,73 +164,5 @@ __global__ void value_mutation_kernel(
     states[gid] = state;
 }
 
-// ==============================================================================
-//           [신규] 공통 커널 실행 로직 헬퍼 함수
-// ==============================================================================
-void _launch_mutation_kernel(
-    torch::Tensor& population, bool is_reinitialize, float mutation_prob,
-    float noise_ratio, int leverage_change,
-    torch::Tensor& feature_num_indices, torch::Tensor& feature_min_vals, torch::Tensor& feature_max_vals,
-    torch::Tensor& feature_comparison_indices, torch::Tensor& feature_bool_indices
-) {
-    const int pop_size = population.size(0);
-    const int max_nodes = population.size(1);
-    const int total_nodes = pop_size * max_nodes;
-
-    auto options = torch::TensorOptions().device(population.device()).dtype(torch::kInt64);
-    torch::Tensor curand_states = torch::empty({total_nodes, sizeof(curandStatePhilox4_32_10_t) / sizeof(int64_t)}, options);
-
-    const int threads = 256;
-    const int blocks = (total_nodes + threads - 1) / threads;
-
-    init_curand_states_kernel<<<blocks, threads>>>(
-        (unsigned long long)time(0) + (unsigned long long)rand(), // Add more randomness
-        pop_size, max_nodes, (curandStatePhilox4_32_10_t*)curand_states.data_ptr()
-    );
-
-    value_mutation_kernel<<<blocks, threads>>>(
-        population.data_ptr<float>(),
-        (curandStatePhilox4_32_10_t*)curand_states.data_ptr(),
-        is_reinitialize, mutation_prob, noise_ratio, leverage_change,
-        feature_num_indices.data_ptr<int>(), feature_min_vals.data_ptr<float>(), feature_max_vals.data_ptr<float>(), feature_num_indices.size(0),
-        feature_comparison_indices.data_ptr<int>(), feature_comparison_indices.size(0),
-        feature_bool_indices.data_ptr<int>(), feature_bool_indices.size(0),
-        pop_size, max_nodes
-    );
-}
-
-// ==============================================================================
-//           [신규] NodeParamMutation을 위한 C++ 래퍼 함수
-// ==============================================================================
-void node_param_mutate_cuda(
-    torch::Tensor population, float mutation_prob, float noise_ratio, int leverage_change,
-    torch::Tensor feature_num_indices, torch::Tensor feature_min_vals, torch::Tensor feature_max_vals
-) {
-    TORCH_CHECK(population.is_cuda(), "Population tensor must be on CUDA");
-    
-    // 사용하지 않는 텐서는 빈 텐서로 생성하여 전달
-    auto empty_int_tensor = torch::empty({0}, torch::dtype(torch::kInt32).device(population.device()));
-
-    _launch_mutation_kernel(
-        population, false, mutation_prob, noise_ratio, leverage_change,
-        feature_num_indices, feature_min_vals, feature_max_vals,
-        empty_int_tensor, empty_int_tensor
-    );
-}
-
-// ==============================================================================
-//           [신규] ReinitializeNodeMutation을 위한 C++ 래퍼 함수
-// ==============================================================================
-void reinitialize_node_mutate_cuda(
-    torch::Tensor population, float mutation_prob,
-    torch::Tensor feature_num_indices, torch::Tensor feature_min_vals, torch::Tensor feature_max_vals,
-    torch::Tensor feature_comparison_indices, torch::Tensor feature_bool_indices
-) {
-    TORCH_CHECK(population.is_cuda(), "Population tensor must be on CUDA");
-
-    _launch_mutation_kernel(
-        population, true, mutation_prob, 0.0, 0,
-        feature_num_indices, feature_min_vals, feature_max_vals,
-        feature_comparison_indices, feature_bool_indices
-    );
-}
+// [수정] C++ 래퍼 함수들(_launch_mutation_kernel, node_param_mutate_cuda, reinitialize_node_mutate_cuda)을
+// predict.cpp로 이동시켰으므로 이 파일에서는 삭제합니다.

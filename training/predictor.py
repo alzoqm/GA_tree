@@ -46,7 +46,6 @@ def build_adjacency_list_cuda(population: GATreePop) -> Tuple[torch.Tensor, torc
     )
 
     # --- 2단계: Python에서 child_indices 텐서 할당 후 내용 채우기 ---
-    # `torch.empty`를 사용하여 GPU에 필요한 크기만큼의 메모리만 할당
     child_indices = torch.empty(
         total_children_count, 
         dtype=torch.int32, 
@@ -54,17 +53,17 @@ def build_adjacency_list_cuda(population: GATreePop) -> Tuple[torch.Tensor, torc
     )
 
     if total_children_count > 0:
+        # [수정] C++ 함수 시그니처 변경에 따라 max_children 인자 추가
         gatree_cuda.fill_child_indices(
             population_tensor_cuda,
             offset_array,
-            child_indices # In-place로 내용이 채워짐
+            child_indices, # In-place로 내용이 채워짐
+            population.max_children # 병렬 정렬 커널에 필요한 정보 전달
         )
     
     return offset_array, child_indices
 
 
-# predict_population_cuda 함수는 이전 답변과 동일하게 유지됩니다.
-# (호출 인터페이스 변경 없음)
 def predict_population_cuda(
     population: GATreePop,
     feature_values: pd.Series,
@@ -75,6 +74,7 @@ def predict_population_cuda(
 ) -> torch.Tensor | None:
     """
     사전 생성된 인접 리스트를 이용하여 전체 GATree 집단의 예측을 병렬로 수행합니다.
+    (변경 없음)
     """
     if gatree_cuda is None:
         print("오류: gatree_cuda 모듈이 로드되지 않아 예측을 수행할 수 없습니다.")
@@ -89,8 +89,6 @@ def predict_population_cuda(
 
     population_tensor = population.population_tensor.to(device)
     ordered_features = feature_values.reindex(population.all_features).values
-    # numpy.object_ 타입의 배열을 torch.tensor로 변환하기 전에, 명시적으로 float32로 변환합니다.
-    # 이는 DataFrame/Series에 bool과 float이 섞여 있을 때 발생하는 TypeError를 해결합니다.
     numeric_features = ordered_features.astype(np.float32)
     features_tensor = torch.tensor(numeric_features, dtype=torch.float32, device=device)
     positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
