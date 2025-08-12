@@ -116,19 +116,35 @@ void predict_cuda(
 //               Pybind11 모듈 정의: Python과 C++ 연결
 // ==============================================================================
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "High-performance CUDA kernels for GATree evaluation";
+    m.doc() = "High-performance CUDA kernels for GATree";
 
-    // --- 인접 리스트 생성 관련 함수 바인딩 ---
-    m.def("count_and_create_offsets", &count_and_create_offsets_cuda, 
-          "Step 1: Counts children for each node and returns total child count and the offset array.");
+    // --- 구조 관련 함수 ---
+    m.def("count_and_create_offsets", &count_and_create_offsets_cuda, "Build adjacency list step 1");
+    m.def("fill_child_indices", &fill_child_indices_cuda, "Build adjacency list step 2");
 
-    m.def("fill_child_indices", &fill_child_indices_cuda, 
-          "Step 2: Fills a pre-allocated child_indices tensor using the offset array.",
-          py::arg("population_tensor"), 
-          py::arg("offset_array"), 
-          py::arg("child_indices")); // 'child_indices'는 in-place로 수정됨
+    // --- 예측 함수 ---
+    m.def("predict", &predict_cuda, "GATree Prediction on CUDA");
 
-    // --- 예측 함수 바인딩 ---
-    m.def("predict", &predict_cuda, 
-          "GATree Prediction on CUDA using a pre-built adjacency list");
+    // --- [신규] 값 기반 돌연변이 함수 바인딩 ---
+    m.def("node_param_mutate", &node_param_mutate_cuda,
+          "Perform NodeParamMutation on GPU.",
+          py::arg("population"),
+          py::arg("mutation_prob"),
+          py::arg("noise_ratio"),
+          py::arg("leverage_change"),
+          py::arg("feature_num_indices"),
+          py::arg("feature_min_vals"),
+          py::arg("feature_max_vals")
+    );
+
+    m.def("reinitialize_node_mutate", &reinitialize_node_mutate_cuda,
+          "Perform ReinitializeNodeMutation on GPU.",
+          py::arg("population"),
+          py::arg("mutation_prob"),
+          py::arg("feature_num_indices"),
+          py::arg("feature_min_vals"),
+          py::arg("feature_max_vals"),
+          py::arg("feature_comparison_indices"),
+          py::arg("feature_bool_indices")
+    );
 }
