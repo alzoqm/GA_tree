@@ -127,6 +127,9 @@ class GATree:
         self.max_depth = max_depth
         self.max_children = max_children
         self.feature_num = feature_num
+        self.feature_num = {
+    k: (float(v[0]), float(v[1])) for k, v in feature_num.items()
+}
         self.feature_comparison_map = feature_comparison_map
         self.feature_bool = feature_bool
 
