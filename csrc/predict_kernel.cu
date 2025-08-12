@@ -1,162 +1,170 @@
-// /csrc/reorganize_kernel.cu (수정된 최종 코드)
-#include "reorganize_kernel.cuh"
+// csrc/predict_kernel.cu (수정된 최종본)
+#include <cuda_runtime.h>
 #include "constants.h"
-#include <algorithm> // for std::min
 
-// ==============================================================================
-//   커널 1: 각 트리의 활성 노드 수를 세고, old_gid -> new_gid 매핑을 계산합니다.
-//   [수정] 병렬 스캔(Prefix Sum) 로직의 레이스 컨디션 버그를 수정했습니다.
-// ==============================================================================
-__global__ void compute_remap_indices_kernel(
-    const float* population_ptr,
-    int* active_counts_per_tree_ptr, // [tree_idx] = num_active_nodes
-    int* old_gid_to_new_gid_map_ptr, // [old_gid] = new_gid
-    int pop_size,
-    int max_nodes)
-{
-    // 각 스레드 블록이 하나의 트리(개체)를 담당합니다.
-    const int tree_idx = blockIdx.x;
-    if (tree_idx >= pop_size) return;
-    
-    // --- 1. 공유 메모리를 사용하여 블록 내 스캔(Prefix Sum) 수행 ---
-    extern __shared__ int local_scan_buffer[]; // max_nodes 크기
-    
-    // 각 스레드가 자신의 로컬 노드를 담당 (Grid-Stride Loop)
-    for (int i = threadIdx.x; i < max_nodes; i += blockDim.x) {
-        const int old_gid = tree_idx * max_nodes + i;
-        bool is_active = (population_ptr[old_gid * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED);
-        local_scan_buffer[i] = is_active ? 1 : 0;
-    }
-    __syncthreads();
+// [삭제] 고정된 공유 메모리 크기 상수를 제거합니다.
+// constexpr int MAX_FEATURES_IN_SHARED_MEM = 1024;
 
-    // --- 2. [수정된 부분] 블록 내 Prefix Sum (Scan) ---
-    // Blelloch 스캔 알고리즘을 올바르게 구현하여 레이스 컨디션을 제거합니다.
-    for (int offset = 1; offset < max_nodes; offset *= 2) {
-        int i = threadIdx.x;
-        // 스레드마다 독립적으로 처리할 수 있도록 임시 변수 사용
-        float temp_val = 0;
-        if (i >= offset) {
-            temp_val = local_scan_buffer[i - offset];
-        }
-        __syncthreads(); // 모든 스레드가 이전 단계의 값을 읽을 때까지 대기
+// --- Device-level Helper Function ---
+__device__ bool evaluate_node_device(
+    const float* node_data,
+    const float* feature_values) {
 
-        if (i >= offset) {
-             local_scan_buffer[i] += temp_val;
-        }
-        __syncthreads(); // 모든 스레드가 현재 단계의 계산을 마칠 때까지 대기
+    int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
+    int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
+    float val1 = feature_values[feat1_idx];
+    float val2 = node_data[COL_PARAM_4];
+
+    if (comp_type == COMP_TYPE_FEAT_FEAT) {
+        int feat2_idx = static_cast<int>(node_data[COL_PARAM_4]);
+        val2 = feature_values[feat2_idx];
     }
     
-    // --- 3. 최종 결과 계산 및 전역 메모리에 쓰기 ---
-    for (int i = threadIdx.x; i < max_nodes; i += blockDim.x) {
-        const int old_gid = tree_idx * max_nodes + i;
-        
-        bool is_active = (population_ptr[old_gid * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED);
-        if (is_active) {
-            int new_local_idx = local_scan_buffer[i] - 1;
-            old_gid_to_new_gid_map_ptr[old_gid] = tree_idx * max_nodes + new_local_idx;
-        } else {
-            old_gid_to_new_gid_map_ptr[old_gid] = -1; // 비활성 노드는 -1로 표시
-        }
+    if (comp_type == COMP_TYPE_FEAT_BOOL) {
+        return val1 == val2;
     }
-    __syncthreads();
-    
-    // 블록의 0번 스레드가 해당 트리의 총 활성 노드 수를 기록
-    if (threadIdx.x == 0 && max_nodes > 0) {
-        active_counts_per_tree_ptr[tree_idx] = local_scan_buffer[max_nodes - 1];
+
+    int op = static_cast<int>(node_data[COL_PARAM_2]);
+    switch(op) {
+        case OP_GTE: return val1 >= val2;
+        case OP_LTE: return val1 <= val2;
     }
+
+    return false;
 }
 
-// ==============================================================================
-//   커널 2: 계산된 매핑을 사용하여 노드 데이터를 새 위치로 복사하고 부모 인덱스를 업데이트합니다.
-//   (이 커널은 원본과 동일하며, 수정할 필요가 없습니다.)
-// ==============================================================================
-__global__ void reorganize_and_update_kernel(
-    const float* original_pop_ptr,
-    const int* old_gid_to_new_gid_map_ptr,
-    float* new_pop_ptr,
+
+// --- Main CUDA Kernel ---
+__global__ void predict_kernel(
+    const float* population_ptr,
+    const float* features_ptr,
+    const long* positions_ptr,
+    const int* next_indices_ptr,
+    const int* offset_ptr,
+    const int* child_indices_ptr,
+    float* results_ptr,
+    int* bfs_queue_buffer,
     int pop_size,
-    int max_nodes)
-{
-    const int old_gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (old_gid >= pop_size * max_nodes) return;
+    int max_nodes,
+    int num_features) {
 
-    // 이 노드가 활성 노드일 경우에만 재구성 작업 수행
-    if (original_pop_ptr[old_gid * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED) {
-        const int new_gid = old_gid_to_new_gid_map_ptr[old_gid];
-        if (new_gid == -1) return;
-        
-        // 1. 노드 데이터 전체를 새 위치로 복사
-        for (int i = 0; i < NODE_INFO_DIM; ++i) {
-            new_pop_ptr[new_gid * NODE_INFO_DIM + i] = original_pop_ptr[old_gid * NODE_INFO_DIM + i];
+    // [수정] 동적 공유 메모리 선언
+    extern __shared__ float feature_cache[];
+
+    // 1. Thread-to-Tree Mapping
+    const int tree_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tree_idx >= pop_size) {
+        return;
+    }
+    
+    // [수정] 그리드-스트라이드 루프(Grid-Stride Loop)를 사용하여 모든 피처를 공유 메모리로 복사
+    for (int i = threadIdx.x; i < num_features; i += blockDim.x) {
+        feature_cache[i] = features_ptr[i];
+    }
+    __syncthreads(); // 블록 내 모든 스레드가 복사 작업을 마칠 때까지 대기
+
+    // 2. Setup pointers and variables for the current tree
+    const float* tree_data = population_ptr + tree_idx * max_nodes * NODE_INFO_DIM;
+    float* result_out = results_ptr + tree_idx * 4;
+    const int next_idx = next_indices_ptr[tree_idx];
+    const int* tree_offset_ptr = offset_ptr + tree_idx * max_nodes;
+
+    // 3. Find the starting node (root branch)
+    long start_pos_type = positions_ptr[tree_idx];
+    int start_node_idx = -1;
+    for (int i = 0; i < 3; ++i) { 
+        const float* node = tree_data + i * NODE_INFO_DIM;
+        if (static_cast<int>(node[COL_NODE_TYPE]) == NODE_TYPE_ROOT_BRANCH &&
+            static_cast<int>(node[COL_PARAM_1]) == start_pos_type) {
+            start_node_idx = i;
+            break;
         }
+    }
 
-        // 2. 부모 인덱스를 새로운 gid로 업데이트
-        int old_parent_local_idx = (int)original_pop_ptr[old_gid * NODE_INFO_DIM + COL_PARENT_IDX];
-        
-        if (old_parent_local_idx != -1) {
-            int tree_idx = old_gid / max_nodes;
-            int old_parent_gid = tree_idx * max_nodes + old_parent_local_idx;
-            int new_parent_gid = old_gid_to_new_gid_map_ptr[old_parent_gid];
-            
-            if (new_parent_gid != -1) {
-                int new_parent_local_idx = new_parent_gid % max_nodes;
-                new_pop_ptr[new_gid * NODE_INFO_DIM + COL_PARENT_IDX] = (float)new_parent_local_idx;
-            } else {
-                 new_pop_ptr[new_gid * NODE_INFO_DIM + COL_PARENT_IDX] = -1.0f;
+    result_out[0] = ACTION_NOT_FOUND;
+    result_out[1] = 0.0f;
+    result_out[2] = 0.0f;
+    result_out[3] = 0.0f;
+
+    if (start_node_idx == -1) {
+        return;
+    }
+
+    // 4. BFS를 위한 큐 관리 변수 설정
+    int* bfs_queue = bfs_queue_buffer + tree_idx * max_nodes;
+    int queue_head = 0;
+    int queue_tail = 0;
+
+    if (queue_tail < max_nodes) {
+        bfs_queue[queue_tail++] = start_node_idx;
+    }
+    
+    bool found_action = false;
+
+    // 5. BFS 루프 시작
+    while (queue_head < queue_tail && !found_action) {
+        int current_node_idx = bfs_queue[queue_head++];
+        int start_offset = tree_offset_ptr[current_node_idx];
+        int end_offset = tree_offset_ptr[current_node_idx + 1];
+
+        for (int i = start_offset; i < end_offset; ++i) {
+            int child_idx = child_indices_ptr[i];
+            const float* child_node_data = tree_data + child_idx * NODE_INFO_DIM;
+            int child_node_type = static_cast<int>(child_node_data[COL_NODE_TYPE]);
+
+            if (child_node_type == NODE_TYPE_ACTION) {
+                result_out[0] = child_node_data[COL_PARAM_1];
+                result_out[1] = child_node_data[COL_PARAM_2];
+                result_out[2] = child_node_data[COL_PARAM_3];
+                result_out[3] = child_node_data[COL_PARAM_4];
+                found_action = true;
+                break;
+            }
+            else if (child_node_type == NODE_TYPE_DECISION) {
+                if (evaluate_node_device(child_node_data, feature_cache)) {
+                    if (queue_tail < max_nodes) {
+                        bfs_queue[queue_tail++] = child_idx;
+                    }
+                }
             }
         }
     }
 }
 
+// --- Kernel Launcher ---
+void launch_predict_kernel(
+    const float* population_ptr,
+    const float* features_ptr,
+    const long* positions_ptr,
+    const int* next_indices_ptr,
+    const int* offset_ptr,
+    const int* child_indices_ptr,
+    float* results_ptr,
+    int* bfs_queue_buffer_ptr,
+    int pop_size,
+    int max_nodes,
+    int num_features) {
 
-// ==============================================================================
-//                      C++ 래퍼 함수 (수정 없음)
-// ==============================================================================
-void reorganize_population_cuda(torch::Tensor population_tensor) {
-    TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device for reorganize.");
-    TORCH_CHECK(population_tensor.is_contiguous(), "Population tensor must be contiguous.");
+    if (pop_size == 0) return;
 
-    const int pop_size = population_tensor.size(0);
-    const int max_nodes = population_tensor.size(1);
-    const int total_nodes = pop_size * max_nodes;
+    const int threads_per_block = 256;
+    const int num_blocks = (pop_size + threads_per_block - 1) / threads_per_block;
     
-    if (total_nodes == 0) return;
+    // [수정] 커널에 전달할 동적 공유 메모리 크기 계산
+    const size_t shared_mem_size = num_features * sizeof(float);
 
-    auto int_options = torch::TensorOptions().device(population_tensor.device()).dtype(torch::kInt32);
-
-    // --- 1. 커널 실행에 필요한 임시 텐서 할당 ---
-    torch::Tensor active_counts_per_tree = torch::zeros({pop_size}, int_options);
-    torch::Tensor old_gid_to_new_gid_map = torch::empty({total_nodes}, int_options);
-    
-    // --- 2. 커널 1 실행: 매핑 정보 계산 ---
-    const int threads_per_block_scan = std::min(max_nodes, 1024);
-    const int num_blocks_scan = pop_size;
-    const size_t shared_mem_size = max_nodes * sizeof(int);
-
-    compute_remap_indices_kernel<<<num_blocks_scan, threads_per_block_scan, shared_mem_size>>>(
-        population_tensor.data_ptr<float>(),
-        active_counts_per_tree.data_ptr<int>(),
-        old_gid_to_new_gid_map.data_ptr<int>(),
+    // [수정] 커널 실행 시 세 번째 인자로 공유 메모리 크기를 전달
+    predict_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
+        population_ptr,
+        features_ptr,
+        positions_ptr,
+        next_indices_ptr,
+        offset_ptr,
+        child_indices_ptr,
+        results_ptr,
+        bfs_queue_buffer_ptr,
         pop_size,
-        max_nodes
+        max_nodes,
+        num_features
     );
-    // cudaDeviceSynchronize(); // 디버깅 시 에러 확인에 필요할 수 있음
-
-    // --- 3. 커널 2 실행: 실제 재구성 ---
-    torch::Tensor new_population = torch::full_like(population_tensor, NODE_TYPE_UNUSED);
-    
-    const int threads_per_block_reorg = 256;
-    const int num_blocks_reorg = (total_nodes + threads_per_block_reorg - 1) / threads_per_block_reorg;
-
-    reorganize_and_update_kernel<<<num_blocks_reorg, threads_per_block_reorg>>>(
-        population_tensor.data_ptr<float>(),
-        old_gid_to_new_gid_map.data_ptr<int>(),
-        new_population.data_ptr<float>(),
-        pop_size,
-        max_nodes
-    );
-    // cudaDeviceSynchronize(); // 디버깅 시 에러 확인에 필요할 수 있음
-
-    // --- 4. 원본 텐서에 결과 복사 ---
-    population_tensor.copy_(new_population);
 }
