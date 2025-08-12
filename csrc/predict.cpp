@@ -3,6 +3,8 @@
 #include <torch/extension.h>
 #include "predict_kernel.cuh"
 #include "adjacency_builder.cuh"
+#include "value_mutation_kernel.cuh"
+#include "reorganize_kernel.cuh"
 #include "constants.h"
 
 // [삭제] 공유 메모리 크기 관련 상수를 제거합니다.
@@ -61,9 +63,9 @@ void check_predict_tensors(
     const int max_nodes = population.size(1);
 
     // [삭제] 고정된 크기 검사를 제거합니다. 이제 동적으로 할당되므로 필요 없습니다.
-    // TORCH_CHECK(features.size(0) <= MAX_FEATURES_IN_SHARED_MEM_CPP, 
+    // TORCH_CHECK(features.size(0) <= MAX_FEATURES_IN_SHARED_MEM_CPP,
     //             "Number of features exceeds shared memory limit defined in C++");
-                
+
     TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
     TORCH_CHECK(next_indices.size(0) == pop_size, "Next_indices tensor pop_size mismatch");
     TORCH_CHECK(offset_array.size(0) == (pop_size * max_nodes + 1), "Offset array size mismatch");
@@ -86,7 +88,7 @@ void predict_cuda(
     torch::Tensor child_indices_tensor,
     torch::Tensor results_tensor,
     torch::Tensor bfs_queue_buffer) {
-    
+
     // 1. 모든 입력 텐서 유효성 검사
     check_predict_tensors(population_tensor, features_tensor, positions_tensor, next_indices_tensor,
                           offset_array_tensor, child_indices_tensor, results_tensor, bfs_queue_buffer);
@@ -147,4 +149,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("feature_comparison_indices"),
           py::arg("feature_bool_indices")
     );
+    // --- [신규] 재구성 함수 바인딩 ---
+    m.def("reorganize_population", &reorganize_population_cuda, 
+          "Reorganize the population tensor on GPU to remove fragmentation.");
 }

@@ -18,6 +18,11 @@ try:
 except ImportError:
     PYVIS_AVAILABLE = False
 
+try:
+    import gatree_cuda
+except ImportError:
+    gatree_cuda = None
+
 # -------------------------------------
 # --- 상수 정의 (C/C++ 연동을 위해 중요)
 # -------------------------------------
@@ -800,67 +805,42 @@ class GATreePop:
         self.initialized = True
         print("\nPopulation created successfully.")
 
-    def reorganize_nodes(self, num_processes: int = 1):
+    def reorganize_nodes(self):
         """
-        [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직 및 인접 리스트 생성을 병렬로 수행합니다.
-        멀티프로세싱 시 CUDA 교착 상태를 피하기 위해 텐서를 CPU로 이동 후 처리합니다.
+        [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직을 GPU에서 병렬로 수행합니다.
+        Python 멀티프로세싱 로직을 CUDA 커널 직접 호출로 대체합니다.
         """
         if not self.initialized:
             print("Warning: Reorganizing an uninitialized population.")
             return
 
-        if num_processes > 1 and self.pop_size > 1:
-            print(f"Reorganizing all {self.pop_size} trees using {num_processes} processes...")
-
-            # 1. 원본 장치 저장 및 텐서를 CPU로 이동
-            original_device = self.population_tensor.device
-            is_cuda = original_device.type == 'cuda'
-            if is_cuda:
-                self.population_tensor = self.population_tensor.to('cpu')
-                # 각 GATree 객체가 가진 텐서 view도 새로운 CPU 텐서를 가리키도록 업데이트
-                for i, tree in enumerate(self.population):
-                    tree.data = self.population_tensor[i]
-                print("    - Tensor moved to CPU for safe multiprocessing.")
-
-            # 2. CPU에서 병렬로 재구성 및 후처리 작업 수행
-            self.population_tensor.share_memory_()
-            config = self._get_config_dict()
-            args = zip(range(self.pop_size), repeat(self.population_tensor), repeat(config))
-
-            with mp.Pool(processes=num_processes) as pool:
-                # 워커로부터 (tree_index, next_idx, adjacency_list) 튜플 리스트를 받음
-                results = list(pool.map(_reorganize_worker, args))
-
-            # 3. 작업이 완료된 텐서를 다시 원본 장치로 이동
-            if is_cuda:
-                self.population_tensor = self.population_tensor.to(original_device)
-                # GATree 객체의 view도 다시 GPU 텐서를 가리키도록 업데이트
-                for i, tree in enumerate(self.population):
-                    tree.data = self.population_tensor[i]
-                print("    - Tensor moved back to original device.")
-            
-            # 4. [신규] 병렬 처리 결과를 각 GATree 객체에 반영
-            for tree_idx, new_next_idx, new_adj_list in results:
-                self.population[tree_idx].next_idx = new_next_idx
-                self.population[tree_idx]._adjacency_list = new_adj_list
-
-        else: # 순차 실행 (프로세스 1개)
-            print(f"Reorganizing all {self.pop_size} trees sequentially...")
+        # [수정] CUDA가 아닌 장치에 대한 예외 처리 또는 대체 로직
+        if self.population_tensor.device.type != 'cuda':
+            print("Warning: CUDA-based reorganize_nodes is only available for GPU tensors. Falling back to sequential CPU method.")
+            # CPU에서는 기존의 순차적 방식 실행
             for tree in self.population:
                 tree.reorganize_nodes()
-            # 순차 실행 시에는 reorganize_nodes가 내부적으로 next_idx와 adj_list를 모두 업데이트하므로 추가 작업 불필요
-
-        print("Population reorganization complete.")
+            return
+        
+        # [수정] C++/CUDA 확장 모듈 직접 호출
+        gatree_cuda.reorganize_population(self.population_tensor)
+        
+        # [중요] CUDA 연산 후, Python GATree 객체들의 내부 상태를 텐서와 동기화합니다.
+        # 이 과정이 없으면, 다음 연산(예: 시각화, CPU 기반 예측)에서 오류가 발생합니다.
+        self.set_next_idx()  # 모든 트리의 next_idx 값을 텐서 기준으로 다시 계산
+        for tree in self.population:
+            tree._build_adjacency_list() # 모든 트리의 인접 리스트를 텐서 기준으로 재생성
 
     def set_next_idx(self):
         """
-        집단 내의 모든 GATree 개체에 대해 next_idx를 재설정합니다.
+        [수정] 집단 내 모든 GATree 개체의 next_idx를 텐서 기반으로 재설정합니다.
+        이 함수는 이제 CUDA 연산 후 동기화를 위해 더욱 중요해졌습니다.
         """
         if not self.initialized:
-            # print("Warning: Setting next_idx for an uninitialized population.")
             return
 
         for tree in self.population:
+            # GATree 객체의 텐서 뷰(tree.data)를 직접 참조하여 상태를 업데이트합니다.
             tree.set_next_idx()
 
     def return_next_idx(self) -> list[int]:
