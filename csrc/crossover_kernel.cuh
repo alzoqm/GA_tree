@@ -16,3 +16,11 @@ void swap_node_params_cuda(
     const torch::Tensor& p1_mask,
     const torch::Tensor& p2_mask
 );
+
+void copy_branches_batch_cuda(
+    torch::Tensor& child_batch,
+    const torch::Tensor& p1_batch,
+    const torch::Tensor& p2_batch,
+    const torch::Tensor& donor_map,
+    torch::Tensor& scratch_buffer
+);

@@ -120,6 +120,124 @@ __global__ void swap_node_params_kernel(
     }
 }
 
+__device__ int find_subtree_nodes_device(
+    const float* tree_ptr,
+    int root_idx,
+    int* queue_buffer,      // 스레드별 BFS 큐
+    int* result_indices,    // 스레드별 결과 저장 버퍼
+    int max_nodes)
+{
+    if (tree_ptr[root_idx * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
+        return 0;
+    }
+    
+    int head = 0, tail = 0;
+    queue_buffer[tail++] = root_idx;
+    result_indices[0] = root_idx;
+    int count = 1;
+
+    while (head < tail) {
+        int current_idx = queue_buffer[head++];
+        
+        // 부모-자식 관계는 전역 메모리를 순회하며 찾아야 함
+        for (int i = 0; i < max_nodes; ++i) {
+            if ((int)tree_ptr[i * NODE_INFO_DIM + COL_PARENT_IDX] == current_idx) {
+                if (tail < max_nodes) {
+                    queue_buffer[tail++] = i;
+                    result_indices[count++] = i;
+                } else {
+                    // 큐 버퍼가 꽉 차면 탐색 중단 (에러 방지)
+                    return count;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+
+// ==============================================================================
+//       [신규] 커널 3: RootBranchCrossover를 위한 배치 복사 커널
+// ==============================================================================
+__global__ void copy_branches_kernel(
+    float* child_batch_ptr,
+    const float* p1_batch_ptr,
+    const float* p2_batch_ptr,
+    const int* donor_map_ptr,
+    int* scratch_buffer_ptr,
+    int batch_size,
+    int max_nodes)
+{
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    // --- 1. 스레드별 포인터 및 버퍼 설정 ---
+    float* child_ptr = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    
+    int scratch_size_per_thread = max_nodes * 3;
+    int* my_scratch_ptr = scratch_buffer_ptr + batch_idx * scratch_size_per_thread;
+    int* my_queue = my_scratch_ptr;
+    int* my_results = my_scratch_ptr + max_nodes;
+    int* my_old_to_new_map = my_scratch_ptr + max_nodes * 2;
+
+    int child_next_idx = 3; // 루트 분기(0,1,2) 다음부터 채움
+
+    // --- 2. 3개의 브랜치(LONG, HOLD, SHORT)에 대해 순차적으로 복사 ---
+    for (int b_idx = 0; b_idx < 3; ++b_idx) {
+        int donor_choice = donor_map_ptr[batch_idx * 3 + b_idx];
+        const float* donor_ptr = (donor_choice == 0) ? p1_ptr : p2_ptr;
+
+        // --- 3. 기증 부모에서 해당 브랜치의 직계 자식(서브트리 루트) 찾기 ---
+        for (int donor_node_idx = 0; donor_node_idx < max_nodes; ++donor_node_idx) {
+            if ((int)donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_PARENT_IDX] == b_idx) {
+                int subtree_root_idx = donor_node_idx;
+                
+                // --- 4. 서브트리 정보 수집 및 유효성 검사 ---
+                int subtree_size = find_subtree_nodes_device(donor_ptr, subtree_root_idx, my_queue, my_results, max_nodes);
+
+                if (child_next_idx + subtree_size > max_nodes) {
+                    continue; // 공간 부족 시 이 서브트리는 건너뜀
+                }
+
+                // --- 5. 서브트리 복사 ---
+                // a. old_to_new_map 생성 (전체 맵 초기화)
+                for(int i=0; i<max_nodes; ++i) my_old_to_new_map[i] = -1;
+                for (int k = 0; k < subtree_size; ++k) {
+                    my_old_to_new_map[my_results[k]] = child_next_idx + k;
+                }
+
+                // b. 깊이 오프셋 계산
+                float dest_parent_depth = child_ptr[b_idx * NODE_INFO_DIM + COL_DEPTH];
+                float source_root_depth = donor_ptr[subtree_root_idx * NODE_INFO_DIM + COL_DEPTH];
+                float depth_offset = (dest_parent_depth + 1) - source_root_depth;
+
+                // c. 노드 데이터 복사 및 업데이트
+                for (int k = 0; k < subtree_size; ++k) {
+                    int old_idx = my_results[k];
+                    int new_idx = my_old_to_new_map[old_idx];
+                    
+                    const float* src_node_data = donor_ptr + old_idx * NODE_INFO_DIM;
+                    float* dest_node_data = child_ptr + new_idx * NODE_INFO_DIM;
+
+                    for(int d=0; d<NODE_INFO_DIM; ++d) dest_node_data[d] = src_node_data[d];
+
+                    dest_node_data[COL_DEPTH] += depth_offset;
+                    
+                    int old_parent_idx = (int)src_node_data[COL_PARENT_IDX];
+                    if (old_idx == subtree_root_idx) {
+                        dest_node_data[COL_PARENT_IDX] = (float)b_idx; // 새 부모는 루트 분기
+                    } else {
+                        dest_node_data[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
+                    }
+                }
+                child_next_idx += subtree_size;
+            }
+        }
+    }
+}
+
 
 // ==============================================================================
 //                       C++ 래퍼 함수 (커널 런처)
@@ -150,4 +268,27 @@ void swap_node_params_cuda(torch::Tensor& c1, torch::Tensor& c2, const torch::Te
         p1_mask.data_ptr<bool>(),
         p2_mask.data_ptr<bool>(),
         batch_size, max_nodes);
+}
+
+void copy_branches_batch_cuda(
+    torch::Tensor& child_batch,
+    const torch::Tensor& p1_batch,
+    const torch::Tensor& p2_batch,
+    const torch::Tensor& donor_map,
+    torch::Tensor& scratch_buffer)
+{
+    const int batch_size = child_batch.size(0);
+    if (batch_size == 0) return;
+    const int max_nodes = child_batch.size(1);
+
+    // 각 스레드 블록이 하나의 자식을 처리
+    copy_branches_kernel<<<batch_size, 1>>>(
+        child_batch.data_ptr<float>(),
+        p1_batch.data_ptr<float>(),
+        p2_batch.data_ptr<float>(),
+        donor_map.data_ptr<int>(),
+        scratch_buffer.data_ptr<int>(),
+        batch_size,
+        max_nodes
+    );
 }

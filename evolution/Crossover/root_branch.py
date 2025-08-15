@@ -1,110 +1,119 @@
-# evolution/Crossover/root_branch.py
+# evolution/Crossover/root_branch.py (수정된 최종 코드)
 import torch
-import random
 from .base import BaseCrossover
-from ..Mutation.utils import find_subtree_nodes, find_empty_slots
 from typing import Tuple
 
 from models.constants import (
-    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1, NODE_INFO_DIM,
+    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1,
     NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, ROOT_BRANCH_LONG,
     ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
 )
 
+# C++/CUDA로 구현된 헬퍼 함수 임포트
+try:
+    import gatree_cuda
+except ImportError:
+    print("="*60)
+    print(">>> 경고: 'gatree_cuda' 모듈을 찾을 수 없습니다.")
+    print(">>> C++/CUDA 코드를 먼저 컴파일해야 합니다.")
+    print(">>> python setup.py build_ext --inplace")
+    print("="*60)
+    gatree_cuda = None
+
 class RootBranchCrossover(BaseCrossover):
     """
-    부모들의 루트 분기(LONG/HOLD/SHORT)를 재조합하여 새로운 자식을 생성합니다.
-    예: 자식의 LONG 분기는 p1에서, SHORT 분기는 p2에서 가져옵니다.
+    [개선된 버전]
+    GPU 병렬 처리에 최적화된 루트 분기 교차 연산자.
+    부모들의 루트 분기(LONG/HOLD/SHORT)를 재조합하여 전체 자식 배치를 한 번의 텐서 연산으로 생성합니다.
     """
     def __init__(self, rate: float = 0.8, max_nodes: int = 100):
         super().__init__(rate)
+        if not 0.0 <= rate <= 1.0:
+            raise ValueError(f"Crossover rate must be between 0.0 and 1.0, but got {rate}")
         self.max_nodes = max_nodes
-        self.BRANCH_MAP = {
-            ROOT_BRANCH_LONG: 0,
-            ROOT_BRANCH_HOLD: 1,
-            ROOT_BRANCH_SHORT: 2
-        }
 
     def __call__(self, parents: torch.Tensor) -> torch.Tensor:
+        """
+        [개선 1] 전체 부모 배치에 대한 교차 연산을 루프 없이 수행합니다.
+        """
         num_offspring = parents.shape[0] // 2
-        max_nodes, node_dim = parents.shape[1], parents.shape[2]
-        
-        children = torch.empty((num_offspring, max_nodes, node_dim), 
-                               dtype=parents.dtype, device=parents.device)
-        
-        parent_pairs = parents.view(num_offspring, 2, max_nodes, node_dim)
+        if num_offspring == 0:
+            return torch.empty((0, *parents.shape[1:]), dtype=parents.dtype, device=parents.device)
 
-        for i, (p1, p2) in enumerate(parent_pairs):
-            if torch.rand(1).item() < self.rate:
-                children[i] = self._perform_crossover_pair(p1, p2)
-            else:
-                children[i] = p1.clone() if torch.rand(1).item() < 0.5 else p2.clone()
+        # 부모 쌍 생성 (num_offspring, 2, max_nodes, node_dim)
+        parent_pairs = parents.view(num_offspring, 2, -1, parents.shape[-1])
+        p1_batch = parent_pairs[:, 0]
+        p2_batch = parent_pairs[:, 1]
         
+        children = torch.empty_like(p1_batch)
+        rand_vals = torch.rand(num_offspring, device=parents.device)
+        
+        # 1. Crossover를 수행할 자식 결정
+        crossover_mask = rand_vals < self.rate
+        num_crossover = crossover_mask.sum().item()
+
+        if num_crossover > 0:
+            p1_to_cross = p1_batch[crossover_mask]
+            p2_to_cross = p2_batch[crossover_mask]
+            crossed_children = self._perform_crossover_batch(p1_to_cross, p2_to_cross)
+            children[crossover_mask] = crossed_children
+
+        # 2. P1을 그대로 복제할 자식 결정
+        clone_p1_mask = (rand_vals >= self.rate) & (rand_vals < self.rate + (1.0 - self.rate) / 2.0)
+        if clone_p1_mask.any():
+            children[clone_p1_mask] = p1_batch[clone_p1_mask].clone()
+
+        # 3. P2를 그대로 복제할 자식 결정
+        clone_p2_mask = rand_vals >= self.rate + (1.0 - self.rate) / 2.0
+        if clone_p2_mask.any():
+            children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
+            
         return children
 
-    def _perform_crossover_pair(self, p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:
-        """두 부모의 루트 분기를 재조합하여 하나의 자식을 생성합니다."""
-        child = torch.zeros_like(p1)
-        
-        # 1. 자식 트리에 3개의 루트 분기 노드 생성
-        child_next_idx = 0
-        for branch_type, branch_idx in self.BRANCH_MAP.items():
-            child[branch_idx, COL_NODE_TYPE] = NODE_TYPE_ROOT_BRANCH
-            child[branch_idx, COL_PARENT_IDX] = -1
-            child[branch_idx, COL_DEPTH] = 0
-            child[branch_idx, COL_PARAM_1] = branch_type
-            child_next_idx += 1
-
-        # 2. 각 분기별로 기증 부모를 선택하고 서브트리 복사
-        for branch_type, dest_parent_idx in self.BRANCH_MAP.items():
-            donor = p1 if random.random() < 0.5 else p2
-            source_parent_idx = self.BRANCH_MAP[branch_type]
-
-            # 기증 부모의 해당 분기 바로 아래 자식들을 찾음
-            source_children_indices = (donor[:, COL_PARENT_IDX] == source_parent_idx).nonzero(as_tuple=True)[0]
-            
-            for source_child_idx in source_children_indices:
-                # 복사 전 유효성 검사 (max_nodes 초과 여부)
-                subtree_nodes = find_subtree_nodes(donor, source_child_idx.item())
-                if child_next_idx + len(subtree_nodes) > self.max_nodes:
-                    continue # 공간 부족, 이 서브트리 복사 포기
-                
-                # 서브트리 복사 실행
-                copied_nodes_count = self._copy_subtree(child, child_next_idx, donor, source_child_idx.item(), dest_parent_idx)
-                child_next_idx += copied_nodes_count
-        
-        return child
-
-    def _copy_subtree(self, dest_tree, dest_start_idx, source_tree, source_root_idx, dest_parent_idx):
+    def _perform_crossover_batch(self, p1_batch: torch.Tensor, p2_batch: torch.Tensor) -> torch.Tensor:
         """
-        source_tree의 서브트리를 dest_tree의 빈 공간으로 복사합니다.
-        _transplant_one_way와 유사하지만, 빈 공간에 새로 쓰는 방식입니다.
+        [개선 2] '배치' 단위로 루트 분기 교차를 수행합니다.
+        이 과정의 핵심은 C++/CUDA 커널로 위임됩니다.
         """
-        nodes_to_copy = find_subtree_nodes(source_tree, source_root_idx)
-        if not nodes_to_copy:
-            return 0
-        
-        indices_to_copy = torch.tensor(nodes_to_copy, dtype=torch.long, device=source_tree.device)
-        
-        new_slots = torch.arange(dest_start_idx, dest_start_idx + len(nodes_to_copy))
-        
-        old_to_new_map = {old: new for old, new in zip(nodes_to_copy, new_slots.tolist())}
-        
-        # 깊이 차이 계산
-        dest_parent_depth = dest_tree[dest_parent_idx, COL_DEPTH].item()
-        source_root_depth = source_tree[source_root_idx, COL_DEPTH].item()
-        depth_offset = (dest_parent_depth + 1) - source_root_depth
+        if gatree_cuda is None:
+            raise RuntimeError("gatree_cuda module is not loaded. Cannot perform crossover.")
 
-        # 노드 데이터 복사 및 정보 업데이트
-        dest_tree[new_slots] = source_tree[indices_to_copy]
-        dest_tree[new_slots, COL_DEPTH] += depth_offset
+        num_to_cross = p1_batch.shape[0]
+        device = p1_batch.device
 
-        # 부모 인덱스 재연결
-        for old_idx, new_idx in old_to_new_map.items():
-            old_parent_idx = int(source_tree[old_idx, COL_PARENT_IDX].item())
-            if old_idx == source_root_idx:
-                dest_tree[new_idx, COL_PARENT_IDX] = dest_parent_idx
-            else:
-                dest_tree[new_idx, COL_PARENT_IDX] = old_to_new_map[old_parent_idx]
+        # 1. 자식 텐서 초기화 (모든 노드를 UNUSED로 설정)
+        child_batch = torch.zeros_like(p1_batch)
+
+        # 2. 모든 자식의 루트 분기 노드(0, 1, 2번 인덱스)를 한 번에 생성
+        root_indices = torch.arange(3, device=device)
+        child_batch[:, root_indices, COL_NODE_TYPE] = NODE_TYPE_ROOT_BRANCH
+        child_batch[:, root_indices, COL_PARENT_IDX] = -1
+        child_batch[:, root_indices, COL_DEPTH] = 0
         
-        return len(nodes_to_copy)
+        branch_types_tensor = torch.tensor([ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT], device=device)
+        child_batch[:, root_indices, COL_PARAM_1] = branch_types_tensor
+
+        # 3. 각 자식의 각 브랜치에 대해 어떤 부모로부터 유전받을지 랜덤하게 결정
+        # donor_map: (num_to_cross, 3) 크기. 0은 p1, 1은 p2를 의미.
+        donor_map = torch.randint(0, 2, (num_to_cross, 3), device=device, dtype=torch.int32)
+        
+        # ======================================================================
+        # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ C++/CUDA 구현 호출 부분 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+        # ======================================================================
+        # CUDA 커널이 사용할 스크래치 버퍼를 Python에서 생성하여 전달
+        # 각 스레드(자식)는 BFS 큐, 결과 인덱스, old_to_new 맵을 위한 공간이 필요
+        scratch_buffer_size_per_thread = self.max_nodes * 3 
+        scratch_buffer = torch.empty(
+            (num_to_cross, scratch_buffer_size_per_thread), 
+            dtype=torch.int32, 
+            device=device
+        )
+        
+        gatree_cuda.copy_branches_batch(
+            child_batch, p1_batch, p2_batch, donor_map, scratch_buffer
+        )
+        # ======================================================================
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ C++/CUDA 구현 호출 부분 ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        # ======================================================================
+
+        return child_batch

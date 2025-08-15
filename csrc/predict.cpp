@@ -145,4 +145,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swap node parameters between two populations based on given masks.",
         py::arg("c1"), py::arg("c2"), py::arg("p1_mask"), py::arg("p2_mask")
     );
+
+    m.def("copy_branches_batch", &copy_branches_batch_cuda,
+        "Performs root branch crossover on a batch of parents using CUDA.",
+        py::arg("child_batch"), 
+        py::arg("p1_batch"), 
+        py::arg("p2_batch"), 
+        py::arg("donor_map"),
+        py::arg("scratch_buffer")
+    );
 }
