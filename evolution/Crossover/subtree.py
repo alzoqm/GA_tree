@@ -92,8 +92,7 @@ class SubtreeCrossover(BaseCrossover):
 
     def _perform_crossover_batch(self, p1_batch: torch.Tensor, p2_batch: torch.Tensor) -> torch.Tensor:
         """
-        [개선 2] '배치' 단위로 서브트리 교차를 수행하고,
-        각 샘플마다 child1/child2 중 랜덤하게 하나를 반환합니다.
+        [수정됨] '배치' 단위로 서브트리 교차를 수행하며, 입력과 출력이 모두 GPU 텐서입니다.
         """
         if gatree_cuda is None:
             raise RuntimeError("gatree_cuda module is not loaded. Cannot perform subtree crossover.")
@@ -101,50 +100,33 @@ class SubtreeCrossover(BaseCrossover):
         num_to_cross = p1_batch.shape[0]
         device = p1_batch.device
 
-        # 출력 버퍼 (커널이 채움)
+        # 출력 및 임시 버퍼들을 모두 GPU에 생성
         child1_out = torch.empty_like(p1_batch)
         child2_out = torch.empty_like(p2_batch)
-
-        # [수정] 커널 내부의 모든 임시 배열을 Python에서 버퍼로 생성
         bfs_queue_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         result_indices_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-        
-        # [신규] 후보군 저장을 위한 추가 버퍼
         p1_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         p2_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
 
-
-        # context 모드 공정성 확보를 위한 분기 순열(샘플별로 LONG/HOLD/SHORT 순서를 랜덤화)
         if self.mode == "context":
             branch_types = torch.tensor(self.BRANCH_TYPES, device=device, dtype=torch.int32)
-            # (3,) → (num_to_cross, 3)로 expand 후 각 행을 독립적으로 셔플
             branch_perm = branch_types.repeat(num_to_cross, 1)
-            # 셔플 인덱스 생성
             shuffle_idx = torch.stack([torch.randperm(3, device=device) for _ in range(num_to_cross)], dim=0)
             branch_perm = torch.gather(branch_perm, 1, shuffle_idx)
         else:
-            branch_perm = torch.empty((0, 3), dtype=torch.int32, device=device)  # 더미
+            branch_perm = torch.empty((num_to_cross, 3), dtype=torch.int32, device=device)
 
-        # [수정] CUDA 함수 호출 시 추가 버퍼 전달
+        # GPU 텐서들로 CUDA 커널 호출 (입력 p1_batch, p2_batch는 이미 GPU에 있음)
         gatree_cuda.subtree_crossover_batch(
-            child1_out,
-            child2_out,
-            p1_batch,
-            p2_batch,
+            child1_out, child2_out, p1_batch, p2_batch,
             1 if self.mode == "context" else 0,
-            int(self.max_depth),
-            int(self.max_nodes),
-            int(self.max_retries),
-            branch_perm,
-            bfs_queue_buffer,
-            result_indices_buffer,
-            old_to_new_map_buffer,
-            p1_candidates_buffer, # <--- 신규 버퍼 전달
-            p2_candidates_buffer  # <--- 신규 버퍼 전달
+            int(self.max_depth), int(self.max_nodes), int(self.max_retries),
+            branch_perm, bfs_queue_buffer, result_indices_buffer,
+            old_to_new_map_buffer, p1_candidates_buffer, p2_candidates_buffer
         )
 
-        # child1/child2 중 하나를 선택(각 샘플 0.5 확률)
         select_mask = (torch.rand(num_to_cross, 1, 1, device=device) < 0.5)
         final_children = torch.where(select_mask, child1_out, child2_out)
-        return final_children
+        
+        return final_children # GPU 텐서를 그대로 반환

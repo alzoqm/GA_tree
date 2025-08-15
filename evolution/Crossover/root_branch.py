@@ -73,8 +73,7 @@ class RootBranchCrossover(BaseCrossover):
 
     def _perform_crossover_batch(self, p1_batch: torch.Tensor, p2_batch: torch.Tensor) -> torch.Tensor:
         """
-        [개선 2] '배치' 단위로 루트 분기 교차를 수행합니다.
-        이 과정의 핵심은 C++/CUDA 커널로 위임됩니다.
+        [수정됨] '배치' 단위로 루트 분기 교차를 수행하며, 입력과 출력이 모두 GPU 텐서입니다.
         """
         if gatree_cuda is None:
             raise RuntimeError("gatree_cuda module is not loaded. Cannot perform crossover.")
@@ -82,47 +81,26 @@ class RootBranchCrossover(BaseCrossover):
         num_to_cross = p1_batch.shape[0]
         device = p1_batch.device
 
-        # 1. 자식 텐서 초기화 (모든 노드를 UNUSED로 설정)
+        # 모든 텐서를 GPU에 생성
         child_batch = torch.zeros_like(p1_batch)
-
-        # 2. 모든 자식의 루트 분기 노드(0, 1, 2번 인덱스)를 한 번에 생성
         root_indices = torch.arange(3, device=device)
         child_batch[:, root_indices, COL_NODE_TYPE] = NODE_TYPE_ROOT_BRANCH
         child_batch[:, root_indices, COL_PARENT_IDX] = -1
         child_batch[:, root_indices, COL_DEPTH] = 0
         
-        branch_types_tensor = torch.tensor([ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT], device=device)
+        branch_types_tensor = torch.tensor([ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT], device=device, dtype=p1_batch.dtype)
         child_batch[:, root_indices, COL_PARAM_1] = branch_types_tensor
 
-        # 3. 각 자식의 각 브랜치에 대해 어떤 부모로부터 유전받을지 랜덤하게 결정
-        # donor_map: (num_to_cross, 3) 크기. 0은 p1, 1은 p2를 의미.
         donor_map = torch.randint(0, 2, (num_to_cross, 3), device=device, dtype=torch.int32)
         
-        # ======================================================================
-        # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ C++/CUDA 구현 호출 부분 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-        # ======================================================================
-        # [수정] CUDA 커널이 사용할 버퍼들을 각각 생성하여 전달
-        bfs_queue_buffer = torch.empty(
-            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
-        )
-        result_indices_buffer = torch.empty(
-            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
-        )
-        old_to_new_map_buffer = torch.empty(
-            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
-        )
+        bfs_queue_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+        result_indices_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+        old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         
+        # GPU 텐서들로 CUDA 커널 호출 (입력 p1_batch, p2_batch는 이미 GPU에 있음)
         gatree_cuda.copy_branches_batch(
-            child_batch,
-            p1_batch,
-            p2_batch,
-            donor_map,
-            bfs_queue_buffer,
-            result_indices_buffer,
-            old_to_new_map_buffer
+            child_batch, p1_batch, p2_batch, donor_map,
+            bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer
         )
-        # ======================================================================
-        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ C++/CUDA 구현 호출 부분 ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-        # ======================================================================
 
-        return child_batch
+        return child_batch # GPU 텐서를 그대로 반환

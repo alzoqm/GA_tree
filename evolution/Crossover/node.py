@@ -1,6 +1,7 @@
 # evolution/Crossover/node.py
 import torch
 from typing import Tuple
+from .base import BaseCrossover
 
 # 프로젝트 구조에 따라 model.py에서 상수 임포트
 from models.constants import (
@@ -84,11 +85,12 @@ class NodeCrossover(BaseCrossover):
 
     def _perform_crossover_batch(self, p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:
         """
-        [개선 2] '배치' 단위로 교차를 수행하고, child1과 child2 중 랜덤하게 하나를 반환합니다.
+        [수정됨] '배치' 단위로 교차를 수행하며, 입력과 출력이 모두 GPU 텐서입니다.
         """
         if gatree_cuda is None:
             raise RuntimeError("gatree_cuda module is not loaded. Cannot perform crossover.")
-
+        
+        # 입력 p1, p2는 이미 GPU 텐서라고 가정
         child1, child2 = p1.clone(), p2.clone()
         
         for node_type in [self.NODE_TYPE_DECISION, self.NODE_TYPE_ACTION]:
@@ -106,4 +108,4 @@ class NodeCrossover(BaseCrossover):
         selection_mask = torch.rand(num_to_cross, 1, 1, device=p1.device) < 0.5
         final_children = torch.where(selection_mask, child1, child2)
 
-        return final_children
+        return final_children # GPU 텐서를 그대로 반환
