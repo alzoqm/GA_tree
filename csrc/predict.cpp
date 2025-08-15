@@ -6,7 +6,7 @@
 #include "value_mutation_kernel.cuh"
 #include "reorganize_kernel.cuh"
 #include "constants.h"
-#include "crossover_kernel.cuh" // <--- [신규] 교차 커널 헤더 추가
+#include "crossover_kernel.cuh" 
 
 
 // ==============================================================================
@@ -22,7 +22,7 @@ void check_predict_tensors(
     const torch::Tensor& results,
     const torch::Tensor& bfs_queue_buffer) {
 
-    // Device, Data Type, Contiguity, Dimension 검사 (이전과 동일)
+    // Device, Data Type, Contiguity, Dimension 검사
     TORCH_CHECK(population.is_cuda() && features.is_cuda() && positions.is_cuda() &&
                 next_indices.is_cuda() && offset_array.is_cuda() && child_indices.is_cuda() &&
                 results.is_cuda() && bfs_queue_buffer.is_cuda(),
@@ -129,7 +129,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("reorganize_population", &reorganize_population_cuda, 
           "Reorganize the population tensor on GPU to remove fragmentation.");
 
-    // --- [신규] 교차(Crossover) 관련 CUDA 함수 바인딩 ---
+    // --- 교차(Crossover) 관련 CUDA 함수 바인딩 ---
     m.def("get_contextual_mask",
         [](const torch::Tensor& trees, int node_type, int branch_type) {
             auto options = torch::TensorOptions().device(trees.device()).dtype(torch::kBool);
@@ -152,8 +152,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("p1_batch"), 
         py::arg("p2_batch"), 
         py::arg("donor_map"),
-        py::arg("bfs_queue_buffer"),      // <--- [수정]
-        py::arg("result_indices_buffer"), // <--- [수정]
-        py::arg("old_to_new_map_buffer")  // <--- [수정]
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer")
+    );
+    
+    // [수정된] SubtreeCrossover 바인딩 (시그니처 변경)
+    m.def("subtree_crossover_batch", &subtree_crossover_batch_cuda,
+        "Performs subtree crossover on a batch of parents using CUDA.",
+        py::arg("child1_out"),
+        py::arg("child2_out"),
+        py::arg("p1_batch"),
+        py::arg("p2_batch"),
+        py::arg("mode"),
+        py::arg("max_depth"),
+        py::arg("max_nodes"),
+        py::arg("max_retries"),
+        py::arg("branch_perm"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer"),
+        py::arg("p1_candidates_buffer"), // <--- 신규 인자
+        py::arg("p2_candidates_buffer")  // <--- 신규 인자
     );
 }

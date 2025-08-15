@@ -76,7 +76,6 @@ __global__ void swap_node_params_kernel(
     k = min(k, max_swaps);
 
     // --- 3. 교환 수행 (단일 스레드 내 루프) ---
-    // 이 방식은 병렬성은 낮지만, 구현이 간단하고 메모리 오류 위험이 적습니다.
     for (int i = 0; i < k; ++i) {
         // p1에서 랜덤 인덱스 선택
         int p1_rand_n = (int)(curand_uniform(&state) * p1_count);
@@ -127,7 +126,7 @@ __device__ int find_subtree_nodes_device(
     int* result_indices,    // 스레드별 결과 저장 버퍼
     int max_nodes)
 {
-    if (tree_ptr[root_idx * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
+    if (root_idx < 0 || root_idx >= max_nodes || tree_ptr[root_idx * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
         return 0;
     }
     
@@ -139,14 +138,14 @@ __device__ int find_subtree_nodes_device(
     while (head < tail) {
         int current_idx = queue_buffer[head++];
         
-        // 부모-자식 관계는 전역 메모리를 순회하며 찾아야 함
         for (int i = 0; i < max_nodes; ++i) {
             if ((int)tree_ptr[i * NODE_INFO_DIM + COL_PARENT_IDX] == current_idx) {
-                if (tail < max_nodes) {
+                if (tail < max_nodes) { // 버퍼 오버플로우 방지
                     queue_buffer[tail++] = i;
-                    result_indices[count++] = i;
+                    if (count < max_nodes) { // 버퍼 오버플로우 방지
+                        result_indices[count++] = i;
+                    }
                 } else {
-                    // 큐 버퍼가 꽉 차면 탐색 중단 (에러 방지)
                     return count;
                 }
             }
@@ -164,9 +163,9 @@ __global__ void copy_branches_kernel(
     const float* p1_batch_ptr,
     const float* p2_batch_ptr,
     const int* donor_map_ptr,
-    int* bfs_queue_buffer_ptr,      // <--- [수정]
-    int* result_indices_buffer_ptr, // <--- [수정]
-    int* old_to_new_map_buffer_ptr, // <--- [수정]
+    int* bfs_queue_buffer_ptr,
+    int* result_indices_buffer_ptr,
+    int* old_to_new_map_buffer_ptr,
     int batch_size,
     int max_nodes)
 {
@@ -178,43 +177,36 @@ __global__ void copy_branches_kernel(
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     
-    // [수정] 각 버퍼에 대한 포인터를 직접 계산
     int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
     int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
     int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
 
-    int child_next_idx = 3; // 루트 분기(0,1,2) 다음부터 채움
+    int child_next_idx = 3; 
 
     // --- 2. 3개의 브랜치(LONG, HOLD, SHORT)에 대해 순차적으로 복사 ---
     for (int b_idx = 0; b_idx < 3; ++b_idx) {
         int donor_choice = donor_map_ptr[batch_idx * 3 + b_idx];
         const float* donor_ptr = (donor_choice == 0) ? p1_ptr : p2_ptr;
 
-        // --- 3. 기증 부모에서 해당 브랜치의 직계 자식(서브트리 루트) 찾기 ---
         for (int donor_node_idx = 0; donor_node_idx < max_nodes; ++donor_node_idx) {
             if ((int)donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_PARENT_IDX] == b_idx) {
                 int subtree_root_idx = donor_node_idx;
                 
-                // --- 4. 서브트리 정보 수집 및 유효성 검사 ---
                 int subtree_size = find_subtree_nodes_device(donor_ptr, subtree_root_idx, my_queue, my_results, max_nodes);
 
                 if (child_next_idx + subtree_size > max_nodes) {
-                    continue; // 공간 부족 시 이 서브트리는 건너뜀
+                    continue; 
                 }
 
-                // --- 5. 서브트리 복사 ---
-                // a. old_to_new_map 생성 (전체 맵 초기화)
                 for(int i=0; i<max_nodes; ++i) my_old_to_new_map[i] = -1;
                 for (int k = 0; k < subtree_size; ++k) {
                     my_old_to_new_map[my_results[k]] = child_next_idx + k;
                 }
 
-                // b. 깊이 오프셋 계산
                 float dest_parent_depth = child_ptr[b_idx * NODE_INFO_DIM + COL_DEPTH];
                 float source_root_depth = donor_ptr[subtree_root_idx * NODE_INFO_DIM + COL_DEPTH];
                 float depth_offset = (dest_parent_depth + 1) - source_root_depth;
 
-                // c. 노드 데이터 복사 및 업데이트
                 for (int k = 0; k < subtree_size; ++k) {
                     int old_idx = my_results[k];
                     int new_idx = my_old_to_new_map[old_idx];
@@ -228,7 +220,7 @@ __global__ void copy_branches_kernel(
                     
                     int old_parent_idx = (int)src_node_data[COL_PARENT_IDX];
                     if (old_idx == subtree_root_idx) {
-                        dest_node_data[COL_PARENT_IDX] = (float)b_idx; // 새 부모는 루트 분기
+                        dest_node_data[COL_PARENT_IDX] = (float)b_idx;
                     } else {
                         dest_node_data[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
                     }
@@ -239,6 +231,190 @@ __global__ void copy_branches_kernel(
     }
 }
 
+// ==============================================================================
+//       [수정된] 커널 4: SubtreeCrossover를 위한 배치 커널 및 헬퍼 함수
+// ==============================================================================
+
+__device__ int get_root_branch_type_device(const float* tree_ptr, int node_idx, int max_nodes) {
+    int current_idx = node_idx;
+    while (current_idx >= 0 && current_idx < max_nodes) {
+        int parent_idx = (int)tree_ptr[current_idx * NODE_INFO_DIM + COL_PARENT_IDX];
+        if (parent_idx == -1) {
+            return (int)tree_ptr[current_idx * NODE_INFO_DIM + COL_PARAM_1];
+        }
+        current_idx = parent_idx;
+    }
+    return -1; // Error or root not found
+}
+
+__device__ int get_active_node_count(const float* tree_ptr, int max_nodes) {
+    int count = 0;
+    for (int i = 0; i < max_nodes; ++i) {
+        if (tree_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED) {
+            count++;
+        }
+    }
+    return count;
+}
+
+__device__ int get_max_relative_depth(const float* tree_ptr, int* indices, int count, int max_nodes) {
+    if (count == 0) return 0;
+    int root_node_idx = indices[0];
+    if (root_node_idx < 0 || root_node_idx >= max_nodes) return 0;
+
+    float root_depth = tree_ptr[root_node_idx * NODE_INFO_DIM + COL_DEPTH];
+    float max_abs_depth = root_depth;
+    for (int i = 1; i < count; ++i) {
+        int current_node_idx = indices[i];
+        if (current_node_idx < 0 || current_node_idx >= max_nodes) continue;
+        float current_depth = tree_ptr[current_node_idx * NODE_INFO_DIM + COL_DEPTH];
+        if (current_depth > max_abs_depth) {
+            max_abs_depth = current_depth;
+        }
+    }
+    return (int)(max_abs_depth - root_depth);
+}
+
+__device__ void transplant_one_way_device(
+    float* child_ptr, const float* recipient_ptr, const float* donor_ptr,
+    int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
+    int* my_old_to_new_map, int* my_empty_slots_buffer, int max_nodes)
+{
+    // 1. recipient로부터 child를 초기화
+    for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
+
+    // 2. child에서 제거될 서브트리 영역을 비움
+    for (int i = 0; i < r_count; ++i) {
+        int idx_to_clear = r_indices[i];
+        if (idx_to_clear >= 0 && idx_to_clear < max_nodes) {
+            child_ptr[idx_to_clear * NODE_INFO_DIM + COL_NODE_TYPE] = NODE_TYPE_UNUSED;
+        }
+    }
+
+    // 3. 비어있는 슬롯 찾기
+    int empty_count = 0;
+    for (int i = 0; i < max_nodes && empty_count < d_count; ++i) {
+        if (child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
+            my_empty_slots_buffer[empty_count++] = i;
+        }
+    }
+    if (empty_count < d_count) return; // 공간 부족 시 이식 중단
+
+    // 4. old_to_new_map 생성
+    for (int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
+    for (int i = 0; i < d_count; ++i) {
+        my_old_to_new_map[d_indices[i]] = my_empty_slots_buffer[i];
+    }
+    
+    // 5. 깊이 오프셋 계산
+    int r_parent_idx = (int)recipient_ptr[r_idx * NODE_INFO_DIM + COL_PARENT_IDX];
+    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return; // 유효하지 않은 부모
+    float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
+    float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
+
+    // 6. 노드 복사 및 업데이트
+    for (int i = 0; i < d_count; ++i) {
+        int old_idx = d_indices[i];
+        int new_idx = my_old_to_new_map[old_idx];
+        if (new_idx == -1) continue;
+
+        const float* src_node = donor_ptr + old_idx * NODE_INFO_DIM;
+        float* dest_node = child_ptr + new_idx * NODE_INFO_DIM;
+
+        for(int d=0; d<NODE_INFO_DIM; ++d) dest_node[d] = src_node[d];
+        dest_node[COL_DEPTH] += depth_offset;
+        
+        int old_parent_idx = (int)src_node[COL_PARENT_IDX];
+        if (old_idx == d_idx) {
+            dest_node[COL_PARENT_IDX] = (float)r_parent_idx;
+        } else {
+            dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
+        }
+    }
+}
+
+
+__global__ void subtree_crossover_kernel(
+    float* child1_out_ptr, float* child2_out_ptr,
+    const float* p1_batch_ptr, const float* p2_batch_ptr,
+    int mode, int max_depth, int max_nodes, int max_retries,
+    const int* branch_perm_ptr,
+    int* bfs_queue_buffer_ptr, int* result_indices_buffer_ptr, int* old_to_new_map_buffer_ptr,
+    int* p1_candidates_buffer_ptr, int* p2_candidates_buffer_ptr,
+    int batch_size)
+{
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    // --- 1. 스레드별 포인터 및 버퍼 설정 ---
+    float* c1_ptr = child1_out_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    float* c2_ptr = child2_out_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+
+    int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
+    int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
+    int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
+    int* p1_candidates = p1_candidates_buffer_ptr + batch_idx * max_nodes;
+    int* p2_candidates = p2_candidates_buffer_ptr + batch_idx * max_nodes;
+
+    curandState state;
+    curand_init(batch_idx, 0, 0, &state);
+
+    bool success = false;
+    for (int retry = 0; retry < max_retries && !success; ++retry) {
+        // --- 2. 교차 후보군 선택 ---
+        int p1_cand_count = 0, p2_cand_count = 0;
+        
+        if (mode == 0) { // free mode
+            for(int i=0; i<max_nodes; ++i) {
+                if(p1_ptr[i*NODE_INFO_DIM + COL_PARENT_IDX] != -1) p1_candidates[p1_cand_count++] = i;
+                if(p2_ptr[i*NODE_INFO_DIM + COL_PARENT_IDX] != -1) p2_candidates[p2_cand_count++] = i;
+            }
+        } else { // context mode
+            int branch_type_to_try = branch_perm_ptr[batch_idx * 3 + (retry % 3)];
+            for(int i=0; i<max_nodes; ++i) {
+                if(p1_ptr[i*NODE_INFO_DIM + COL_PARENT_IDX] != -1 && get_root_branch_type_device(p1_ptr, i, max_nodes) == branch_type_to_try) p1_candidates[p1_cand_count++] = i;
+                if(p2_ptr[i*NODE_INFO_DIM + COL_PARENT_IDX] != -1 && get_root_branch_type_device(p2_ptr, i, max_nodes) == branch_type_to_try) p2_candidates[p2_cand_count++] = i;
+            }
+        }
+
+        if (p1_cand_count == 0 || p2_cand_count == 0) continue;
+        
+        int p1_idx = p1_candidates[(int)(curand_uniform(&state) * p1_cand_count)];
+        int p2_idx = p2_candidates[(int)(curand_uniform(&state) * p2_cand_count)];
+
+        // --- 3. 서브트리 정보 수집 ---
+        int s1_count = find_subtree_nodes_device(p1_ptr, p1_idx, my_queue, my_results, max_nodes);
+        int s2_count = find_subtree_nodes_device(p2_ptr, p2_idx, my_queue + max_nodes/2, my_results + max_nodes/2, max_nodes); // 버퍼 분할 사용
+
+        int p1_total_nodes = get_active_node_count(p1_ptr, max_nodes);
+        int p2_total_nodes = get_active_node_count(p2_ptr, max_nodes);
+        
+        // --- 4. 제약 조건 검증 ---
+        int p1_parent_idx = (int)p1_ptr[p1_idx*NODE_INFO_DIM + COL_PARENT_IDX];
+        if(p1_parent_idx < 0 || p1_parent_idx >= max_nodes) continue;
+        float p1_ins_depth = p1_ptr[p1_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
+        if(p1_ins_depth + get_max_relative_depth(p2_ptr, my_results + max_nodes/2, s2_count, max_nodes) > max_depth) continue;
+        if(p1_total_nodes - s1_count + s2_count > max_nodes) continue;
+
+        int p2_parent_idx = (int)p2_ptr[p2_idx*NODE_INFO_DIM + COL_PARENT_IDX];
+        if(p2_parent_idx < 0 || p2_parent_idx >= max_nodes) continue;
+        float p2_ins_depth = p2_ptr[p2_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
+        if(p2_ins_depth + get_max_relative_depth(p1_ptr, my_results, s1_count, max_nodes) > max_depth) continue;
+        if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
+
+        // --- 5. 이식 수행 ---
+        transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr, p1_idx, p2_idx, my_results, s1_count, my_results + max_nodes/2, s2_count, my_old_to_new_map, my_queue, max_nodes);
+        transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr, p2_idx, p1_idx, my_results + max_nodes/2, s2_count, my_results, s1_count, my_old_to_new_map, my_queue, max_nodes);
+        success = true;
+    }
+
+    if (!success) {
+        for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) c1_ptr[i] = p1_ptr[i];
+        for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) c2_ptr[i] = p2_ptr[i];
+    }
+}
 
 // ==============================================================================
 //                       C++ 래퍼 함수 (커널 런처)
@@ -256,6 +432,7 @@ void get_contextual_mask_cuda(const torch::Tensor& trees, torch::Tensor& output_
         trees.data_ptr<float>(),
         output_mask.data_ptr<bool>(),
         batch_size, max_nodes, node_type, branch_type);
+    cudaDeviceSynchronize();
 }
 
 void swap_node_params_cuda(torch::Tensor& c1, torch::Tensor& c2, const torch::Tensor& p1_mask, const torch::Tensor& p2_mask) {
@@ -269,6 +446,7 @@ void swap_node_params_cuda(torch::Tensor& c1, torch::Tensor& c2, const torch::Te
         p1_mask.data_ptr<bool>(),
         p2_mask.data_ptr<bool>(),
         batch_size, max_nodes);
+    cudaDeviceSynchronize();
 }
 
 void copy_branches_batch_cuda(
@@ -276,25 +454,62 @@ void copy_branches_batch_cuda(
     const torch::Tensor& p1_batch,
     const torch::Tensor& p2_batch,
     const torch::Tensor& donor_map,
-    torch::Tensor& bfs_queue_buffer,      // <--- [수정]
-    torch::Tensor& result_indices_buffer, // <--- [수정]
-    torch::Tensor& old_to_new_map_buffer  // <--- [수정]
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer
 )
 {
     const int batch_size = child_batch.size(0);
     if (batch_size == 0) return;
     const int max_nodes = child_batch.size(1);
 
-    // 각 스레드 블록이 하나의 자식을 처리
     copy_branches_kernel<<<batch_size, 1>>>(
         child_batch.data_ptr<float>(),
         p1_batch.data_ptr<float>(),
         p2_batch.data_ptr<float>(),
         donor_map.data_ptr<int>(),
-        bfs_queue_buffer.data_ptr<int>(),      // <--- [수정]
-        result_indices_buffer.data_ptr<int>(), // <--- [수정]
-        old_to_new_map_buffer.data_ptr<int>(), // <--- [수정]
+        bfs_queue_buffer.data_ptr<int>(),
+        result_indices_buffer.data_ptr<int>(),
+        old_to_new_map_buffer.data_ptr<int>(),
         batch_size,
         max_nodes
     );
+    cudaDeviceSynchronize();
+}
+
+// [수정된] SubtreeCrossover 래퍼 함수
+void subtree_crossover_batch_cuda(
+    torch::Tensor& child1_out,
+    torch::Tensor& child2_out,
+    const torch::Tensor& p1_batch,
+    const torch::Tensor& p2_batch,
+    int mode,
+    int max_depth,
+    int max_nodes,
+    int max_retries,
+    const torch::Tensor& branch_perm,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer,
+    torch::Tensor& p1_candidates_buffer,
+    torch::Tensor& p2_candidates_buffer)
+{
+    const int batch_size = p1_batch.size(0);
+    if (batch_size == 0) return;
+
+    subtree_crossover_kernel<<<batch_size, 1>>>(
+        child1_out.data_ptr<float>(),
+        child2_out.data_ptr<float>(),
+        p1_batch.data_ptr<float>(),
+        p2_batch.data_ptr<float>(),
+        mode, max_depth, max_nodes, max_retries,
+        branch_perm.data_ptr<int>(),
+        bfs_queue_buffer.data_ptr<int>(),
+        result_indices_buffer.data_ptr<int>(),
+        old_to_new_map_buffer.data_ptr<int>(),
+        p1_candidates_buffer.data_ptr<int>(),
+        p2_candidates_buffer.data_ptr<int>(),
+        batch_size
+    );
+    cudaDeviceSynchronize();
 }
