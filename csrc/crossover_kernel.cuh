@@ -22,5 +22,7 @@ void copy_branches_batch_cuda(
     const torch::Tensor& p1_batch,
     const torch::Tensor& p2_batch,
     const torch::Tensor& donor_map,
-    torch::Tensor& scratch_buffer
+    torch::Tensor& bfs_queue_buffer,      // <--- [수정]
+    torch::Tensor& result_indices_buffer, // <--- [수정]
+    torch::Tensor& old_to_new_map_buffer  // <--- [수정]
 );

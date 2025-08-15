@@ -164,7 +164,9 @@ __global__ void copy_branches_kernel(
     const float* p1_batch_ptr,
     const float* p2_batch_ptr,
     const int* donor_map_ptr,
-    int* scratch_buffer_ptr,
+    int* bfs_queue_buffer_ptr,      // <--- [수정]
+    int* result_indices_buffer_ptr, // <--- [수정]
+    int* old_to_new_map_buffer_ptr, // <--- [수정]
     int batch_size,
     int max_nodes)
 {
@@ -176,11 +178,10 @@ __global__ void copy_branches_kernel(
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     
-    int scratch_size_per_thread = max_nodes * 3;
-    int* my_scratch_ptr = scratch_buffer_ptr + batch_idx * scratch_size_per_thread;
-    int* my_queue = my_scratch_ptr;
-    int* my_results = my_scratch_ptr + max_nodes;
-    int* my_old_to_new_map = my_scratch_ptr + max_nodes * 2;
+    // [수정] 각 버퍼에 대한 포인터를 직접 계산
+    int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
+    int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
+    int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
 
     int child_next_idx = 3; // 루트 분기(0,1,2) 다음부터 채움
 
@@ -275,7 +276,10 @@ void copy_branches_batch_cuda(
     const torch::Tensor& p1_batch,
     const torch::Tensor& p2_batch,
     const torch::Tensor& donor_map,
-    torch::Tensor& scratch_buffer)
+    torch::Tensor& bfs_queue_buffer,      // <--- [수정]
+    torch::Tensor& result_indices_buffer, // <--- [수정]
+    torch::Tensor& old_to_new_map_buffer  // <--- [수정]
+)
 {
     const int batch_size = child_batch.size(0);
     if (batch_size == 0) return;
@@ -287,7 +291,9 @@ void copy_branches_batch_cuda(
         p1_batch.data_ptr<float>(),
         p2_batch.data_ptr<float>(),
         donor_map.data_ptr<int>(),
-        scratch_buffer.data_ptr<int>(),
+        bfs_queue_buffer.data_ptr<int>(),      // <--- [수정]
+        result_indices_buffer.data_ptr<int>(), // <--- [수정]
+        old_to_new_map_buffer.data_ptr<int>(), // <--- [수정]
         batch_size,
         max_nodes
     );

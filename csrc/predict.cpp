@@ -152,6 +152,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("p1_batch"), 
         py::arg("p2_batch"), 
         py::arg("donor_map"),
-        py::arg("scratch_buffer")
+        py::arg("bfs_queue_buffer"),      // <--- [수정]
+        py::arg("result_indices_buffer"), // <--- [수정]
+        py::arg("old_to_new_map_buffer")  // <--- [수정]
     );
 }

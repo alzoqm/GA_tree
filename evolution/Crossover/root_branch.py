@@ -16,6 +16,7 @@ except ImportError:
     print("="*60)
     print(">>> 경고: 'gatree_cuda' 모듈을 찾을 수 없습니다.")
     print(">>> C++/CUDA 코드를 먼저 컴파일해야 합니다.")
+    print(">>> 프로젝트 루트에서 다음 명령을 실행하세요:")
     print(">>> python setup.py build_ext --inplace")
     print("="*60)
     gatree_cuda = None
@@ -100,17 +101,25 @@ class RootBranchCrossover(BaseCrossover):
         # ======================================================================
         # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ C++/CUDA 구현 호출 부분 ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
         # ======================================================================
-        # CUDA 커널이 사용할 스크래치 버퍼를 Python에서 생성하여 전달
-        # 각 스레드(자식)는 BFS 큐, 결과 인덱스, old_to_new 맵을 위한 공간이 필요
-        scratch_buffer_size_per_thread = self.max_nodes * 3 
-        scratch_buffer = torch.empty(
-            (num_to_cross, scratch_buffer_size_per_thread), 
-            dtype=torch.int32, 
-            device=device
+        # [수정] CUDA 커널이 사용할 버퍼들을 각각 생성하여 전달
+        bfs_queue_buffer = torch.empty(
+            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
+        )
+        result_indices_buffer = torch.empty(
+            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
+        )
+        old_to_new_map_buffer = torch.empty(
+            (num_to_cross, self.max_nodes), dtype=torch.int32, device=device
         )
         
         gatree_cuda.copy_branches_batch(
-            child_batch, p1_batch, p2_batch, donor_map, scratch_buffer
+            child_batch,
+            p1_batch,
+            p2_batch,
+            donor_map,
+            bfs_queue_buffer,
+            result_indices_buffer,
+            old_to_new_map_buffer
         )
         # ======================================================================
         # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ C++/CUDA 구현 호출 부분 ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
