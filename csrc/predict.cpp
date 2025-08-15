@@ -6,6 +6,7 @@
 #include "value_mutation_kernel.cuh"
 #include "reorganize_kernel.cuh"
 #include "constants.h"
+#include "crossover_kernel.cuh" // <--- [신규] 교차 커널 헤더 추가
 
 
 // ==============================================================================
@@ -127,4 +128,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // --- 재구성 함수 바인딩 ---
     m.def("reorganize_population", &reorganize_population_cuda, 
           "Reorganize the population tensor on GPU to remove fragmentation.");
+
+    // --- [신규] 교차(Crossover) 관련 CUDA 함수 바인딩 ---
+    m.def("get_contextual_mask",
+        [](const torch::Tensor& trees, int node_type, int branch_type) {
+            auto options = torch::TensorOptions().device(trees.device()).dtype(torch::kBool);
+            auto output_mask = torch::zeros({trees.size(0), trees.size(1)}, options);
+            get_contextual_mask_cuda(trees, output_mask, node_type, branch_type);
+            return output_mask;
+        },
+        "Get a mask for nodes matching a specific type and root branch context.",
+        py::arg("trees"), py::arg("node_type"), py::arg("branch_type")
+    );
+
+    m.def("swap_node_params", &swap_node_params_cuda,
+        "Swap node parameters between two populations based on given masks.",
+        py::arg("c1"), py::arg("c2"), py::arg("p1_mask"), py::arg("p2_mask")
+    );
 }
