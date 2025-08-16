@@ -6,6 +6,7 @@
 #include "value_mutation_kernel.cuh"
 #include "reorganize_kernel.cuh"
 #include "constants.h"
+#include "crossover_kernel.cuh" 
 
 
 // ==============================================================================
@@ -21,7 +22,7 @@ void check_predict_tensors(
     const torch::Tensor& results,
     const torch::Tensor& bfs_queue_buffer) {
 
-    // Device, Data Type, Contiguity, Dimension 검사 (이전과 동일)
+    // Device, Data Type, Contiguity, Dimension 검사
     TORCH_CHECK(population.is_cuda() && features.is_cuda() && positions.is_cuda() &&
                 next_indices.is_cuda() && offset_array.is_cuda() && child_indices.is_cuda() &&
                 results.is_cuda() && bfs_queue_buffer.is_cuda(),
@@ -127,4 +128,51 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // --- 재구성 함수 바인딩 ---
     m.def("reorganize_population", &reorganize_population_cuda, 
           "Reorganize the population tensor on GPU to remove fragmentation.");
+
+    // --- 교차(Crossover) 관련 CUDA 함수 바인딩 ---
+    m.def("get_contextual_mask",
+        [](const torch::Tensor& trees, int node_type, int branch_type) {
+            auto options = torch::TensorOptions().device(trees.device()).dtype(torch::kBool);
+            auto output_mask = torch::zeros({trees.size(0), trees.size(1)}, options);
+            get_contextual_mask_cuda(trees, output_mask, node_type, branch_type);
+            return output_mask;
+        },
+        "Get a mask for nodes matching a specific type and root branch context.",
+        py::arg("trees"), py::arg("node_type"), py::arg("branch_type")
+    );
+
+    m.def("swap_node_params", &swap_node_params_cuda,
+        "Swap node parameters between two populations based on given masks.",
+        py::arg("c1"), py::arg("c2"), py::arg("p1_mask"), py::arg("p2_mask")
+    );
+
+    m.def("copy_branches_batch", &copy_branches_batch_cuda,
+        "Performs root branch crossover on a batch of parents using CUDA.",
+        py::arg("child_batch"), 
+        py::arg("p1_batch"), 
+        py::arg("p2_batch"), 
+        py::arg("donor_map"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer")
+    );
+    
+    // [수정된] SubtreeCrossover 바인딩 (시그니처 변경)
+    m.def("subtree_crossover_batch", &subtree_crossover_batch_cuda,
+        "Performs subtree crossover on a batch of parents using CUDA.",
+        py::arg("child1_out"),
+        py::arg("child2_out"),
+        py::arg("p1_batch"),
+        py::arg("p2_batch"),
+        py::arg("mode"),
+        py::arg("max_depth"),
+        py::arg("max_nodes"),
+        py::arg("max_retries"),
+        py::arg("branch_perm"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer"),
+        py::arg("p1_candidates_buffer"), // <--- 신규 인자
+        py::arg("p2_candidates_buffer")  // <--- 신규 인자
+    );
 }

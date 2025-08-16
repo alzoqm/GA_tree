@@ -5,7 +5,7 @@
 
 # 1. 환경 및 경로 설정
 environment:
-  device: 'cpu' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
+  device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 42
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "dataset"
@@ -30,16 +30,16 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 512
-    max_nodes: 2048
-    max_depth: 100
-    max_children: 50
+    size: 128
+    max_nodes: 1024
+    max_depth: 50
+    max_children: 30
   evolution_loop:
     generations: 200
-    parent_pool_size: 128 # 교배 풀(Mating Pool) 크기
+    parent_pool_size: 32 # 교배 풀(Mating Pool) 크기
     elite_size: 8 # 다음 세대로 보존될 엘리트 개체 수
     best_chromosome_pool_size: 32 # 최종까지 보관할 누적 베스트 개체 수
-    warming_steps: 5 # 엘리트 누적 시작 전 초기 세대 수
+    warming_steps: 0 # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
 operators:

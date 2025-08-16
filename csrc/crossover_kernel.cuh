@@ -1,0 +1,46 @@
+// csrc/crossover_kernel.cuh
+#pragma once
+#include <torch/extension.h>
+
+// C++ 래퍼 함수 (Python에서 호출)
+void get_contextual_mask_cuda(
+    const torch::Tensor& trees,
+    torch::Tensor& output_mask,
+    int node_type,
+    int branch_type
+);
+
+void swap_node_params_cuda(
+    torch::Tensor& c1,
+    torch::Tensor& c2,
+    const torch::Tensor& p1_mask,
+    const torch::Tensor& p2_mask
+);
+
+void copy_branches_batch_cuda(
+    torch::Tensor& child_batch,
+    const torch::Tensor& p1_batch,
+    const torch::Tensor& p2_batch,
+    const torch::Tensor& donor_map,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer
+);
+
+// [신규] SubtreeCrossover를 위한 C++ 래퍼 함수 선언 (시그니처 변경)
+void subtree_crossover_batch_cuda(
+    torch::Tensor& child1_out,
+    torch::Tensor& child2_out,
+    const torch::Tensor& p1_batch,
+    const torch::Tensor& p2_batch,
+    int mode,
+    int max_depth,
+    int max_nodes,
+    int max_retries,
+    const torch::Tensor& branch_perm,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer,
+    torch::Tensor& p1_candidates_buffer, // <--- 신규 버퍼 추가
+    torch::Tensor& p2_candidates_buffer  // <--- 신규 버퍼 추가
+);
