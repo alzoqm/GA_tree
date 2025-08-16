@@ -172,6 +172,15 @@ __global__ void copy_branches_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
+    // [안전성] child 버퍼 전체를 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
+    // (블록당 1스레드 구성이라 직렬 초기화로 충분)
+    float* child_ptr_init = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    for (int i = 0; i < max_nodes; ++i) {
+        float* nd = child_ptr_init + i * NODE_INFO_DIM;
+        nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
+        // 부모/깊이/파라미터는 필요 시 이후 복사에서 덮어씀
+    }
+
     // --- 1. 스레드별 포인터 및 버퍼 설정 ---
     float* child_ptr = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
@@ -352,8 +361,13 @@ __global__ void subtree_crossover_kernel(
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
 
-    int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
-    int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
+    // [중요 수정] p1, p2 서브트리를 동시에 담기 위해 버퍼를 2*max_nodes로 사용
+    //   - 래퍼에서 bfs_queue_buffer/result_indices_buffer는 [batch, 2*max_nodes]로 할당되어야 함
+    int* my_queue1   = bfs_queue_buffer_ptr     + batch_idx * (2 * max_nodes);
+    int* my_queue2   = my_queue1                + max_nodes;
+    int* my_results1 = result_indices_buffer_ptr+ batch_idx * (2 * max_nodes);
+    int* my_results2 = my_results1              + max_nodes;
+
     int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
     int* p1_candidates = p1_candidates_buffer_ptr + batch_idx * max_nodes;
     int* p2_candidates = p2_candidates_buffer_ptr + batch_idx * max_nodes;
@@ -385,8 +399,8 @@ __global__ void subtree_crossover_kernel(
         int p2_idx = p2_candidates[(int)(curand_uniform(&state) * p2_cand_count)];
 
         // --- 3. 서브트리 정보 수집 ---
-        int s1_count = find_subtree_nodes_device(p1_ptr, p1_idx, my_queue, my_results, max_nodes);
-        int s2_count = find_subtree_nodes_device(p2_ptr, p2_idx, my_queue + max_nodes/2, my_results + max_nodes/2, max_nodes); // 버퍼 분할 사용
+        int s1_count = find_subtree_nodes_device(p1_ptr, p1_idx, my_queue1, my_results1, max_nodes);
+        int s2_count = find_subtree_nodes_device(p2_ptr, p2_idx, my_queue2, my_results2, max_nodes);
 
         int p1_total_nodes = get_active_node_count(p1_ptr, max_nodes);
         int p2_total_nodes = get_active_node_count(p2_ptr, max_nodes);
@@ -395,18 +409,27 @@ __global__ void subtree_crossover_kernel(
         int p1_parent_idx = (int)p1_ptr[p1_idx*NODE_INFO_DIM + COL_PARENT_IDX];
         if(p1_parent_idx < 0 || p1_parent_idx >= max_nodes) continue;
         float p1_ins_depth = p1_ptr[p1_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
-        if(p1_ins_depth + get_max_relative_depth(p2_ptr, my_results + max_nodes/2, s2_count, max_nodes) > max_depth) continue;
+        if(p1_ins_depth + get_max_relative_depth(p2_ptr, my_results2, s2_count, max_nodes) > max_depth) continue;
         if(p1_total_nodes - s1_count + s2_count > max_nodes) continue;
 
         int p2_parent_idx = (int)p2_ptr[p2_idx*NODE_INFO_DIM + COL_PARENT_IDX];
         if(p2_parent_idx < 0 || p2_parent_idx >= max_nodes) continue;
         float p2_ins_depth = p2_ptr[p2_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
-        if(p2_ins_depth + get_max_relative_depth(p1_ptr, my_results, s1_count, max_nodes) > max_depth) continue;
+        if(p2_ins_depth + get_max_relative_depth(p1_ptr, my_results1, s1_count, max_nodes) > max_depth) continue;
         if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
 
         // --- 5. 이식 수행 ---
-        transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr, p1_idx, p2_idx, my_results, s1_count, my_results + max_nodes/2, s2_count, my_old_to_new_map, my_queue, max_nodes);
-        transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr, p2_idx, p1_idx, my_results + max_nodes/2, s2_count, my_results, s1_count, my_old_to_new_map, my_queue, max_nodes);
+        transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
+            p1_idx, p2_idx,
+            my_results1, s1_count,
+            my_results2, s2_count,
+            my_old_to_new_map, my_queue1, max_nodes);
+
+        transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr,
+            p2_idx, p1_idx,
+            my_results2, s2_count,
+            my_results1, s1_count,
+            my_old_to_new_map, my_queue2, max_nodes);
         success = true;
     }
 
@@ -496,6 +519,18 @@ void subtree_crossover_batch_cuda(
 {
     const int batch_size = p1_batch.size(0);
     if (batch_size == 0) return;
+
+    // [중요] 버퍼 크기 검증: 큐/결과는 2*max_nodes, 그 외는 >= max_nodes
+    TORCH_CHECK(bfs_queue_buffer.dim() >= 2 && bfs_queue_buffer.size(1) >= 2*max_nodes,
+                "bfs_queue_buffer must have second dim >= 2*max_nodes");
+    TORCH_CHECK(result_indices_buffer.dim() >= 2 && result_indices_buffer.size(1) >= 2*max_nodes,
+                "result_indices_buffer must have second dim >= 2*max_nodes");
+    TORCH_CHECK(old_to_new_map_buffer.dim() >= 2 && old_to_new_map_buffer.size(1) >= max_nodes,
+                "old_to_new_map_buffer must have second dim >= max_nodes");
+    TORCH_CHECK(p1_candidates_buffer.dim() >= 2 && p1_candidates_buffer.size(1) >= max_nodes,
+                "p1_candidates_buffer must have second dim >= max_nodes");
+    TORCH_CHECK(p2_candidates_buffer.dim() >= 2 && p2_candidates_buffer.size(1) >= max_nodes,
+                "p2_candidates_buffer must have second dim >= max_nodes");
 
     subtree_crossover_kernel<<<batch_size, 1>>>(
         child1_out.data_ptr<float>(),

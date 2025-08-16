@@ -103,8 +103,11 @@ class SubtreeCrossover(BaseCrossover):
         # 출력 및 임시 버퍼들을 모두 GPU에 생성
         child1_out = torch.empty_like(p1_batch)
         child2_out = torch.empty_like(p2_batch)
-        bfs_queue_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-        result_indices_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+        
+        # [중요 수정] CUDA 커널의 버퍼 오버플로우를 막기 위해 큐와 결과 버퍼 크기를 2배로 할당
+        bfs_queue_buffer = torch.empty((num_to_cross, 2 * self.max_nodes), dtype=torch.int32, device=device)
+        result_indices_buffer = torch.empty((num_to_cross, 2 * self.max_nodes), dtype=torch.int32, device=device)
+        
         old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         p1_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
         p2_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
