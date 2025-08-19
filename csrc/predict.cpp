@@ -8,6 +8,10 @@
 #include "constants.h"
 #include "crossover_kernel.cuh" 
 
+// NEW includes
+#include "node_mutation_kernel.cuh"
+#include "mutation_utils_kernel.cuh"
+
 
 // ==============================================================================
 //           Helper 1: 예측 커널에 전달될 텐서 유효성 검사 함수 (변경 없음)
@@ -175,4 +179,52 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("p1_candidates_buffer"), // <--- 신규 인자
         py::arg("p2_candidates_buffer")  // <--- 신규 인자
     );
+
+    // --- NEW: add-node mutation ---
+    m.def("add_decision_nodes_batch", &add_decision_nodes_batch_cuda,
+        "Batch add-node mutation (edge split) with invariant guards.",
+        py::arg("trees"),
+        py::arg("num_to_add"),
+        py::arg("max_depth"),
+        py::arg("max_nodes"),
+        py::arg("max_add_nodes"),
+        py::arg("out_new_node_indices"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer"));
+
+    // --- NEW: mutation utils (GPU variants of utils.py) ---
+    m.def("find_subtree_nodes_batch", &find_subtree_nodes_batch_cuda,
+        "Collect subtree nodes for each (b, root_idx) into result buffer.",
+        py::arg("trees"),
+        py::arg("root_indices"),           // (B,) int32 or (-1 for skip)
+        py::arg("max_nodes"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("out_counts"));            // (B,) int32
+
+    m.def("update_subtree_depth_batch", &update_subtree_depth_batch_cuda,
+        "Delta-add to depth for each subtree.",
+        py::arg("trees"),
+        py::arg("root_indices"),           // (B,)
+        py::arg("delta"),
+        py::arg("max_nodes"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"));
+
+    m.def("get_subtree_max_depth_batch", &get_subtree_max_depth_batch_cuda,
+        "Return max depth over subtree for each (b,root).",
+        py::arg("trees"),
+        py::arg("root_indices"),           // (B,)
+        py::arg("max_nodes"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("out_max_depths"));        // (B,) int32
+
+    m.def("find_empty_slots_batch", &find_empty_slots_batch_cuda,
+        "Return first 'count' UNUSED slots per tree into out_indices; -1 if not enough.",
+        py::arg("trees"),
+        py::arg("count"),                  // int
+        py::arg("max_nodes"),
+        py::arg("out_indices"));           // (B, count) int32
 }

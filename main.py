@@ -12,8 +12,8 @@ import numpy as np
 import torch.multiprocessing as mp # 멀티프로세싱 임포트
 
 # --- 0. 모듈 임포트 ---
-from data.data_download import fetch_historical_data, fetch_funding_rate_history
-from data.merge_dataset import run_feature_generation_from_yaml
+# from data.data_download import fetch_historical_data, fetch_funding_rate_history
+# from data.merge_dataset import run_feature_generation_from_yaml
 from models.model import GATreePop
 from evolution import Evolution
 from evolution.Selection import TournamentSelection, RouletteSelection

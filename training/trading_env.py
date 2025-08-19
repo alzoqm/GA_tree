@@ -501,7 +501,8 @@ def generation_valid(
         }
         
         train_fitness = calculate_fitness(train_metrics, weights=fitness_weights)
-        torch.save(gen_data, os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt'))
+        torch.save(gen_data, os.path.join(checkpoint_dir, f'chrom_generation_{gen_idx}.pt'))
+        evolution.population.save(os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt'))
         
         evolution.evolve(torch.from_numpy(train_fitness).to(device))
         population.population_tensor = population.population_tensor.to(device)
