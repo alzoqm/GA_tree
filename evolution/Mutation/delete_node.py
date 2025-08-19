@@ -1,110 +1,152 @@
-# evolution/Mutation/delete_node.py (수정 완료)
+# evolution/Mutation/delete_node.py
+# CUDA-accelerated batch DeleteNodeMutation implementation (one-shot)
 import torch
-import random
-from .base import BaseMutation
-from .utils import update_subtree_depth
 from typing import Dict, Any
+from .base import BaseMutation
 
-# model.py에서 상수 임포트
 from models.constants import (
-    COL_NODE_TYPE, COL_PARENT_IDX, NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH,
-    NODE_TYPE_DECISION, NODE_TYPE_ACTION
+    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH,
+    NODE_TYPE_UNUSED, NODE_TYPE_DECISION, NODE_TYPE_ROOT_BRANCH, NODE_TYPE_ACTION,
 )
+
+try:
+    import gatree_cuda
+except ImportError:
+    print("=" * 60)
+    print(">>> Warning: 'gatree_cuda' module not found.")
+    print(">>> Build the CUDA extension first:")
+    print(">>> python setup.py build_ext --inplace")
+    print("=" * 60)
+    gatree_cuda = None
+
 
 class DeleteNodeMutation(BaseMutation):
     """
-    중간 Decision 노드를 제거하고 자식들을 조부모에게 연결하는 변이.
-    (수정) 자식 노드를 많이 가진 '복잡한 연결점'을 우선적으로 삭제합니다.
-    (수정) ROOT_BRANCH의 직계 자식도 삭제 가능하지만, ROOT_BRANCH가 고아가 되는 것은 방지합니다.
+    Batch delete-node mutation (GPU).
+    All invariants are guarded inside the CUDA kernel. Python allocates work buffers and
+    triggers a single kernel call.
     """
-    def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None, max_delete_node: int = 5):
+    def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None,
+                 max_delete_nodes: int = 5, max_nodes: int = 256):
         super().__init__(prob)
         if config is None:
             raise ValueError("DeleteNodeMutation requires a 'config' dictionary.")
-        if max_delete_node < 1:
-            raise ValueError("max_delete_node must be at least 1.")
-            
-        self.max_children = config['max_children']
-        self.max_delete_node = max_delete_node
+        if not isinstance(max_delete_nodes, int) or max_delete_nodes < 1:
+            raise ValueError("max_delete_nodes must be a positive integer.")
+
+        self.config = config
+        self.max_children = int(config['max_children'])
+        self.max_depth    = int(config['max_depth'])
+        self.max_nodes    = int(max_nodes)
+        self.max_delete_nodes = int(max_delete_nodes)
 
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
-        mutated_chromosomes = chromosomes.clone()
+        if gatree_cuda is None:
+            raise RuntimeError("gatree_cuda module is not loaded. Cannot perform delete-node mutation.")
 
-        for i in range(mutated_chromosomes.shape[0]):
-            if random.random() >= self.prob:
-                continue
+        trees = chromosomes.clone()  # (B, max_nodes, node_dim)
+        B, N, D = trees.shape
+        device = trees.device
+        dtype  = trees.dtype
 
-            tree = mutated_chromosomes[i]
-            
-            nodes_to_delete_count = random.randint(1, self.max_delete_node)
+        mutate_mask = (torch.rand(B, device=device) < self.prob)
+        if not mutate_mask.any():
+            return trees
 
-            for _ in range(nodes_to_delete_count):
-                # --- 1. [수정] 삭제 가능한 노드 후보 찾기 (ROOT_BRANCH 자식 포함) ---
-                decision_mask = tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION
-                candidate_indices_all = decision_mask.nonzero(as_tuple=True)[0]
-                
-                if len(candidate_indices_all) == 0:
-                    break
-                
-                # --- 2. [신규] 유효성 검사 및 점수 계산 ---
-                valid_candidates = []
-                scores = []
-                for node_idx_tensor in candidate_indices_all:
-                    node_idx = node_idx_tensor.item()
-                    parent_idx = int(tree[node_idx, COL_PARENT_IDX].item())
+        num_to_delete = torch.zeros(B, device=device, dtype=torch.int32)
+        k = torch.randint(1, self.max_delete_nodes + 1, (mutate_mask.sum(),), device=device, dtype=torch.int32)
+        num_to_delete[mutate_mask] = k
 
-                    # --- [신규] 가드레일: ROOT_BRANCH가 고아가 되는 것을 방지 ---
-                    # 삭제될 노드의 부모가 ROOT_BRANCH인 경우 특별 검사를 수행합니다.
-                    if tree[parent_idx, COL_NODE_TYPE].item() == NODE_TYPE_ROOT_BRANCH:
-                        # 삭제될 노드가 ROOT_BRANCH의 유일한 자식인지 확인
-                        is_only_child = (tree[:, COL_PARENT_IDX] == parent_idx).sum().item() == 1
-                        # 삭제될 노드 자신에게 자식이 없는지 확인
-                        has_no_children = not (tree[:, COL_PARENT_IDX] == node_idx).any()
-                        
-                        # 유일한 자식이면서 자신도 자식이 없다면, 이 변이는 ROOT_BRANCH를 고아로 만듭니다.
-                        # 이런 경우, 이 노드는 삭제 후보에서 제외합니다.
-                        if is_only_child and has_no_children:
-                            continue # 다음 후보로 넘어감
-                    # --- [신규] 가드레일 끝 ---
+        # ---- Work buffers (ALL allocated in Python; no device arrays in kernels) ----
+        bfs_queue_buffer        = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
+        result_indices_buffer   = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
 
-                    children_of_deleted = (tree[:, COL_PARENT_IDX] == node_idx).nonzero(as_tuple=True)[0]
-                    children_of_parent = (tree[:, COL_PARENT_IDX] == parent_idx).nonzero(as_tuple=True)[0]
-                    
-                    # 제약 조건 검사 1: 최대 자식 수 초과 여부
-                    if (len(children_of_parent) - 1 + len(children_of_deleted)) > self.max_children:
-                        continue
-                    
-                    # 제약 조건 검사 2: 자식 타입 혼재 여부
-                    has_action_child = False
-                    if len(children_of_deleted) > 0 and (tree[children_of_deleted, COL_NODE_TYPE] == NODE_TYPE_ACTION).any():
-                        has_action_child = True
-                    if has_action_child and len(children_of_parent) > 1:
-                        continue
+        child_count_buffer      = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        act_cnt_buffer          = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        dec_cnt_buffer          = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
 
-                    valid_candidates.append(node_idx)
-                    # 점수 계산: 자식 수가 많을수록 높은 점수
-                    scores.append(float(len(children_of_deleted)))
+        candidate_indices_buffer  = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        candidate_weights_buffer  = torch.empty((B, self.max_nodes), dtype=torch.float32, device=device)
 
-                if not valid_candidates:
-                    continue 
+        deleted_nodes = torch.full((B, self.max_delete_nodes), -1, dtype=torch.int32, device=device)
 
-                # --- 3. [신규] 우선순위 기반 삭제 노드 선택 ---
-                scores_tensor = torch.tensor(scores, device=tree.device, dtype=torch.float)
-                scores_tensor += 1e-6 # 0점 방지
-                winner_position = torch.multinomial(scores_tensor, num_samples=1).item()
-                node_to_delete_idx = valid_candidates[winner_position]
-                # --- 우선순위 선택 로직 끝 ---
+        gatree_cuda.delete_nodes_batch(
+            trees,
+            num_to_delete,
+            int(self.max_children),
+            int(self.max_depth),
+            int(self.max_nodes),
+            int(self.max_delete_nodes),
+            deleted_nodes,
+            bfs_queue_buffer,
+            result_indices_buffer,
+            child_count_buffer,
+            act_cnt_buffer,
+            dec_cnt_buffer,
+            candidate_indices_buffer,
+            candidate_weights_buffer
+        )
 
-                # --- 4. 변이 수행 ---
-                parent_idx = int(tree[node_to_delete_idx, COL_PARENT_IDX].item())
-                children_of_deleted_indices = (tree[:, COL_PARENT_IDX] == node_to_delete_idx).nonzero(as_tuple=True)[0]
+        # Optional: develop-time validator (comment out in production)
+        # valid = _validate_tree_constraints(trees)
+        # assert valid.all(), "Post-delete invariants violated"
 
-                if len(children_of_deleted_indices) > 0:
-                    tree[children_of_deleted_indices, COL_PARENT_IDX] = parent_idx
-                    for child_idx_tensor in children_of_deleted_indices:
-                        update_subtree_depth(tree, child_idx_tensor.item(), -1)
+        return trees
 
-                tree[node_to_delete_idx].zero_()
-                tree[node_to_delete_idx, COL_NODE_TYPE] = NODE_TYPE_UNUSED
 
-        return mutated_chromosomes
+# Optional vector validator for development/debugging only.
+# NOTE: Keep it local to this file to avoid import cycles.
+def _validate_tree_constraints(trees: torch.Tensor) -> torch.Tensor:
+    B, N, D = trees.shape
+    dev = trees.device
+    t  = trees[..., COL_NODE_TYPE].long()
+    p  = trees[..., COL_PARENT_IDX].long()
+    d  = trees[..., COL_DEPTH]
+    used = (t != NODE_TYPE_UNUSED)
+
+    edge_mask = (p >= 0) & used
+    eb, ei = torch.nonzero(edge_mask, as_tuple=True)
+    ep = p[eb, ei]
+
+    Z = B * N
+    flat_parent = eb * N + ep
+    ones = torch.ones_like(flat_parent, dtype=torch.float32, device=dev)
+
+    child_cnt = torch.zeros((B, N), device=dev, dtype=torch.float32).view(-1)
+    child_cnt.index_add_(0, flat_parent, ones)
+    child_cnt = child_cnt.view(B, N)
+
+    act_edge = edge_mask & (t == NODE_TYPE_ACTION)
+    ab, ai = torch.nonzero(act_edge, as_tuple=True); ap = p[ab, ai]
+    flat_parent_act = ab * N + ap
+    act_cnt = torch.zeros((B, N), device=dev, dtype=torch.float32).view(-1)
+    act_cnt.index_add_(0, flat_parent_act, torch.ones_like(flat_parent_act, dtype=torch.float32, device=dev))
+    act_cnt = act_cnt.view(B, N)
+
+    dec_edge = edge_mask & (t == NODE_TYPE_DECISION)
+    db, di = torch.nonzero(dec_edge, as_tuple=True); dp = p[db, di]
+    flat_parent_dec = db * N + dp
+    dec_cnt = torch.zeros((B, N), device=dev, dtype=torch.float32).view(-1)
+    dec_cnt.index_add_(0, flat_parent_dec, torch.ones_like(flat_parent_dec, dtype=torch.float32, device=dev))
+    dec_cnt = dec_cnt.view(B, N)
+
+    mix_violation   = (act_cnt > 0) & (dec_cnt > 0)
+    leaf_violation  = (child_cnt == 0) & used & (t != NODE_TYPE_ACTION)
+    multi_act_viols = (act_cnt > 1)
+    single_act_par  = (act_cnt > 0) & (child_cnt != 1)
+    inter_violation = (child_cnt > 0) & used & (t != NODE_TYPE_ROOT_BRANCH) & (t != NODE_TYPE_DECISION)
+    action_has_kids = (t == NODE_TYPE_ACTION) & (child_cnt > 0)
+
+    pd = torch.zeros_like(p, dtype=d.dtype); pd[edge_mask] = d[eb, ep]
+    depth_violation = torch.zeros((B, N), device=dev, dtype=torch.bool)
+    depth_violation[edge_mask] = (d[edge_mask] != (pd[edge_mask] + 1))
+
+    root_mask = (t == NODE_TYPE_ROOT_BRANCH) & used
+    root_orphan = root_mask & (child_cnt == 0)
+
+    any_violation = (
+        mix_violation | leaf_violation | multi_act_viols |
+        single_act_par | inter_violation | action_has_kids |
+        depth_violation | root_orphan
+    )
+    return (~any_violation).view(B, N).all(dim=1)
