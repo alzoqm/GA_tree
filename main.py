@@ -232,9 +232,9 @@ def main():
 
     mutation_ops = [
         AddNodeMutation(prob=mut_probs['add_node'], config=mutation_base_config, **mut_params['add_node_mutation']),
-        DeleteNodeMutation(prob=mut_probs['delete_node'], config=mutation_base_config, **mut_params['delete_node_mutation']),
-        AddSubtreeMutation(prob=mut_probs['add_subtree'], config=mutation_base_config, **mut_params['add_subtree_mutation']),
-        DeleteSubtreeMutation(prob=mut_probs['delete_subtree'], config=mutation_base_config),
+        DeleteNodeMutation(prob=mut_probs['delete_node'], config=mutation_base_config, **mut_params['delete_node_mutation'],),
+        # AddSubtreeMutation(prob=mut_probs['add_subtree'], config=mutation_base_config, **mut_params['add_subtree_mutation']),
+        # DeleteSubtreeMutation(prob=mut_probs['delete_subtree'], config=mutation_base_config),
         ReinitializeNodeMutation(prob=mut_probs['reinitialize_node'], config=mutation_base_config),
         NodeParamMutation(prob=mut_probs['node_param'], config=mutation_base_config, **mut_params['node_param_mutation'])
     ]

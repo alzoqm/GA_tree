@@ -14,12 +14,14 @@ setup(
                 'csrc/value_mutation_kernel.cu',
                 'csrc/reorganize_kernel.cu',
                 'csrc/crossover_kernel.cu',
-                'csrc/node_mutation_kernel.cu',   # <--- NEW
-                'csrc/mutation_utils_kernel.cu',  # <--- NEW
+                'csrc/node_mutation_kernel.cu',
+                'csrc/subtree_mutation_kernel.cu',
+                'csrc/mutation_utils_kernel.cu',
             ],
         )
     ],
     cmdclass={
         'build_ext': BuildExtension
-    }
+    },
+    verbose=True
 )

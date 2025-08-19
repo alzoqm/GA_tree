@@ -1,124 +1,199 @@
-# evolution/Mutation/add_subtree.py (수정됨)
+# evolution/Mutation/add_subtree.py
+# CUDA-accelerated batch AddSubtreeMutation (one-shot)
 import torch
-import random
-from .base import BaseMutation
-from .utils import find_empty_slots, create_random_node
 from typing import Dict, Any, Tuple
-
-# model.py에서 상수 임포트
+from .base import BaseMutation
 from models.constants import (
-    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, NODE_TYPE_UNUSED, NODE_TYPE_DECISION, 
-    NODE_TYPE_ACTION, NODE_TYPE_ROOT_BRANCH
+    COL_NODE_TYPE, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
+    NODE_TYPE_DECISION, NODE_TYPE_ACTION,
+    ROOT_BRANCH_HOLD, ROOT_BRANCH_LONG, ROOT_BRANCH_SHORT,
+    ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL,
+    ACTION_ADD_POSITION, ACTION_FLIP_POSITION,
 )
+
+try:
+    import gatree_cuda
+except ImportError:
+    print("="*60)
+    print(">>> Warning: 'gatree_cuda' module not found.")
+    print(">>> Build the CUDA extension first:")
+    print(">>> python setup.py build_ext --inplace")
+    print("="*60)
+    gatree_cuda = None
+
+
+class ActionParamSampler:
+    """
+    Vectorized GPU filler for ACTION node parameters.
+    - Action type depends on root-branch context (HOLD/LONG/SHORT).
+    - Parameters written via tensor ops; no Python loops.
+    """
+    def __init__(self, device: torch.device, dtype: torch.dtype):
+        self.device = device
+        self.dtype = dtype
+        self.actions_hold = torch.tensor([ACTION_NEW_LONG, ACTION_NEW_SHORT], device=device, dtype=dtype)
+        self.actions_trend = torch.tensor(
+            [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION],
+            device=device, dtype=dtype
+        )
+        self.root_hold  = torch.tensor([ROOT_BRANCH_HOLD],  device=device, dtype=dtype)
+        self.root_long  = torch.tensor([ROOT_BRANCH_LONG],  device=device, dtype=dtype)
+        self.root_short = torch.tensor([ROOT_BRANCH_SHORT], device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def fill_params_for_nodes(
+        self,
+        trees: torch.Tensor,
+        node_batch_idx: torch.Tensor,
+        node_indices: torch.Tensor,
+        root_branch_type: torch.Tensor
+    ) -> None:
+        if node_batch_idx.numel() == 0:
+            return
+        dev, dt = trees.device, trees.dtype
+        b, n, rb = node_batch_idx, node_indices, root_branch_type
+
+        is_hold  = (rb == self.root_hold.item())
+        is_long  = (rb == self.root_long.item())
+        is_short = (rb == self.root_short.item())
+
+        chosen = torch.full((b.numel(),), ACTION_CLOSE_ALL, device=dev, dtype=dt)
+        if is_hold.any():
+            idx = torch.nonzero(is_hold, as_tuple=True)[0]
+            pick = torch.randint(0, self.actions_hold.numel(), (idx.numel(),), device=dev)
+            chosen[idx] = self.actions_hold[pick]
+        long_or_short = is_long | is_short
+        if long_or_short.any():
+            idx = torch.nonzero(long_or_short, as_tuple=True)[0]
+            pick = torch.randint(0, self.actions_trend.numel(), (idx.numel(),), device=dev)
+            chosen[idx] = self.actions_trend[pick]
+
+        trees[b, n, COL_PARAM_1] = chosen
+
+        is_new   = (chosen == ACTION_NEW_LONG) | (chosen == ACTION_NEW_SHORT) | (chosen == ACTION_FLIP_POSITION)
+        is_close = (chosen == ACTION_CLOSE_PARTIAL)
+        is_add   = (chosen == ACTION_ADD_POSITION)
+
+        if is_new.any():
+            idx = torch.nonzero(is_new, as_tuple=True)[0]
+            bm, nm = b[idx], n[idx]
+            trees[bm, nm, COL_PARAM_2] = torch.rand(idx.numel(), device=dev, dtype=dt)
+            lev = torch.randint(1, 101, (idx.numel(),), device=dev, dtype=torch.long).to(dt)
+            trees[bm, nm, COL_PARAM_3] = lev
+
+        if is_close.any():
+            idx = torch.nonzero(is_close, as_tuple=True)[0]
+            bm, nm = b[idx], n[idx]
+            trees[bm, nm, COL_PARAM_2] = torch.rand(idx.numel(), device=dev, dtype=dt)
+
+        if is_add.any():
+            idx = torch.nonzero(is_add, as_tuple=True)[0]
+            bm, nm = b[idx], n[idx]
+            trees[bm, nm, COL_PARAM_2] = torch.rand(idx.numel(), device=dev, dtype=dt)
+
 
 class AddSubtreeMutation(BaseMutation):
     """
-    트리에 새로운 랜덤 서브트리를 추가하는 변이.
-    (수정) 깊이가 얕고 자식 추가 공간이 많은 '덜 발달한' 위치를 우선적으로 선택합니다.
-    (수정) ROOT_BRANCH 노드 아래에도 직접 추가할 수 있도록 허용합니다.
+    One-shot, batch AddSubtree mutation on GPU:
+    - Python allocates all buffers.
+    - CUDA kernel performs structural edits with invariant guards.
+    - DECISION/ACTION params filled via vectorized GPU samplers.
     """
-    def __init__(self, prob: float = 0.1, config: Dict[str, Any] = None,
-                 node_count_range: Tuple[int, int] = (2, 5)):
+    def __init__(
+        self,
+        prob: float = 0.1,
+        config: Dict[str, Any] = None,
+        node_count_range: Tuple[int, int] = (2, 5),
+        max_nodes: int = 256,
+        max_new_nodes: int = 32,
+    ):
         super().__init__(prob)
         if config is None:
             raise ValueError("AddSubtreeMutation requires a 'config' dictionary.")
         self.config = config
-        self.max_depth = config['max_depth']
-        self.max_children = config['max_children']
-        self.node_count_range = node_count_range
+        self.max_depth    = int(config['max_depth'])
+        self.max_children = int(config['max_children'])
+        self.node_count_range = (int(node_count_range[0]), int(node_count_range[1]))
+        self.max_nodes    = int(max_nodes)
+        self.max_new_nodes = int(max_new_nodes)
+
+        # Safety contract: parameter filling requires space to record all new nodes.
+        hi = self.node_count_range[1]
+        # Up to hi DECISION + hi ACTION (from dangling fix) = 2*hi
+        if self.max_new_nodes < 2 * hi:
+            raise ValueError(f"max_new_nodes ({max_new_nodes}) must be >= 2 * max(node_count_range) ({2 * hi}) to ensure all new nodes are recorded.")
+
+        self._dec_sampler = None
+        self._act_sampler = None
+
+    def _ensure_samplers(self, device: torch.device, dtype: torch.dtype):
+        # Reuse DecisionParamSampler from add_node.py (keeps style consistent)
+        from .add_node import DecisionParamSampler
+        if (self._dec_sampler is None) or (self._dec_sampler.device != device) or (self._dec_sampler.dtype != dtype):
+            self._dec_sampler = DecisionParamSampler(self.config, device=device, dtype=dtype)
+        if (self._act_sampler is None) or (self._act_sampler.device != device) or (self._act_sampler.dtype != dtype):
+            self._act_sampler = ActionParamSampler(device=device, dtype=dtype)
 
     def __call__(self, chromosomes: torch.Tensor) -> torch.Tensor:
-        mutated_chromosomes = chromosomes.clone()
+        if gatree_cuda is None:
+            raise RuntimeError("gatree_cuda module is not loaded. Cannot perform add-subtree mutation.")
+        if chromosomes.dtype != torch.float32:
+            raise ValueError("Trees must be float32 (integer fields encoded as floats).")
 
-        for i in range(mutated_chromosomes.shape[0]):
-            if random.random() >= self.prob:
-                continue
-                
-            tree = mutated_chromosomes[i]
-            
-            # --- 1. 유효한 부모 찾기 및 점수 계산 ---
-            # [변경] DECISION 노드 또는 ROOT_BRANCH 노드를 부모 후보로 선택
-            parent_type_mask = (tree[:, COL_NODE_TYPE] == NODE_TYPE_DECISION) | (tree[:, COL_NODE_TYPE] == NODE_TYPE_ROOT_BRANCH)
-            depth_mask = tree[:, COL_DEPTH] < self.max_depth - 1
-            
-            candidate_parents_indices = (parent_type_mask & depth_mask).nonzero(as_tuple=True)[0]
-            
-            valid_parents = []
-            scores = []
-            for p_idx_tensor in candidate_parents_indices:
-                p_idx = p_idx_tensor.item()
-                children_indices = (tree[:, COL_PARENT_IDX] == p_idx).nonzero(as_tuple=True)[0]
-                num_children = len(children_indices)
-                
-                if num_children < self.max_children:
-                    # [신규] 자식으로 Action 노드를 가지는지 확인 (Action 노드를 가지면 Decision 추가 불가)
-                    if num_children > 0 and (tree[children_indices, COL_NODE_TYPE] == NODE_TYPE_ACTION).any():
-                        continue
-                    
-                    valid_parents.append(p_idx)
-                    # [신규] 점수 계산 로직
-                    # 점수 = (남은 자식 슬롯 수) / (깊이 + 1)
-                    # -> 자식 추가 공간이 많고, 깊이가 얕을수록 높은 점수를 받음
-                    parent_depth = tree[p_idx, COL_DEPTH].item()
-                    score = (self.max_children - num_children) / (parent_depth + 1.0)
-                    scores.append(score)
+        trees = chromosomes.clone()
+        B, N, D = trees.shape
+        device, dtype = trees.device, trees.dtype
 
-            if not valid_parents:
-                continue
+        self._ensure_samplers(device, dtype)
 
-            # --- 2. [신규] 우선순위 기반 부모 선택 ---
-            scores_tensor = torch.tensor(scores, device=tree.device, dtype=torch.float)
-            scores_tensor += 1e-6 # 0점 방지
-            winner_position = torch.multinomial(scores_tensor, num_samples=1).item()
-            parent_idx = valid_parents[winner_position]
-            
-            # --- 3. 예산 및 슬롯 확인 ---
-            budget = random.randint(*self.node_count_range)
-            empty_slots = find_empty_slots(tree, budget)
-            if len(empty_slots) < budget:
-                continue
+        mutate_mask = (torch.rand(B, device=device) < self.prob)
+        if not mutate_mask.any():
+            return trees
 
-            # --- 4. 서브트리 성장 로직 (기존과 동일) ---
-            open_list = [parent_idx]
-            nodes_created = 0
-            
-            while nodes_created < budget and open_list:
-                current_parent_idx = random.choice(open_list)
-                open_list.remove(current_parent_idx)
+        num_to_grow = torch.zeros(B, device=device, dtype=torch.int32)
+        lo, hi = self.node_count_range
+        k = torch.randint(lo, hi + 1, (mutate_mask.sum(),), device=device, dtype=torch.int32)
+        num_to_grow[mutate_mask] = k
 
-                parent_depth = int(tree[current_parent_idx, COL_DEPTH].item())
-                
-                force_action = (parent_depth + 1 >= self.max_depth - 1)
-                add_action_node = force_action or (random.random() < 0.5)
+        # Work buffers allocated in Python (no device arrays in C/CUDA)
+        bfs_queue_buffer        = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
+        result_indices_buffer   = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
 
-                children_of_current_parent_mask = tree[:, COL_PARENT_IDX] == current_parent_idx
-                num_existing_children = children_of_current_parent_mask.sum().item()
+        child_count_buffer      = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        act_cnt_buffer          = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        dec_cnt_buffer          = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
 
-                if add_action_node:
-                    if num_existing_children > 0:
-                        continue
-                
-                if add_action_node:
-                    new_node_idx = create_random_node(tree, current_parent_idx, NODE_TYPE_ACTION, self.config)
-                    if new_node_idx != -1:
-                        nodes_created += 1
-                else:
-                    max_can_add = self.max_children - num_existing_children
-                    num_children_to_add = random.randint(1, max(1, max_can_add))
-                    num_children_to_add = min(num_children_to_add, budget - nodes_created)
-                    
-                    for _ in range(num_children_to_add):
-                        new_node_idx = create_random_node(tree, current_parent_idx, NODE_TYPE_DECISION, self.config)
-                        if new_node_idx != -1:
-                            nodes_created += 1
-                            open_list.append(new_node_idx)
-                        else:
-                            nodes_created = budget
-                            break
-            
-            for dangling_parent_idx in open_list:
-                children_mask = tree[:, COL_PARENT_IDX] == dangling_parent_idx
-                if not children_mask.any():
-                    create_random_node(tree, dangling_parent_idx, NODE_TYPE_ACTION, self.config)
+        candidate_indices_buffer = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        candidate_weights_buffer = torch.empty((B, self.max_nodes), dtype=torch.float32, device=device)
 
-        return mutated_chromosomes
+        new_decision_nodes = torch.full((B, self.max_new_nodes), -1, dtype=torch.int32, device=device)
+        new_action_nodes   = torch.full((B, self.max_new_nodes), -1, dtype=torch.int32, device=device)
+        action_root_type   = torch.full((B, self.max_new_nodes), -1, dtype=dtype, device=device)
+
+        gatree_cuda.add_subtrees_batch(
+            trees, num_to_grow,
+            int(self.max_children), int(self.max_depth),
+            int(self.max_nodes), int(self.max_new_nodes),
+            new_decision_nodes, new_action_nodes, action_root_type,
+            bfs_queue_buffer, result_indices_buffer,
+            child_count_buffer, act_cnt_buffer, dec_cnt_buffer,
+            candidate_indices_buffer, candidate_weights_buffer
+        )
+
+        # Vectorized parameter filling for new nodes
+        valid_dec = (new_decision_nodes >= 0)
+        if valid_dec.any():
+            db, di = torch.nonzero(valid_dec, as_tuple=True)
+            dec_nodes_flat = new_decision_nodes[db, di].to(torch.long)
+            self._dec_sampler.fill_params_for_nodes(trees, db, dec_nodes_flat)
+            trees[db, dec_nodes_flat, COL_NODE_TYPE] = torch.tensor(NODE_TYPE_DECISION, device=device, dtype=dtype)
+
+        valid_act = (new_action_nodes >= 0)
+        if valid_act.any():
+            ab, ai = torch.nonzero(valid_act, as_tuple=True)
+            act_nodes_flat = new_action_nodes[ab, ai].to(torch.long)
+            act_root_type  = action_root_type[ab, ai]
+            self._act_sampler.fill_params_for_nodes(trees, ab, act_nodes_flat, act_root_type)
+            trees[ab, act_nodes_flat, COL_NODE_TYPE] = torch.tensor(NODE_TYPE_ACTION, device=device, dtype=dtype)
+
+        return trees

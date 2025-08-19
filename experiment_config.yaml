@@ -72,7 +72,7 @@ operators:
     add_node_mutation:
       max_add_nodes: 5
     delete_node_mutation:
-      max_delete_node: 5
+      max_delete_nodes: 5
     add_subtree_mutation:
       node_count_range: [2, 5]
 

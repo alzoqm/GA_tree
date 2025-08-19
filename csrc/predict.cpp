@@ -10,6 +10,7 @@
 
 // NEW includes
 #include "node_mutation_kernel.cuh"
+#include "subtree_mutation_kernel.cuh"
 #include "mutation_utils_kernel.cuh"
 
 
@@ -244,4 +245,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("count"),                  // int
         py::arg("max_nodes"),
         py::arg("out_indices"));           // (B, count) int32
+
+    // --- NEW: AddSubtree batch mutation ---
+    m.def("add_subtrees_batch", &add_subtrees_batch_cuda,
+        "Batch add-subtree mutation with invariant guards.",
+        py::arg("trees"), py::arg("num_to_grow"),
+        py::arg("max_children"), py::arg("max_depth"), py::arg("max_nodes"), py::arg("max_new_nodes"),
+        py::arg("new_decision_nodes"), py::arg("new_action_nodes"), py::arg("action_root_branch_type"),
+        py::arg("bfs_queue_buffer"), py::arg("result_indices_buffer"),
+        py::arg("child_count_buffer"), py::arg("act_cnt_buffer"), py::arg("dec_cnt_buffer"),
+        py::arg("candidate_indices_buffer"), py::arg("candidate_weights_buffer"));
 }
