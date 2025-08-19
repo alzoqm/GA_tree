@@ -193,6 +193,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("result_indices_buffer"),
         py::arg("old_to_new_map_buffer"));
 
+    m.def("delete_nodes_batch", &delete_nodes_batch_cuda,
+        "Batch delete-node mutation with invariant guards.",
+        py::arg("trees"),
+        py::arg("num_to_delete"),
+        py::arg("max_children"),
+        py::arg("max_depth"),
+        py::arg("max_nodes"),
+        py::arg("max_delete_nodes"),
+        py::arg("deleted_nodes"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("child_count_buffer"),
+        py::arg("act_cnt_buffer"),
+        py::arg("dec_cnt_buffer"),
+        py::arg("candidate_indices_buffer"),
+        py::arg("candidate_weights_buffer"));
+
     // --- NEW: mutation utils (GPU variants of utils.py) ---
     m.def("find_subtree_nodes_batch", &find_subtree_nodes_batch_cuda,
         "Collect subtree nodes for each (b, root_idx) into result buffer.",
