@@ -13,7 +13,9 @@ setup(
                 'csrc/adjacency_builder.cu',
                 'csrc/value_mutation_kernel.cu',
                 'csrc/reorganize_kernel.cu',
-                'csrc/crossover_kernel.cu', # <--- [수정] 이 줄을 추가해야 합니다.
+                'csrc/crossover_kernel.cu',
+                'csrc/node_mutation_kernel.cu',   # <--- NEW
+                'csrc/mutation_utils_kernel.cu',  # <--- NEW
             ],
         )
     ],

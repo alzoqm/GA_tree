@@ -8,4 +8,8 @@
 *.npy
 *.npz
 *.pth
+*.pt
 *.csv
+*.so
+/build/
+

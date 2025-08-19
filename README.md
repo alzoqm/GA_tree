@@ -1,5 +1,4 @@
-# CLAUDE.md
-
+g
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -8,29 +7,34 @@ GA_tree is a genetic algorithm-based trading bot that uses tree structures to ev
 
 ## Development Commands
 
-### Build CUDA Extension
+### Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### Build CUDA Extension (Required)
 ```bash
 python setup.py build_ext --inplace
 ```
-The project requires a C++/CUDA extension to be compiled before running. This creates the `gatree_cuda` module that provides GPU-accelerated prediction capabilities.
+**CRITICAL**: The project requires a C++/CUDA extension to be compiled before running. This creates the `gatree_cuda` module that provides GPU-accelerated prediction capabilities. The main script will exit with an error if this is not built first.
 
 ### Run Main Training Pipeline
 ```bash
 python main.py
 ```
-Executes the complete training pipeline including data download, feature generation, GA population initialization, evolution, and testing.
+Executes the complete training pipeline including data download, feature generation, GA population initialization, evolution, and testing. All configuration is controlled via `experiment_config.yaml`.
 
-### Run Tests
+### Run Individual Tests
 ```bash
-python test_code/test_predict.py
-python test_code/test_mu.py
+python test_code/test_predict.py  # Test prediction functionality
+python test_code/test_mu.py       # Test mutation operations
 ```
-Test prediction functionality and mutation operations.
 
-### Install Dependencies
+### Data Preprocessing Only
 ```bash
-pip install -r requirements.txt
+python preprocess_data.py
 ```
+Run feature generation pipeline without full training.
 
 ## Architecture Overview
 
@@ -80,25 +84,35 @@ pip install -r requirements.txt
 - Generates technical analysis features using TA-Lib
 - Multi-timeframe feature engineering
 
-### Configuration
+### Configuration System
 
 **experiment_config.yaml**
 - Central configuration for all hyperparameters
 - GA settings (population size, generations, operators)
-- Trading simulation parameters
-- Feature classification rules
+- Trading simulation parameters  
+- Feature classification rules (feature_num, feature_comparison, feature_bool)
+- Data paths and training/test split ratios
+- Environment settings (device, seed, output directories)
 
 **data/feature_config.yaml**
 - Technical indicator configurations
 - Multi-timeframe feature generation rules
 
+### Multiprocessing Architecture
+The system uses multiprocessing for:
+- GATree population initialization (`_create_tree_worker`)
+- Tree reorganization after mutations (`_reorganize_worker`)
+- Number of processes automatically determined by `os.cpu_count()`
+
 ## Key Implementation Details
 
-### GPU Acceleration
+### GPU Acceleration & Device Management
 The system uses a hybrid approach:
 - Python for high-level logic and data management
 - C++/CUDA for performance-critical tree evaluation
 - Shared memory tensors for efficient GPU-CPU communication
+- Device setting controlled via `experiment_config.yaml` (e.g., 'cuda:0', 'cpu')
+- Automatic fallback and error handling if CUDA not available
 
 ### Tree Structure
 Trees use a tensor representation where each node has:
@@ -107,6 +121,9 @@ Trees use a tensor representation where each node has:
 - Parameters defining the node's function
 - Decision nodes compare features using operators (>=, <=, ==)
 - Action nodes specify trading operations and parameters
+- Child nodes cannot contain both action nodes and decision nodes simultaneously
+- Leaf nodes must always be action nodes. A parent node that has a leaf node as its child must have exactly one child node (i.e., it should contain only one action node → to ensure decision finality).
+- Therefore, all intermediate nodes are decision nodes, and all leaf nodes are action nodes.
 
 ### Feature System
 Three types of feature comparisons:
@@ -121,19 +138,36 @@ Trading actions include:
 - ADD_POSITION: Increase existing position size
 - FLIP_POSITION: Close current and open opposite position
 
-### Evolution Strategy
+### Evolution Strategy & Checkpointing
 - Fitness based on multiple metrics: mean return, profit factor, win rate, max drawdown, compound value
+- Configurable fitness weights in `experiment_config.yaml`
 - Elite preservation with configurable elite size
-- Warming period before elite accumulation begins
-- Checkpoint saving for experiment resumption
+- Warming period before elite accumulation begins  
+- Automatic checkpoint saving to `results/exp_*/checkpoints/` during training
+- Best population saved as `best_population.pth` for evaluation
+- Resumable experiments via checkpoint loading
 
 ## File Structure Notes
 
 - `csrc/`: C++/CUDA source files for GPU acceleration
 - `models/constants.py`: Shared constants and enumerations
-- `verify_predictions.py`: Standalone prediction verification script
-- Test files demonstrate tree construction and prediction validation
+- `gatree_cuda.cpython-*.so`: Compiled CUDA extension (generated by setup.py)
+- `test.ipynb` / `check_model.ipynb`: Jupyter notebooks for interactive testing
 - Population and single tree serialization supported via PyTorch tensors
+- Configuration files use UTF-8 encoding with Korean comments
+
+## Data Pipeline
+
+### Input Requirements
+- Historical price data from Binance (OHLCV + volume)
+- Optional funding rate data for futures trading simulation
+- Data stored in `data_dir` path specified in config
+
+### Output Structure
+- Final processed data: `final_test_features.csv`
+- Model configuration: `model_test_config.yaml`
+- Results saved to `output_dir` (default: `results/exp_default/`)
+- Checkpoints and best population preserved for analysis
 
 ## Dependencies
 
