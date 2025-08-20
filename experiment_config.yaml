@@ -32,7 +32,7 @@ ga_core:
   population:
     size: 128
     max_nodes: 256
-    max_depth: 50
+    max_depth: 10
     max_children: 30
   evolution_loop:
     generations: 200

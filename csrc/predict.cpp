@@ -255,4 +255,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("bfs_queue_buffer"), py::arg("result_indices_buffer"),
         py::arg("child_count_buffer"), py::arg("act_cnt_buffer"), py::arg("dec_cnt_buffer"),
         py::arg("candidate_indices_buffer"), py::arg("candidate_weights_buffer"));
+
+    // --- NEW: Delete-Subtree batch mutation ---
+    m.def("delete_subtrees_batch", &delete_subtrees_batch_cuda,
+        "Batch delete-subtree mutation with invariant guards and repairs.",
+        py::arg("trees"),
+        py::arg("mutate_mask_i32"),
+        py::arg("max_nodes"),
+        py::arg("alpha"),
+        py::arg("ensure_action_left"),
+        py::arg("child_count_buffer"),
+        py::arg("act_cnt_buffer"),
+        py::arg("dec_cnt_buffer"),
+        py::arg("candidate_indices_buffer"),
+        py::arg("candidate_weights_buffer"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("deletion_mask_buffer"),
+        py::arg("repair_mask_buffer"),
+        py::arg("chosen_roots_buffer")
+    );
 }
