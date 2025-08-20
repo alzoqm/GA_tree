@@ -121,6 +121,7 @@ Trees use a tensor representation where each node has:
 - Action nodes specify trading operations and parameters
 - Child nodes cannot contain both action nodes and decision nodes simultaneously
 - Leaf nodes must always be action nodes. A parent node that has a leaf node as its child must have exactly one child node (i.e., it should contain only one action node → to ensure decision finality).
+- Only the root node must be left. At least two nodes must exist. (The root-action form is the most minimal tree form.)
 - Therefore, all intermediate nodes are decision nodes, and all leaf nodes are action nodes.
 
 ### Feature System
