@@ -20,6 +20,16 @@ from evolution.Mutation import (
 )
 from training.trading_env import generation_valid, generation_test, calculate_fitness
 
+try:
+    import gatree_cuda
+except ImportError:
+    print("="*60)
+    print(">>> Warning: 'gatree_cuda' module not found.")
+    print(">>> Build the CUDA extension first:")
+    print(">>> python setup.py build_ext --inplace")
+    print("="*60)
+    gatree_cuda = None
+
 # ==============================================================================
 #                      Phase 0: 환경 설정 및 사전 준비
 # ==============================================================================
@@ -139,6 +149,7 @@ def main():
     logging.info("Creating initial random population...")
     num_processes = os.cpu_count() or 1
     population.make_population(num_processes=num_processes)
+    # gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())
     logging.info("Population initialized successfully.")
 
     # ==========================================================================
