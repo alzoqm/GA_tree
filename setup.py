@@ -17,6 +17,7 @@ setup(
                 'csrc/node_mutation_kernel.cu',
                 'csrc/subtree_mutation_kernel.cu',
                 'csrc/mutation_utils_kernel.cu',
+                'csrc/validate_kernel.cu',
             ],
         )
     ],

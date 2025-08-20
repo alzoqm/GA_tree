@@ -12,6 +12,7 @@
 #include "node_mutation_kernel.cuh"
 #include "subtree_mutation_kernel.cuh"
 #include "mutation_utils_kernel.cuh"
+#include "validate_kernel.cuh"
 
 
 // ==============================================================================
@@ -275,4 +276,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("repair_mask_buffer"),
         py::arg("chosen_roots_buffer")
     );
+
+    // --- Validation: checks structural constraints and throws if violations found ---
+    m.def("validate_trees", &validate_trees_or_throw_cuda,
+          "Validate tree structural constraints on GPU; throws on invalid trees.",
+          py::arg("trees"));
 }
