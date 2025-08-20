@@ -117,7 +117,7 @@ Trees use a tensor representation where each node has:
 - Node type (ROOT_BRANCH, DECISION, ACTION)
 - Parent index and depth
 - Parameters defining the node's function
-- Decision nodes compare features using operators (>=, <=, ==)
+- Decision nodes compare features using operators (>=, <=)
 - Action nodes specify trading operations and parameters
 - Child nodes cannot contain both action nodes and decision nodes simultaneously
 - Leaf nodes must always be action nodes. A parent node that has a leaf node as its child must have exactly one child node (i.e., it should contain only one action node → to ensure decision finality).
