@@ -4,10 +4,8 @@ import sys
 import yaml
 import pandas as pd
 import logging
-import numpy as np
 
 # --- 프로젝트 모듈 임포트 ---
-# 이 스크립트가 프로젝트 루트에서 실행된다고 가정합니다.
 from data.data_download import fetch_historical_data, fetch_funding_rate_history
 from data.merge_dataset import run_feature_generation_from_yaml
 
@@ -22,6 +20,7 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
+
 def load_config(path="experiment_config.yaml"):
     """YAML 설정 파일을 로드합니다."""
     try:
@@ -34,6 +33,7 @@ def load_config(path="experiment_config.yaml"):
         logging.error(f"FATAL: Error parsing YAML file: {e}")
         sys.exit(1)
 
+
 def run_preprocessing():
     """
     데이터 다운로드, 피처 생성 및 저장을 위한 전체 전처리 파이프라인을 실행합니다.
@@ -41,7 +41,7 @@ def run_preprocessing():
     logging.info("==============================================")
     logging.info("=== Starting Data Preprocessing Pipeline ===")
     logging.info("==============================================")
-    
+
     # --- 설정 로드 ---
     config = load_config()
     env_cfg = config['environment']
@@ -56,31 +56,27 @@ def run_preprocessing():
         logging.info(f"Pre-processed data already exists at '{final_features_path}'.")
         logging.info(f"Model config already exists at '{model_config_path}'.")
         logging.info("Skipping preprocessing.")
-        
-        # 간단한 정보 출력
         try:
             df_check = pd.read_csv(final_features_path, nrows=5)
             logging.info(f"Checked existing data shape (first 5 rows): {df_check.shape}")
-            logging.info("\nPreprocessing is already complete. You can now run main.py for training.")
         except Exception as e:
             logging.warning(f"Could not check existing data file. Error: {e}")
-            
         return
 
     # --- 최종 데이터가 없으면 전처리 시작 ---
     logging.info("Pre-processed data not found. Starting data download and feature generation pipeline...")
-    
+
     # --- 1. 원본 데이터 로드 또는 다운로드 ---
     data_csv_path = os.path.join(env_cfg['data_dir'], data_cfg['merged_csv_path'])
 
     if not os.path.exists(data_csv_path):
         logging.warning(f"Raw merged data file not found at '{data_csv_path}'. Starting download...")
-        
+
         kline_df = fetch_historical_data(data_cfg['symbol'], data_cfg['interval'], data_cfg['days_to_fetch'])
         if kline_df is None:
             logging.error("Failed to download K-line data. Exiting.")
             return
-        
+
         funding_df = fetch_funding_rate_history(data_cfg['symbol'], data_cfg['days_to_fetch'])
         if funding_df is None:
             logging.warning("Failed to download funding rate data. Proceeding without it.")
@@ -92,8 +88,7 @@ def run_preprocessing():
                 kline_df, funding_df,
                 left_on='Open time', right_on='fundingTime', direction='backward'
             )
-        
-        # 데이터 디렉터리가 없으면 생성
+
         os.makedirs(env_cfg['data_dir'], exist_ok=True)
         merged_df.to_csv(data_csv_path, index=False)
         logging.info(f"Downloaded and merged raw data saved to '{data_csv_path}'")
@@ -124,7 +119,7 @@ def run_preprocessing():
     except Exception as e:
         logging.error(f"Failed to save feature data: {e}")
         return
-    
+
     logging.info(f"Saving generated model config to '{model_config_path}'...")
     try:
         with open(model_config_path, 'w', encoding='utf-8') as f:
@@ -136,6 +131,7 @@ def run_preprocessing():
 
     logging.info("\nPreprocessing pipeline finished successfully!")
     logging.info(f"Final data and config are ready at '{env_cfg['data_dir']}/'.")
+
 
 if __name__ == "__main__":
     run_preprocessing()
