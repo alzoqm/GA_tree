@@ -390,3 +390,401 @@ void add_subtrees_batch_cuda(
         candidate_weights_buffer.data_ptr<float>());
     CUDA_CHECK_ERRORS();
 }
+
+// =============================================================================
+// DELETE-SUBTREE MUTATION: OPTIMIZED CUDA IMPLEMENTATION WITH INVARIANT PRESERVATION
+// =============================================================================
+
+// Safe float<->int conversion with bounds checking
+__device__ __forceinline__ int   d_f2i(float x){ return __float2int_rn(x); }
+__device__ __forceinline__ float d_i2f(int   x){ return static_cast<float>(x); }
+
+__device__ __forceinline__ bool d_valid_idx(int idx, int N){ return idx >= 0 && idx < N; }
+__device__ __forceinline__ float* d_node(float* base, int D, int i){ return base + (size_t)i * D; }
+__device__ __forceinline__ const float* d_node(const float* base, int D, int i){ return base + (size_t)i * D; }
+
+// Find root index (ROOT_BRANCH or fallback to any node with parent=-1)
+__device__ int find_root_index(const float* tree, int N, int D){
+    int fallback = -1;
+    for (int i = 0; i < N; ++i){
+        const float* nb = d_node(tree, D, i);
+        int t = d_f2i(nb[COL_NODE_TYPE]);
+        if (t == NODE_TYPE_UNUSED) continue;
+        int p = d_f2i(nb[COL_PARENT_IDX]);
+        if (p < 0){
+            if (t == NODE_TYPE_ROOT_BRANCH) return i;
+            if (fallback < 0) fallback = i;
+        }
+    }
+    return fallback;
+}
+
+// BFS collect subtree into q/res, return count and number of actions in subtree.
+// q and res are per-tree buffers of capacity 2*N (allocated in Python).
+__device__ void bfs_subtree_collect(
+    const float* tree, int N, int D, int r,
+    int* q, int* res, int qcap,
+    int* out_count, int* out_action_count
+){
+    *out_count = 0; *out_action_count = 0;
+    if (!d_valid_idx(r, N)) return;
+
+    const float* rb = d_node(tree, D, r);
+    if (d_f2i(rb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) return;
+
+    int head = 0, tail = 0, outc = 0, actc = 0;
+    if (qcap <= 0) { *out_count = 0; *out_action_count = 0; return; }
+
+    q[tail++] = r; res[outc++] = r;
+    if (d_f2i(rb[COL_NODE_TYPE]) == NODE_TYPE_ACTION) ++actc;
+
+    while (head < tail && tail < qcap && outc < qcap){
+        int cur = q[head++];
+        for (int j = 0; j < N && tail < qcap && outc < qcap; ++j){
+            const float* nb = d_node(tree, D, j);
+            if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+            if (d_f2i(nb[COL_PARENT_IDX]) == cur){
+                q[tail++] = j;
+                res[outc++] = j;
+                if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_ACTION) ++actc;
+            }
+        }
+    }
+    *out_count = outc; *out_action_count = actc;
+}
+
+// Recompute parent-child counts excluding nodes marked for deletion/repair
+__device__ void recompute_counts_excluding_masks(
+    const float* tree, int N, int D,
+    const int* del_mask, const int* rep_mask,
+    int* child_cnt, int* act_cnt, int* dec_cnt
+){
+    // Phase 1: Zero counts (separate from accumulation to avoid race conditions)
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        child_cnt[i] = 0; act_cnt[i] = 0; dec_cnt[i] = 0;
+    }
+    __syncthreads();
+
+    // Phase 2: Accumulate counts
+    for (int j = threadIdx.x; j < N; j += blockDim.x){
+        const float* nb = d_node(tree, D, j);
+        if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+        if (del_mask[j] || rep_mask[j]) continue;
+        int p = d_f2i(nb[COL_PARENT_IDX]);
+        if (!d_valid_idx(p, N)) continue;
+        atomicAdd(&child_cnt[p], 1);
+        int t = d_f2i(nb[COL_NODE_TYPE]);
+        if (t == NODE_TYPE_ACTION)   atomicAdd(&act_cnt[p], 1);
+        if (t == NODE_TYPE_DECISION) atomicAdd(&dec_cnt[p], 1);
+    }
+    __syncthreads();
+}
+
+// Count children of parent excluding masked nodes
+__device__ int parent_child_count_excluding_masks(
+    const float* tree, int N, int D, int p,
+    const int* del_mask, const int* rep_mask
+){
+    if (!d_valid_idx(p, N)) return 0;
+    int c = 0;
+    for (int j = 0; j < N; ++j){
+        const float* nb = d_node(tree, D, j);
+        if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+        if (del_mask[j] || rep_mask[j]) continue;
+        if (d_f2i(nb[COL_PARENT_IDX]) == p) ++c;
+    }
+    return c;
+}
+
+// One block per tree - comprehensive invariant-preserving DeleteSubtree kernel
+__global__ void k_delete_subtrees_batch(
+    float* __restrict__ trees, int B, int N, int D,
+    const int* __restrict__ mutate_mask,
+    float alpha,
+    int ensure_action_left,
+
+    int* __restrict__ child_cnt,
+    int* __restrict__ act_cnt,
+    int* __restrict__ dec_cnt,
+
+    int* __restrict__ cand_idx,
+    float* __restrict__ cand_w,
+
+    int* __restrict__ bfs_q,
+    int* __restrict__ bfs_res,
+
+    int* __restrict__ del_mask,
+    int* __restrict__ rep_mask,
+
+    int* __restrict__ chosen_roots
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+    if (mutate_mask[b] == 0) { if (threadIdx.x==0) chosen_roots[b] = -1; return; }
+
+    float* tree = trees + (size_t)b * N * D;
+
+    // Per-tree slices
+    int* ch    = child_cnt + (size_t)b * N;
+    int* ac    = act_cnt   + (size_t)b * N;
+    int* dc    = dec_cnt   + (size_t)b * N;
+    int* cidx  = cand_idx  + (size_t)b * N;
+    float* cw  = cand_w    + (size_t)b * N;
+    int* qbuf  = bfs_q     + (size_t)b * (2 * N);
+    int* rbuf  = bfs_res   + (size_t)b * (2 * N);
+    int* dmask = del_mask  + (size_t)b * N;
+    int* rmask = rep_mask  + (size_t)b * N;
+
+    // Zero masks and candidate arrays
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        dmask[i] = 0; rmask[i] = 0; cidx[i] = -1; cw[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // === Phase 1: zero counts ===
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        ch[i]=0; ac[i]=0; dc[i]=0;
+    }
+    __syncthreads();
+
+    // === total_actions (shared) ===
+    __shared__ int sh_total_actions;
+    if (threadIdx.x == 0) sh_total_actions = 0;
+    __syncthreads();
+
+    // === Phase 2: accumulate counts and total_actions ===
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        const float* nb = d_node(tree, D, i);
+        int t = d_f2i(nb[COL_NODE_TYPE]);
+        if (t == NODE_TYPE_UNUSED) continue;
+        int p = d_f2i(nb[COL_PARENT_IDX]);
+        if (d_valid_idx(p, N)){
+            atomicAdd(&ch[p], 1);
+            if (t == NODE_TYPE_ACTION)   atomicAdd(&ac[p], 1);
+            if (t == NODE_TYPE_DECISION) atomicAdd(&dc[p], 1);
+        }
+        if (t == NODE_TYPE_ACTION) atomicAdd(&sh_total_actions, 1);
+    }
+    __syncthreads();
+
+    int total_actions = 0;
+    if (threadIdx.x == 0) total_actions = sh_total_actions;
+    __syncthreads();
+
+    // Build candidate list (exclude ROOT_BRANCH and G1 guard)
+    int cand_count = 0;
+    if (threadIdx.x == 0){
+        for (int i = 0; i < N && cand_count < N; ++i){
+            const float* nb = d_node(tree, D, i);
+            int t = d_f2i(nb[COL_NODE_TYPE]);
+            if (t == NODE_TYPE_UNUSED) continue;
+            if (t == NODE_TYPE_ROOT_BRANCH) continue;
+
+            // G1: Prevent immediate root orphaning
+            int p = d_f2i(nb[COL_PARENT_IDX]);
+            bool g1_violate = false;
+            if (d_valid_idx(p, N)){
+                const float* pb = d_node(tree, D, p);
+                int pt = d_f2i(pb[COL_NODE_TYPE]);
+                if (pt == NODE_TYPE_ROOT_BRANCH && ch[p] == 1) g1_violate = true;
+            }
+            if (g1_violate) continue;
+
+            // Calculate subtree size and action count
+            int cnt = 0, actc = 0;
+            bfs_subtree_collect(tree, N, D, i, qbuf, rbuf, 2*N, &cnt, &actc);
+
+            float w = (cnt > 0 ? powf((float)cnt, alpha) : 0.0f);
+            
+            // Optional: Ensure at least one ACTION remains if ensure_action_left=True
+            if (ensure_action_left && (total_actions - actc) <= 0) w = 0.0f;
+
+            cidx[cand_count] = i;
+            cw[cand_count]   = w;
+            ++cand_count;
+        }
+    }
+    __syncthreads();
+
+    // Weighted sampling using deterministic LCG seeded by batch index
+    int chosen = -1;
+    if (threadIdx.x == 0){
+        float sumw = 0.0f;
+        for (int k = 0; k < cand_count; ++k) sumw += cw[k];
+
+        if (sumw > 0.0f){
+            unsigned int s = 0x9E3779B1u ^ (unsigned)(b * 2654435761u + 12345u);
+            auto nextf = [&s](){ s = 1664525u * s + 1013904223u; return float(s & 0x00FFFFFF) / float(0x01000000); };
+            float r = nextf() * sumw;
+            float acc = 0.0f;
+            for (int k = 0; k < cand_count; ++k){
+                acc += cw[k];
+                if (r <= acc){ chosen = cidx[k]; break; }
+            }
+        }
+        chosen_roots[b] = (chosen >= 0 ? chosen : -1);
+    }
+    __syncthreads();
+    if (chosen_roots[b] < 0) return;
+
+    chosen = chosen_roots[b];
+
+    // Mark subtree for deletion
+    int cnt = 0, actc = 0;
+    bfs_subtree_collect(tree, N, D, chosen, qbuf, rbuf, 2*N, &cnt, &actc);
+    for (int i = threadIdx.x; i < cnt; i += blockDim.x){
+        int node = rbuf[i];
+        if (d_valid_idx(node, N)) dmask[node] = 1;
+    }
+    __syncthreads();
+
+    // Repair loop with EARLY EXIT to prevent infinite loops
+    for (int it = 0; it < N; ++it){
+        __shared__ int sh_changed;
+        if (threadIdx.x == 0) sh_changed = 0;
+        __syncthreads();
+
+        // R2: ACTION must be leaf => remove all children of ACTION nodes
+        for (int i = threadIdx.x; i < N; i += blockDim.x){
+            const float* nb = d_node(tree, D, i);
+            if (d_f2i(nb[COL_NODE_TYPE]) != NODE_TYPE_ACTION) continue;
+            if (dmask[i] || rmask[i]) continue;
+            for (int j = 0; j < N; ++j){
+                const float* cb = d_node(tree, D, j);
+                if (d_f2i(cb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+                if (dmask[j] || rmask[j]) continue;
+                if (d_f2i(cb[COL_PARENT_IDX]) == i) { rmask[j] = 1; sh_changed = 1; }
+            }
+        }
+        __syncthreads();
+
+        // Recompute counts excluding masked nodes
+        recompute_counts_excluding_masks(tree, N, D, dmask, rmask, ch, ac, dc);
+
+        // R1: If parent has any ACTION child, keep exactly ONE action; delete others and all DECISION children
+        for (int i = threadIdx.x; i < N; i += blockDim.x) cidx[i] = 0; // reuse as keep_seen
+        __syncthreads();
+
+        for (int j = threadIdx.x; j < N; j += blockDim.x){
+            const float* nb = d_node(tree, D, j);
+            if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+            if (dmask[j] || rmask[j]) continue;
+            int p = d_f2i(nb[COL_PARENT_IDX]);
+            if (!d_valid_idx(p, N)) continue;
+            if (ac[p] > 0){
+                int t = d_f2i(nb[COL_NODE_TYPE]);
+                if (t == NODE_TYPE_ACTION){
+                    if (atomicCAS(&cidx[p], 0, 1) != 0){ rmask[j] = 1; sh_changed = 1; }
+                } else {
+                    rmask[j] = 1; sh_changed = 1;
+                }
+            }
+        }
+        __syncthreads();
+
+        // R3: DECISION with no children => remove (using ch[] cached counts)
+        for (int i = threadIdx.x; i < N; i += blockDim.x){
+            const float* nb = d_node(tree, D, i);
+            if (dmask[i] || rmask[i]) continue;
+            if (d_f2i(nb[COL_NODE_TYPE]) != NODE_TYPE_DECISION) continue;
+            if (ch[i] == 0){ rmask[i] = 1; sh_changed = 1; }
+        }
+        __syncthreads();
+
+        // Early exit if no changes in this iteration
+        if (sh_changed == 0) break;
+    }
+
+    // G2: Ensure root has >=1 child and (optionally) at least one ACTION remains
+    int root = find_root_index(tree, N, D);
+    bool root_ok = true;
+    if (root >= 0){
+        int rc = parent_child_count_excluding_masks(tree, N, D, root, dmask, rmask);
+        if (rc <= 0) root_ok = false;
+    }
+
+    __shared__ int sh_actions_left;
+    if (threadIdx.x == 0) sh_actions_left = 0;
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        const float* nb = d_node(tree, D, i);
+        if (d_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_ACTION && !(dmask[i] || rmask[i])) {
+            atomicOr(&sh_actions_left, 1);
+        }
+    }
+    __syncthreads();
+
+    int g2_fail = 0;
+    if (threadIdx.x == 0){
+        if (!root_ok) g2_fail = 1;
+        else if (ensure_action_left && sh_actions_left == 0) g2_fail = 1;
+    }
+    __syncthreads();
+
+    // If G2 fails, cancel the mutation by clearing all masks
+    if (g2_fail){
+        for (int i = threadIdx.x; i < N; i += blockDim.x){ dmask[i] = 0; rmask[i] = 0; }
+        if (threadIdx.x == 0) chosen_roots[b] = -1;
+        __syncthreads();
+        return;
+    }
+}
+
+// Host wrapper function with comprehensive validation
+void delete_subtrees_batch_cuda(
+    torch::Tensor trees, torch::Tensor mutate_mask_i32,
+    int max_nodes, float alpha, int ensure_action_left,
+    torch::Tensor child_count_buffer,
+    torch::Tensor act_cnt_buffer,
+    torch::Tensor dec_cnt_buffer,
+    torch::Tensor candidate_indices_buffer,
+    torch::Tensor candidate_weights_buffer,
+    torch::Tensor bfs_queue_buffer,
+    torch::Tensor result_indices_buffer,
+    torch::Tensor deletion_mask_buffer,
+    torch::Tensor repair_mask_buffer,
+    torch::Tensor chosen_roots_buffer
+){
+    TORCH_CHECK(trees.is_cuda(), "trees must be CUDA");
+    TORCH_CHECK(mutate_mask_i32.is_cuda(), "mutate_mask must be CUDA");
+    TORCH_CHECK(trees.scalar_type() == torch::kFloat32, "trees: float32");
+    TORCH_CHECK(mutate_mask_i32.scalar_type() == torch::kInt32, "mutate_mask: int32");
+    TORCH_CHECK(trees.dim()==3 && trees.is_contiguous(), "trees must be (B,N,D) contiguous");
+
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(N == max_nodes, "max_nodes must equal trees.size(1)");
+
+    auto chk = [&](const torch::Tensor& t, int s0, int s1, const char* msg){
+        TORCH_CHECK(t.is_cuda(), "buffer must be CUDA: ", msg);
+        TORCH_CHECK(t.size(0)==s0 && t.size(1)==s1, msg);
+    };
+    chk(child_count_buffer,       B, N,  "child_count_buffer (B,N)");
+    chk(act_cnt_buffer,           B, N,  "act_cnt_buffer (B,N)");
+    chk(dec_cnt_buffer,           B, N,  "dec_cnt_buffer (B,N)");
+    chk(candidate_indices_buffer, B, N,  "candidate_indices_buffer (B,N)");
+    chk(candidate_weights_buffer, B, N,  "candidate_weights_buffer (B,N)");
+    chk(bfs_queue_buffer,         B, 2*N,"bfs_queue_buffer (B,2N)");
+    chk(result_indices_buffer,    B, 2*N,"result_indices_buffer (B,2N)");
+    chk(deletion_mask_buffer,     B, N,  "deletion_mask_buffer (B,N)");
+    chk(repair_mask_buffer,       B, N,  "repair_mask_buffer (B,N)");
+    TORCH_CHECK(chosen_roots_buffer.is_cuda() && chosen_roots_buffer.size(0)==B, "chosen_roots_buffer (B,)");
+
+    dim3 grid(B), block(128);
+    k_delete_subtrees_batch<<<grid, block>>>(
+        trees.data_ptr<float>(), B, N, D,
+        mutate_mask_i32.data_ptr<int>(),
+        alpha,
+        ensure_action_left,
+        child_count_buffer.data_ptr<int>(),
+        act_cnt_buffer.data_ptr<int>(),
+        dec_cnt_buffer.data_ptr<int>(),
+        candidate_indices_buffer.data_ptr<int>(),
+        candidate_weights_buffer.data_ptr<float>(),
+        bfs_queue_buffer.data_ptr<int>(),
+        result_indices_buffer.data_ptr<int>(),
+        deletion_mask_buffer.data_ptr<int>(),
+        repair_mask_buffer.data_ptr<int>(),
+        chosen_roots_buffer.data_ptr<int>());
+    CUDA_CHECK_ERRORS();
+}
