@@ -18,6 +18,7 @@ setup(
                 'csrc/subtree_mutation_kernel.cu',
                 'csrc/mutation_utils_kernel.cu',
                 'csrc/validate_kernel.cu',
+                'csrc/make_population.cu',
             ],
         )
     ],

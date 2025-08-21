@@ -748,17 +748,126 @@ class GATreePop:
         self.population_tensor = torch.zeros((pop_size, max_nodes, NODE_INFO_DIM), dtype=torch.float32)
         self.population = []
 
-    def make_population(self, num_processes: int = 1):
+    def make_population(self, num_processes: int = 1, device: str = 'cuda',
+                        init_mode: str = 'cuda', node_budget: int | None = None):
         """
         [수정] 설정된 pop_size만큼 GATree 개체를 생성하여 집단을 초기화합니다.
-        멀티프로세싱을 지원합니다.
+        CUDA 초기화와 멀티프로세싱을 지원합니다.
+        
+        Args:
+            num_processes: CPU 초기화 시 사용할 프로세스 수
+            device: 텐서를 저장할 디바이스 ('cuda' 또는 'cpu')
+            init_mode: 초기화 방식 ('cuda' 또는 'cpu')
+            node_budget: 트리당 노드 예산 (None이면 자동 설정)
         """
         self.population = []
+        B, N, D = self.pop_size, self.max_nodes, NODE_INFO_DIM
 
+        if init_mode == 'cuda' and device.startswith('cuda') and gatree_cuda is not None:
+            # --- Host-side feasibility checks ---
+            assert self.max_nodes >= 6, "max_nodes must be >= 6 (need 3 roots + 3 actions for minimal tree)"
+            assert self.max_depth >= 2, "max_depth must be >= 2 (root-action minimal tree)"
+            assert self.max_children >= 1, "max_children must be >= 1"
+            if node_budget is not None:
+                assert node_budget >= 0
+
+            print(f"[CUDA] Initializing {B} trees on GPU (N={N}, D={D}) with invariant guards.")
+
+            # 1) population tensor on CUDA
+            self.population_tensor = torch.zeros((B, N, D), dtype=torch.float32, device=device)
+
+            # 2) budgets
+            if node_budget is None:
+                node_budget = max(1, (N - 3) // 2)
+            total_budget = torch.full((B,), int(node_budget), dtype=torch.int32, device=device)
+
+            # 3) work buffers (all on CUDA)
+            bfs_q     = torch.empty((B, 2 * N), dtype=torch.int32,   device=device)
+            scratch   = torch.empty((B, 2 * N), dtype=torch.int32,   device=device)
+            child_cnt = torch.empty((B, N),     dtype=torch.int32,   device=device)
+            act_cnt   = torch.empty((B, N),     dtype=torch.int32,   device=device)
+            dec_cnt   = torch.empty((B, N),     dtype=torch.int32,   device=device)
+            cand_idx  = torch.empty((B, N),     dtype=torch.int32,   device=device)
+            cand_w    = torch.empty((B, N),     dtype=torch.float32, device=device)
+
+            # 4) feature tables → ALL_FEATURES index space
+            all_feats = self.all_features
+
+            # numeric family — zero-length when empty
+            num_names = list(self.feature_num.keys())
+            if len(num_names) == 0:
+                num_feat_indices = torch.empty((0,), dtype=torch.int32, device=device)
+                num_feat_minmax  = torch.empty((0, 2), dtype=torch.float32, device=device)
+            else:
+                num_feat_indices = torch.tensor([all_feats.index(k) for k in num_names],
+                                                dtype=torch.int32, device=device)
+                num_feat_minmax  = torch.tensor([[float(self.feature_num[k][0]), float(self.feature_num[k][1])]
+                                                 for k in num_names],
+                                                dtype=torch.float32, device=device)
+
+            # boolean family — zero-length when empty
+            if len(self.feature_bool) == 0:
+                bool_feat_indices = torch.empty((0,), dtype=torch.int32, device=device)
+            else:
+                bool_feat_indices = torch.tensor([all_feats.index(k) for k in self.feature_bool],
+                                                 dtype=torch.int32, device=device)
+
+            # feat-feat pairs — zero-length when empty
+            pairs = []
+            for f1, lst in self.feature_comparison_map.items():
+                if not lst: continue
+                f1i = all_feats.index(f1)
+                for f2 in lst:
+                    pairs.append([f1i, all_feats.index(f2)])
+            if len(pairs) == 0:
+                ff_pairs = torch.empty((0, 2), dtype=torch.int32, device=device)
+            else:
+                ff_pairs = torch.tensor(pairs, dtype=torch.int32, device=device)
+
+            # 5) action allow-lists per root-context
+            long_actions  = torch.tensor(
+                [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION],
+                dtype=torch.int32, device=device)
+            hold_actions  = torch.tensor(
+                [ACTION_NEW_LONG, ACTION_NEW_SHORT],
+                dtype=torch.int32, device=device)
+            short_actions = torch.tensor(
+                [ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION],
+                dtype=torch.int32, device=device)
+
+            # 6) launch CUDA initializer
+            gatree_cuda.init_population_cuda(
+                self.population_tensor, total_budget,
+                self.max_children, self.max_depth, self.max_nodes,
+                bfs_q, scratch, child_cnt, act_cnt, dec_cnt, cand_idx, cand_w,
+                num_feat_indices, num_feat_minmax,
+                bool_feat_indices, ff_pairs,
+                long_actions, hold_actions, short_actions
+            )
+
+            # 7) Stitch Python objects to GPU views (no CPU traversal here)
+            self.population = []
+            for i in range(B):
+                tree_data_view = self.population_tensor[i]
+                tree = GATree(
+                    self.max_nodes, self.max_depth, self.max_children,
+                    self.feature_num, self.feature_comparison_map, self.feature_bool,
+                    self.all_features, data_tensor=tree_data_view
+                )
+                tree.initialized = True
+                tree.set_next_idx()  # uses device tensor shape logically; do not CPU-iterate
+                self.population.append(tree)
+
+            self.initialized = True
+            print("[CUDA] Population initialized and synchronized.")
+            return
+
+        # --- CPU fallback path ---
         if num_processes > 1 and self.pop_size > 1:
-            print(f"--- Creating {self.pop_size} trees using {num_processes} processes ---")
+            print(f"--- Creating {self.pop_size} trees using {num_processes} processes (CPU) ---")
             
             # 공유 메모리에 텐서 올리기
+            self.population_tensor = torch.zeros((self.pop_size, self.max_nodes, NODE_INFO_DIM), dtype=torch.float32, device=device)
             self.population_tensor.share_memory_()
 
             # 워커에 전달할 설정 딕셔너리
@@ -769,16 +878,16 @@ class GATreePop:
             
             # 멀티프로세싱 풀 생성 및 실행
             with mp.Pool(processes=num_processes) as pool:
-                # tqdm 등을 사용하려면 imap_unordered 사용 가능
                 list(pool.map(_create_tree_worker, args))
         else:
-            print(f"--- Creating {self.pop_size} trees sequentially ---")
+            print(f"--- Creating {self.pop_size} trees sequentially (CPU) ---")
+            self.population_tensor = torch.zeros((self.pop_size, self.max_nodes, NODE_INFO_DIM), dtype=torch.float32, device=device)
             for i in range(self.pop_size):
                 tree_data_view = self.population_tensor[i]
                 tree = GATree(
                     self.max_nodes, self.max_depth, self.max_children,
                     self.feature_num, self.feature_comparison_map, self.feature_bool,
-                    self.all_features, # all_features 전달
+                    self.all_features,
                     data_tensor=tree_data_view
                 )
                 tree.make_tree()
@@ -789,7 +898,7 @@ class GATreePop:
             tree = GATree(
                 self.max_nodes, self.max_depth, self.max_children,
                 self.feature_num, self.feature_comparison_map, self.feature_bool,
-                self.all_features, # all_features 전달
+                self.all_features,
                 data_tensor=tree_data_view
             )
             # 텐서는 이미 채워져 있으므로, 내부 상태만 동기화
@@ -803,7 +912,7 @@ class GATreePop:
             self.population.append(tree)
 
         self.initialized = True
-        print("\nPopulation created successfully.")
+        print("Population created successfully (CPU).")
 
     def reorganize_nodes(self):
         """
@@ -815,7 +924,7 @@ class GATreePop:
             return
 
         # [수정] CUDA가 아닌 장치에 대한 예외 처리 또는 대체 로직
-        if self.population_tensor.device.type != 'cuda':
+        if not self.population_tensor.device.type.startswith('cuda'):
             print("Warning: CUDA-based reorganize_nodes is only available for GPU tensors. Falling back to sequential CPU method.")
             # CPU에서는 기존의 순차적 방식 실행
             for tree in self.population:
