@@ -120,6 +120,12 @@ def build_adjacency_list_cuda(population: GATreePop,
                 f"DEPTH(16), OVERFLOW(32), BAD_PARENT(64), ROOT(128), ROOT_LEAF(256)."
             )
 
+    # Always validate trees after CUDA kernels
+    try:
+        gatree_cuda.validate_trees(trees.contiguous())
+    except Exception as e:
+        raise RuntimeError(f"validate_trees failed after building adjacency: {e}")
+
     torch.cuda.synchronize()
     return per_tree_offsets, per_tree_children
 
@@ -191,7 +197,11 @@ def predict_population_cuda(
     # Ensure CUDA operations complete before returning
     torch.cuda.synchronize()
     
-    gatree_cuda.validate_trees(population_tensor.to('cuda:0').contiguous())  # Commented out due to CUDA memory access issues
+    # Validate trees after CUDA predict
+    try:
+        gatree_cuda.validate_trees(population_tensor.contiguous())
+    except Exception as e:
+        raise RuntimeError(f"validate_trees failed after predict: {e}")
 
 
     return results_tensor

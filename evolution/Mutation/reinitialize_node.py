@@ -65,6 +65,7 @@ class ReinitializeNodeMutation(BaseMutation):
             if gatree_cuda is not None and chromosomes.is_cuda:
                 gatree_cuda.validate_trees(chromosomes.contiguous())
         except Exception:
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after reinit mutation.\n{traceback.format_exc()}")
 
         return chromosomes

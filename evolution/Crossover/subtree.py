@@ -136,6 +136,7 @@ class SubtreeCrossover(BaseCrossover):
             if gatree_cuda is not None and final_children.is_cuda:
                 gatree_cuda.validate_trees(final_children.contiguous())
         except Exception:
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after sub_branch crossover.\n{traceback.format_exc()}")
 
         return final_children # GPU 텐서를 그대로 반환

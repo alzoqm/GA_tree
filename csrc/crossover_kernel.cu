@@ -172,10 +172,10 @@ __global__ void copy_branches_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // [안전성] child 버퍼 전체를 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
-    // (블록당 1스레드 구성이라 직렬 초기화로 충분)
+    // [안전성] child 버퍼 중 non-root 노드만 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
+    // 루트 브랜치(0,1,2)는 Python에서 이미 설정되었으므로 건드리지 않음
     float* child_ptr_init = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
-    for (int i = 0; i < max_nodes; ++i) {
+    for (int i = 3; i < max_nodes; ++i) {  // Start from index 3, skip root branches (0,1,2)
         float* nd = child_ptr_init + i * NODE_INFO_DIM;
         nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
         // 부모/깊이/파라미터는 필요 시 이후 복사에서 덮어씀
@@ -284,6 +284,41 @@ __device__ int get_max_relative_depth(const float* tree_ptr, int* indices, int c
     return (int)(max_abs_depth - root_depth);
 }
 
+__device__ bool would_violate_tree_structure(
+    const float* child_ptr, int parent_idx, int new_subtree_root_type, int max_nodes)
+{
+    if (parent_idx < 0 || parent_idx >= max_nodes) return true;
+    
+    // Count existing children by type
+    int action_children = 0;
+    int decision_children = 0;
+    
+    for (int i = 0; i < max_nodes; ++i) {
+        if ((int)child_ptr[i * NODE_INFO_DIM + COL_PARENT_IDX] == parent_idx) {
+            int child_type = (int)child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE];
+            if (child_type == NODE_TYPE_ACTION) {
+                action_children++;
+            } else if (child_type == NODE_TYPE_DECISION) {
+                decision_children++;
+            }
+        }
+    }
+    
+    // Check if adding new subtree would violate rules
+    if (new_subtree_root_type == NODE_TYPE_ACTION) {
+        // Rule 1: No mixed children (action + decision)
+        if (decision_children > 0) return true;
+        
+        // Rule 2: Parent with action child must have exactly one child
+        if (action_children > 0) return true; // Already has action child, can't add another
+    } else if (new_subtree_root_type == NODE_TYPE_DECISION) {
+        // Rule 1: No mixed children (action + decision)  
+        if (action_children > 0) return true;
+    }
+    
+    return false;
+}
+
 __device__ void transplant_one_way_device(
     float* child_ptr, const float* recipient_ptr, const float* donor_ptr,
     int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
@@ -320,6 +355,12 @@ __device__ void transplant_one_way_device(
     if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return; // 유효하지 않은 부모
     float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
     float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
+
+    // 5.5. Check if transplantation would violate tree structure rules
+    int donor_root_type = (int)donor_ptr[d_idx * NODE_INFO_DIM + COL_NODE_TYPE];
+    if (would_violate_tree_structure(child_ptr, r_parent_idx, donor_root_type, max_nodes)) {
+        return; // Abort transplantation to avoid invalid structure
+    }
 
     // 6. 노드 복사 및 업데이트
     for (int i = 0; i < d_count; ++i) {

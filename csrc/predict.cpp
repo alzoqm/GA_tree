@@ -99,6 +99,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // --- 재구성 함수 바인딩 ---
     m.def("reorganize_population", &reorganize_population_cuda, 
           "Reorganize the population tensor on GPU to remove fragmentation.");
+    
+    m.def("reorganize_population_with_arrays", &reorganize_population_with_arrays_cuda, 
+          "Reorganize the population tensor on GPU using pre-allocated arrays from Python.",
+          py::arg("population_tensor"), py::arg("active_counts_per_tree"), py::arg("old_gid_to_new_gid_map"));
 
     // --- 교차(Crossover) 관련 CUDA 함수 바인딩 ---
     m.def("get_contextual_mask",

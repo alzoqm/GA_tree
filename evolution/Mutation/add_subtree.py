@@ -201,6 +201,7 @@ class AddSubtreeMutation(BaseMutation):
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
         except Exception:
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after add_subtree mutation.\n{traceback.format_exc()}")
 
         return trees

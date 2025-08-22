@@ -50,6 +50,7 @@ operators:
   crossover:
     # ChainCrossover에 전달될 가중치 (Subtree, Node, RootBranch 순서)
     weights: [0.6, 0.2, 0.2]
+    # weights: [0.6, 0.4]
     # 각 교차 연산자별 세부 설정
     subtree_crossover:
       mode: 'context' # 'free' 또는 'context'
