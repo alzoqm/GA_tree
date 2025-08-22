@@ -6,7 +6,7 @@
 # 1. 환경 및 경로 설정
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
-  seed: 42
+  seed: 777
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/dataset"
 
@@ -50,6 +50,7 @@ operators:
   crossover:
     # ChainCrossover에 전달될 가중치 (Subtree, Node, RootBranch 순서)
     weights: [0.6, 0.2, 0.2]
+    # weights: [0.6, 0.4]
     # 각 교차 연산자별 세부 설정
     subtree_crossover:
       mode: 'context' # 'free' 또는 'context'

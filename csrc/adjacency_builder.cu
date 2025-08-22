@@ -1,260 +1,506 @@
-// csrc/adjacency_builder.cu (수정된 파일)
+// csrc/adjacency_builder.cu
 #include "adjacency_builder.cuh"
 #include "constants.h"
+
 #include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <limits>
 
-// ==============================================================================
-//           커널 1: 각 노드의 자식 수를 병렬로 계산하는 커널 (변경 없음)
-// ==============================================================================
-__global__ void count_children_kernel(
-    const float* population_ptr,
-    int* child_counts_ptr,
-    int pop_size,
-    int max_nodes) {
+#define CUDA_CHECK_ERRORS() \
+  do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { \
+    printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+  }} while (0)
 
-    const int total_nodes = pop_size * max_nodes;
-    const int node_gid = blockIdx.x * blockDim.x + threadIdx.x;
+__device__ __forceinline__ int   f2i(float x){ return __float2int_rn(x); }
+__device__ __forceinline__ float i2f(int   x){ return static_cast<float>(x); }
+__device__ __forceinline__ bool valid_idx(int idx, int N){ return idx >= 0 && idx < N; }
+__device__ __forceinline__ const float* node_ptr(const float* base, int D, int i){
+    return base + (size_t)i * D;
+}
 
-    if (node_gid >= total_nodes) {
-        return;
-    }
+static inline int next_pow2_int(int x){
+    int v = 1; while (v < x) v <<= 1; return (v <= 0) ? 1 : v;
+}
 
-    const float* node_data = population_ptr + node_gid * NODE_INFO_DIM;
-    
-    if (node_data[COL_NODE_TYPE] != NODE_TYPE_UNUSED) {
-        int parent_idx = static_cast<int>(node_data[COL_PARENT_IDX]);
-        if (parent_idx != -1) {
-            int tree_idx = node_gid / max_nodes;
-            int parent_gid = tree_idx * max_nodes + parent_idx;
-            atomicAdd(&child_counts_ptr[parent_gid], 1);
+static inline int get_shared_mem_budget_bytes(){
+    int dev = -1, bytes = 0, got = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess){
+        if (cudaDeviceGetAttribute(&bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) == cudaSuccess && bytes > 0){
+            got = 1;
+        } else if (cudaDeviceGetAttribute(&bytes, cudaDevAttrMaxSharedMemoryPerBlock, dev) == cudaSuccess && bytes > 0){
+            got = 1;
         }
+    }
+    if (!got || bytes <= 0) bytes = 48 * 1024; // conservative default
+    return bytes;
+}
+
+// -----------------------------------------------------------------------------
+// Pass 1: Count children per parent (block = tree) and detect overflow per tree
+// -----------------------------------------------------------------------------
+__global__ void k_count_children_per_tree(
+    const float* __restrict__ trees, // (B,N,D)
+    int B, int N, int D,
+    int* __restrict__ child_counts   // (B,N)
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+
+    const float* tree = trees + (size_t)b * N * D;
+    int* cc          = child_counts + (size_t)b * N;
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x) cc[i] = 0;
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]); if (nt == NODE_TYPE_UNUSED) continue;
+        int p  = f2i(nb[COL_PARENT_IDX]);
+        if (!valid_idx(p, N)) continue; // -1 is root/ROOT_BRANCH
+        atomicAdd(&cc[p], 1);
     }
 }
 
-// ==============================================================================
-//        커널 2: CSR 형식의 인접 리스트를 병렬로 채우는 커널 (변경 없음)
-// ==============================================================================
-__global__ void fill_adjacency_list_kernel(
-    const float* population_ptr,
-    const int* offset_ptr,
-    int* temp_offset_ptr,
-    int* child_indices_ptr,
-    int pop_size,
-    int max_nodes) {
+__global__ void k_check_overflow_per_tree(
+    const int* __restrict__ child_counts, // (B,N)
+    int B, int N, int max_children,
+    int* __restrict__ overflow_mask       // (B) int32
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+    const int* cc = child_counts + (size_t)b * N;
 
-    const int total_nodes = pop_size * max_nodes;
-    const int node_gid = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ int s_flag;
+    if (threadIdx.x == 0) s_flag = 0;
+    __syncthreads();
 
-    if (node_gid >= total_nodes) {
-        return;
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        if (cc[i] > max_children) atomicExch(&s_flag, 1);
     }
-
-    const float* node_data = population_ptr + node_gid * NODE_INFO_DIM;
-
-    if (node_data[COL_NODE_TYPE] != NODE_TYPE_UNUSED) {
-        int parent_idx = static_cast<int>(node_data[COL_PARENT_IDX]);
-        if (parent_idx != -1) {
-            int tree_idx = node_gid / max_nodes;
-            int parent_gid = tree_idx * max_nodes + parent_idx;
-            int placement_offset = atomicAdd(&temp_offset_ptr[parent_gid], 1);
-            int local_node_idx = node_gid % max_nodes;
-            child_indices_ptr[placement_offset] = local_node_idx;
-        }
-    }
+    __syncthreads();
+    if (threadIdx.x == 0) overflow_mask[b] = s_flag;
 }
 
+std::tuple<long, torch::Tensor, torch::Tensor> count_and_create_offsets_cuda(
+    const torch::Tensor& trees,
+    int max_children
+){
+    TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
+                "trees must be (B,N,D) float32 CUDA contiguous");
+    TORCH_CHECK(max_children >= 0, "max_children must be >= 0");
 
-// ==============================================================================
-// [신규] 커널 3 헬퍼 함수: 공유 메모리 내에서 Bitonic Sort의 한 단계를 수행
-// ==============================================================================
-__device__ void bitonic_sort_step(int* data, int j, int k, int thread_id) {
-    int ixj = thread_id ^ j;
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    auto i32 = torch::TensorOptions().device(trees.device()).dtype(torch::kInt32);
 
-    if (ixj > thread_id) {
-        if ((thread_id & k) == 0) { // 오름차순
-            if (data[thread_id] > data[ixj]) {
-                int temp = data[thread_id];
-                data[thread_id] = data[ixj];
-                data[ixj] = temp;
+    // (B,N) counts
+    auto child_counts  = torch::empty({B, N}, i32);
+    // (B) overflow mask
+    auto overflow_mask = torch::empty({B}, i32);
+
+    c10::cuda::CUDAGuard guard(trees.device());
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    dim3 grid(B), block(256);
+    k_count_children_per_tree<<<grid, block, 0, stream>>>(
+        trees.data_ptr<float>(), B, N, D,
+        child_counts.data_ptr<int>()
+    );
+    CUDA_CHECK_ERRORS();
+
+    k_check_overflow_per_tree<<<grid, block, 0, stream>>>(
+        child_counts.data_ptr<int>(), B, N, max_children, overflow_mask.data_ptr<int>()
+    );
+    CUDA_CHECK_ERRORS();
+
+    // CSR offsets: flatten counts (B*N) -> cumsum
+    auto counts_flat = child_counts.reshape({B * N});
+    auto offsets     = torch::empty({B * N + 1}, i32);
+    offsets.index_put_({0}, 0);
+    offsets.slice(0, 1, B * N + 1).copy_(torch::cumsum(counts_flat, 0, torch::kInt32));
+    long total_children = offsets.index({-1}).item<long>();
+    return {total_children, offsets, overflow_mask};
+}
+
+// -----------------------------------------------------------------------------
+// Pass 2A: Fill + (optional) sort using shared-cursor tiling (block = tree)
+// -----------------------------------------------------------------------------
+__global__ void k_fill_sort_shared(
+    const float* __restrict__ trees, // (B,N,D)
+    int B, int N, int D,
+    const int*  __restrict__ off,    // (B*N+1)
+    int*        __restrict__ chi,    // (total_children)
+    int max_children,
+    int parents_tile,                 // parents in shared
+    int sort_buf,                     // shared sort capacity (#ints)
+    bool sort_children
+){
+    extern __shared__ int s_mem[];
+    int* s_wcursor = s_mem;                  // size = parents_tile
+    int* s_sort    = s_mem + parents_tile;   // size = sort_buf
+    const int b = blockIdx.x;
+    if (b >= B) return;
+
+    const float* tree = trees + (size_t)b * N * D;
+    const int INT_INF = std::numeric_limits<int>::max();
+
+    for (int p0 = 0; p0 < N; p0 += parents_tile){
+        int tile = parents_tile;
+        if (p0 + tile > N) tile = N - p0;
+        if (tile <= 0) break;
+
+        // 1) init cursors for this tile
+        for (int t = threadIdx.x; t < tile; t += blockDim.x){
+            s_wcursor[t] = off[(size_t)b * N + (p0 + t)];
+        }
+        __syncthreads();
+
+        // 2) fill (scan nodes once)
+        for (int i = threadIdx.x; i < N; i += blockDim.x){
+            const float* nb = node_ptr(tree, D, i);
+            int nt = f2i(nb[COL_NODE_TYPE]); if (nt == NODE_TYPE_UNUSED) continue;
+            int p  = f2i(nb[COL_PARENT_IDX]);
+            if (p < p0 || p >= p0 + tile) continue;
+            if (!valid_idx(p, N)) continue;
+            int lp  = p - p0;
+            int pos = atomicAdd(&s_wcursor[lp], 1);
+            int end = off[(size_t)b * N + p + 1];
+            if (pos < end){
+                chi[pos] = i;
             }
-        } else { // 내림차순
-            if (data[thread_id] < data[ixj]) {
-                int temp = data[thread_id];
-                data[thread_id] = data[ixj];
-                data[ixj] = temp;
+        }
+        __syncthreads();
+
+        // 3) sort per parent (sequential by parent; all threads cooperate)
+        if (sort_children && sort_buf >= 2){
+            for (int lp = 0; lp < tile; ++lp){
+                int p     = p0 + lp;
+                int start = off[(size_t)b * N + p];
+                int end   = off[(size_t)b * N + p + 1];
+                int wrote = s_wcursor[lp]; if (wrote > end) wrote = end;
+                int deg   = wrote - start;
+                if (deg <= 1){ __syncthreads(); continue; }
+
+                int T = 1; while (T < deg && T < sort_buf) T <<= 1;
+                if (T < 2) T = 2; if (T > sort_buf) T = sort_buf;
+
+                // load + filter invalid + pad
+                for (int i = threadIdx.x; i < T; i += blockDim.x){
+                    int v = (i < deg) ? chi[start + i] : INT_INF;
+                    if (i < deg){
+                        if (!valid_idx(v, N)) v = INT_INF; // defensive
+                    }
+                    s_sort[i] = v;
+                }
+                __syncthreads();
+
+                // bitonic
+                for (int k = 2; k <= T; k <<= 1){
+                    for (int j = k >> 1; j > 0; j >>= 1){
+                        for (int idx = threadIdx.x; idx < T; idx += blockDim.x){
+                            int ixj = idx ^ j;
+                            if (ixj > idx){
+                                bool up = ((idx & k) == 0);
+                                int a = s_sort[idx], b = s_sort[ixj];
+                                if ((up && a > b) || (!up && a < b)){
+                                    s_sort[idx] = b; s_sort[ixj] = a;
+                                }
+                            }
+                        }
+                        __syncthreads();
+                    }
+                }
+
+                // store
+                for (int i = threadIdx.x; i < deg; i += blockDim.x){
+                    chi[start + i] = s_sort[i];
+                }
+                __syncthreads();
             }
         }
+        __syncthreads();
     }
 }
 
-// ==============================================================================
-// [전면 수정] 커널 3: 각 부모의 자식 리스트를 Bitonic Sort로 병렬 정렬하는 커널
-// ==============================================================================
-__global__ void sort_children_kernel(
-    const int* offset_ptr,
-    int* child_indices_ptr,
-    int pop_size,
-    int max_nodes,
-    int max_children) {
+// -----------------------------------------------------------------------------
+// Pass 2B: Fill + (optional) sort using GLOBAL cursors (fallback; block = tree)
+// -----------------------------------------------------------------------------
+__global__ void k_fill_sort_global(
+    const float* __restrict__ trees, // (B,N,D)
+    int B, int N, int D,
+    const int*  __restrict__ off,    // (B*N+1)
+    int*        __restrict__ chi,    // (total_children)
+    int*        __restrict__ curs,   // (B*N) global cursors (initialized as off[b*N + p])
+    int max_children,
+    int sort_buf,                     // shared sort capacity (#ints)
+    bool sort_children
+){
+    extern __shared__ int s_sort[]; // size = sort_buf
+    const int b = blockIdx.x;
+    if (b >= B) return;
 
-    // 정렬을 위한 공유 메모리 할당
-    extern __shared__ int s_children[];
+    const float* tree = trees + (size_t)b * N * D;
+    const int INT_INF = std::numeric_limits<int>::max();
 
-    // 각 스레드 블록이 하나의 부모 노드를 담당합니다.
-    const int parent_gid = blockIdx.x;
-    if (parent_gid >= pop_size * max_nodes) return;
-
-    const int start_idx = offset_ptr[parent_gid];
-    const int end_idx = offset_ptr[parent_gid + 1];
-    const int num_children = end_idx - start_idx;
-
-    if (num_children <= 1) return;
-
-    // 1. 전역 메모리 -> 공유 메모리로 자식 리스트 복사
-    int local_tid = threadIdx.x;
-    if (local_tid < num_children) {
-        s_children[local_tid] = child_indices_ptr[start_idx + local_tid];
+    // 1) fill (single pass)
+    for (int i = threadIdx.x; i < N; i += blockDim.x){
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]); if (nt == NODE_TYPE_UNUSED) continue;
+        int p  = f2i(nb[COL_PARENT_IDX]);
+        if (!valid_idx(p, N)) continue;
+        int pos = atomicAdd(&curs[(size_t)b * N + p], 1);
+        int end = off[(size_t)b * N + p + 1];
+        if (pos < end){
+            chi[pos] = i;
+        }
     }
     __syncthreads();
 
-    // 2. Bitonic Sort 수행 (공유 메모리 내에서)
-    for (int k = 2; k <= blockDim.x; k <<= 1) { // blockDim.x는 max_children의 다음 2의 거듭제곱
-        for (int j = k >> 1; j > 0; j = j >> 1) {
-            __syncthreads(); // 이전 스텝의 모든 비교/교환이 끝날 때까지 대기
-            bitonic_sort_step(s_children, j, k, local_tid);
+    // 2) sort per parent (sequential; all threads cooperate)
+    if (sort_children && sort_buf >= 2){
+        for (int p = 0; p < N; ++p){
+            int start = off[(size_t)b * N + p];
+            int end   = off[(size_t)b * N + p + 1];
+            int deg   = end - start; // global cursor finalized to end; we use [start,end)
+            if (deg <= 1){ __syncthreads(); continue; }
+
+            int T = 1; while (T < deg && T < sort_buf) T <<= 1;
+            if (T < 2) T = 2; if (T > sort_buf) T = sort_buf;
+
+            // load + filter invalid + pad
+            for (int i = threadIdx.x; i < T; i += blockDim.x){
+                int v = (i < deg) ? chi[start + i] : INT_INF;
+                if (i < deg){
+                    if (!valid_idx(v, N)) v = INT_INF;
+                }
+                s_sort[i] = v;
+            }
+            __syncthreads();
+
+            // bitonic
+            for (int k = 2; k <= T; k <<= 1){
+                for (int j = k >> 1; j > 0; j >>= 1){
+                    for (int idx = threadIdx.x; idx < T; idx += blockDim.x){
+                        int ixj = idx ^ j;
+                        if (ixj > idx){
+                            bool up = ((idx & k) == 0);
+                            int a = s_sort[idx], b = s_sort[ixj];
+                            if ((up && a > b) || (!up && a < b)){
+                                s_sort[idx] = b; s_sort[ixj] = a;
+                            }
+                        }
+                    }
+                    __syncthreads();
+                }
+            }
+
+            // store
+            for (int i = threadIdx.x; i < deg; i += blockDim.x){
+                chi[start + i] = s_sort[i];
+            }
+            __syncthreads();
         }
     }
-    __syncthreads();
-
-    // 3. 정렬된 공유 메모리 -> 전역 메모리로 결과 복사
-    if (local_tid < num_children) {
-        child_indices_ptr[start_idx + local_tid] = s_children[local_tid];
-    }
 }
 
-
-// ==============================================================================
-//         1단계 C++ 래퍼 함수: 카운팅 및 오프셋 생성 (변경 없음)
-// ==============================================================================
-std::pair<long, torch::Tensor> count_and_create_offsets_cuda(const torch::Tensor& population_tensor) {
-    TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device");
-    TORCH_CHECK(population_tensor.is_contiguous(), "Population tensor must be contiguous");
-    
-    const int pop_size = population_tensor.size(0);
-    const int max_nodes = population_tensor.size(1);
-    const int total_nodes = pop_size * max_nodes;
-    auto options = torch::TensorOptions().device(population_tensor.device()).dtype(torch::kInt32);
-
-    torch::Tensor child_counts = torch::zeros({total_nodes}, options);
-    
-    const int threads_per_block = 256;
-    const int num_blocks = (total_nodes + threads_per_block - 1) / threads_per_block;
-
-    count_children_kernel<<<num_blocks, threads_per_block>>>(
-        population_tensor.data_ptr<float>(),
-        child_counts.data_ptr<int>(),
-        pop_size,
-        max_nodes
-    );
-    cudaDeviceSynchronize();
-
-    torch::Tensor offset_array = torch::zeros({total_nodes + 1}, options);
-    offset_array.slice(0, 1, total_nodes + 1) = torch::cumsum(child_counts, 0, torch::kInt32);
-    
-    long total_children = offset_array.index({-1}).item<long>();
-
-    return {total_children, offset_array};
-}
-
-// [수정] 헬퍼 함수: x보다 크거나 같은 가장 작은 2의 거듭제곱을 계산
-unsigned int next_power_of_2(unsigned int n) {
-    if (n == 0) return 1;
-    n--;
-    n |= n >> 1;
-    n |= n >> 2;
-    n |= n >> 4;
-    n |= n >> 8;
-    n |= n >> 16;
-    n++;
-    return n;
-}
-
-
-// ==============================================================================
-// [수정] 3단계 정렬 커널을 호출하는 C++ 런처 함수
-// ==============================================================================
-void launch_sort_children_kernel(
-    const int* offset_ptr,
-    int* child_indices_ptr,
-    int pop_size,
-    int max_nodes,
-    int max_children) {
-    
-    const int total_parent_nodes = pop_size * max_nodes;
-    if (total_parent_nodes == 0) return;
-
-    // [수정] Bitonic Sort를 위한 스레드 블록 및 공유 메모리 설정
-    // 스레드 수는 max_children보다 크거나 같은 최소 2의 거듭제곱으로 설정
-    const int threads_per_block = next_power_of_2(max_children);
-    const int num_blocks = total_parent_nodes; // 각 블록이 부모 노드 하나를 담당
-
-    // 공유 메모리 크기 계산
-    const size_t shared_mem_size = threads_per_block * sizeof(int);
-
-    sort_children_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
-        offset_ptr,
-        child_indices_ptr,
-        pop_size,
-        max_nodes,
-        max_children
-    );
-    cudaDeviceSynchronize();
-}
-
-// ==============================================================================
-//            2단계 C++ 래퍼 함수: 인덱스 내용 채우기 (수정됨)
-// ==============================================================================
 void fill_child_indices_cuda(
-    const torch::Tensor& population_tensor,
-    const torch::Tensor& offset_array,
-    torch::Tensor& child_indices, // Python에서 생성된 텐서를 참조로 받음
-    int max_children // [수정] max_children 파라미터 추가
-) {
-    TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device");
-    TORCH_CHECK(offset_array.is_cuda(), "Offset array must be on a CUDA device");
-    TORCH_CHECK(child_indices.is_cuda(), "Child indices must be on a CUDA device");
+    const torch::Tensor& trees,
+    const torch::Tensor& offsets_flat,
+    torch::Tensor&       child_indices,
+    int                  max_children,
+    bool                 sort_children
+){
+    TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
+                "trees must be (B,N,D) float32 CUDA contiguous");
+    TORCH_CHECK(offsets_flat.is_cuda() && offsets_flat.dtype()==torch::kInt32 && offsets_flat.dim()==1,
+                "offsets_flat must be (B*N+1) int32 CUDA");
+    TORCH_CHECK(child_indices.is_cuda() && child_indices.dtype()==torch::kInt32 && child_indices.dim()==1,
+                "child_indices must be (total_children) int32 CUDA");
+    TORCH_CHECK(offsets_flat.device() == trees.device(), "offsets must be on same device as trees");
+    TORCH_CHECK(child_indices.device() == trees.device(), "child_indices must be on same device as trees");
+    TORCH_CHECK(max_children >= 0, "max_children must be >= 0");
 
-    const int pop_size = population_tensor.size(0);
-    const int max_nodes = population_tensor.size(1);
-    const int total_nodes = pop_size * max_nodes;
-    long total_children = child_indices.size(0);
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(offsets_flat.size(0) == B * N + 1, "offsets size mismatch");
 
-    // C++ 내부에서 임시로 사용할 텐서 생성 (atomicAdd를 위함)
-    torch::Tensor temp_offset = offset_array.clone();
+    if (child_indices.numel() == 0) return;
 
-    if (total_children > 0) {
-        const int threads_per_block_fill = 256;
-        const int num_blocks_fill = (total_nodes + threads_per_block_fill - 1) / threads_per_block_fill;
-        
-        // Step 2a: 비결정적으로 자식 리스트를 채웁니다. (기존 로직)
-        fill_adjacency_list_kernel<<<num_blocks_fill, threads_per_block_fill>>>(
-            population_tensor.data_ptr<float>(),
-            offset_array.data_ptr<int>(),
-            temp_offset.data_ptr<int>(),
-            child_indices.data_ptr<int>(),
-            pop_size,
-            max_nodes
-        );
-        cudaDeviceSynchronize(); // 채우기 완료까지 대기
+    // Length sanity: chi length must equal offsets[-1]
+    TORCH_CHECK(child_indices.numel() == offsets_flat.index({-1}).item<int>(),
+                "child_indices length must match offsets[-1]");
 
-        // [수정] Step 2b: 채워진 자식 리스트를 병렬로 정렬합니다.
-        launch_sort_children_kernel(
-            offset_array.data_ptr<int>(),
-            child_indices.data_ptr<int>(),
-            pop_size,
-            max_nodes,
-            max_children // 추가된 파라미터 전달
-        );
-        // cudaDeviceSynchronize()는 launch_sort_children_kernel 내부에 이미 있으므로 생략 가능
+    // Shared memory planning
+    const int shm_budget_bytes = get_shared_mem_budget_bytes();
+    int max_ints = shm_budget_bytes / (int)sizeof(int);
+    if (max_ints < 2) max_ints = 2;
+
+    int sort_buf = next_pow2_int(std::max(1, max_children));
+    int sort_buf_max = max_ints - 1; // leave at least 1 int for parents_tile
+    if (sort_buf > sort_buf_max){
+        // Sorting cannot fit; disable deterministically (safe)
+        sort_children = false;
+        sort_buf = 1;
     }
+    int parents_tile = max_ints - sort_buf;
+    if (parents_tile < 1) parents_tile = 1;
+    if (parents_tile > N) parents_tile = N;
+
+    // Heuristic: if tiling is too small, switch to global-cursor mode
+    bool use_global = (parents_tile < (N >> 3)); // threshold = N/8
+
+    c10::cuda::CUDAGuard guard(trees.device());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dim3 grid(B), block(256);
+
+    if (!use_global){
+        const size_t shm_bytes = (size_t)(parents_tile + sort_buf) * sizeof(int);
+        k_fill_sort_shared<<<grid, block, shm_bytes, stream>>>(
+            trees.data_ptr<float>(), B, N, D,
+            offsets_flat.data_ptr<int>(),
+            child_indices.data_ptr<int>(),
+            max_children,
+            parents_tile,
+            sort_buf,
+            sort_children
+        );
+        CUDA_CHECK_ERRORS();
+    } else {
+        // Allocate global cursors as a clone of offsets (B*N+1) -> we use only first B*N
+        auto curs = offsets_flat.index({torch::indexing::Slice(0, B * N)}).clone();
+        const size_t shm_bytes = (size_t)(sort_children ? sort_buf : 1) * sizeof(int);
+        k_fill_sort_global<<<grid, block, shm_bytes, stream>>>(
+            trees.data_ptr<float>(), B, N, D,
+            offsets_flat.data_ptr<int>(),
+            child_indices.data_ptr<int>(),
+            curs.data_ptr<int>(),
+            max_children,
+            sort_buf,
+            sort_children
+        );
+        CUDA_CHECK_ERRORS();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Validator
+// -----------------------------------------------------------------------------
+enum ViolBits {
+  V_MIXED_CHILDREN   = 1<<0,
+  V_LEAF_NOT_ACTION  = 1<<1,
+  V_ACTION_HAS_CHILD = 1<<2,
+  V_SINGLE_ACTION_BR = 1<<3,
+  V_DEPTH_MISMATCH   = 1<<4,
+  V_CHILD_OVERFLOW   = 1<<5,
+  V_BAD_PARENT       = 1<<6,
+  V_ROOT_BROKEN      = 1<<7,
+  V_ROOT_LEAF        = 1<<8
+};
+
+__global__ void k_validate_adjacency(
+  const float* __restrict__ trees, int B, int N, int D,
+  const int*   __restrict__ off,
+  const int*   __restrict__ chi,
+  int max_children, int max_depth,
+  int*         __restrict__ out_mask
+){
+  const int b = blockIdx.x;
+  if (b >= B) return;
+
+  const float* tree = trees + (size_t)b * N * D;
+  int local_mask = 0;
+
+  for (int p = threadIdx.x; p < N; p += blockDim.x){
+    int s = off[(size_t)b * N + p];
+    int e = off[(size_t)b * N + p + 1];
+    int deg = e - s;
+    if (deg > max_children) local_mask |= V_CHILD_OVERFLOW;
+
+    int act=0, dec=0;
+    for (int k = s; k < e; ++k){
+      int c = chi[k];
+      if (!valid_idx(c, N)){ local_mask |= V_BAD_PARENT; continue; }
+      int ct = f2i(node_ptr(tree, D, c)[COL_NODE_TYPE]);
+      if (ct == NODE_TYPE_ACTION)        ++act;
+      else if (ct == NODE_TYPE_DECISION) ++dec;
+
+      int pd = f2i(node_ptr(tree, D, p)[COL_DEPTH]);
+      int cd = f2i(node_ptr(tree, D, c)[COL_DEPTH]);
+      if (cd != pd + 1 || cd >= max_depth) local_mask |= V_DEPTH_MISMATCH;
+    }
+
+    // Mixed children
+    if (act>0 && dec>0) local_mask |= V_MIXED_CHILDREN;
+    // Single-action rule (FIXED): if any action children exist, degree must be exactly 1
+    if (act>0 && deg!=1) local_mask |= V_SINGLE_ACTION_BR;
+
+    int pt = f2i(node_ptr(tree, D, p)[COL_NODE_TYPE]);
+    // ACTION node must have zero children
+    if (pt == NODE_TYPE_ACTION && deg>0) local_mask |= V_ACTION_HAS_CHILD;
+
+    // Leaf must be ACTION (exclude true roots)
+    int parent = f2i(node_ptr(tree, D, p)[COL_PARENT_IDX]);
+    if (deg==0 && pt != NODE_TYPE_ACTION){
+        if (parent >= 0) local_mask |= V_LEAF_NOT_ACTION;
+    }
+    // Root sanity
+    if (parent == -1){
+        if (pt != NODE_TYPE_ROOT_BRANCH) local_mask |= V_ROOT_BROKEN;
+        int depth = f2i(node_ptr(tree, D, p)[COL_DEPTH]);
+        if (depth != 0) local_mask |= V_DEPTH_MISMATCH;
+        if (deg == 0)   local_mask |= V_ROOT_LEAF; // optional diagnostic
+    } else if (parent < -1 || parent >= N){
+        local_mask |= V_BAD_PARENT;
+    }
+    // Depth range
+    int depth = f2i(node_ptr(tree, D, p)[COL_DEPTH]);
+    if (depth >= max_depth) local_mask |= V_DEPTH_MISMATCH;
+  }
+
+  __shared__ int s;
+  if (threadIdx.x == 0) s = 0;
+  __syncthreads();
+  atomicOr(&s, local_mask);
+  __syncthreads();
+  if (threadIdx.x == 0) out_mask[b] = s;
+}
+
+void validate_adjacency_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& offsets_flat,
+    const torch::Tensor& child_indices,
+    int                  max_children,
+    int                  max_depth,
+    torch::Tensor        out_violation_mask
+){
+    TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
+                "trees must be (B,N,D) float32 CUDA contiguous");
+    TORCH_CHECK(offsets_flat.is_cuda() && offsets_flat.dtype()==torch::kInt32 && offsets_flat.dim()==1,
+                "offsets_flat must be (B*N+1) int32 CUDA");
+    TORCH_CHECK(child_indices.is_cuda() && child_indices.dtype()==torch::kInt32 && child_indices.dim()==1,
+                "child_indices must be (total_children) int32 CUDA");
+    TORCH_CHECK(out_violation_mask.is_cuda() && out_violation_mask.dtype()==torch::kInt32 && out_violation_mask.dim()==1,
+                "out_violation_mask must be (B,) int32 CUDA");
+
+    TORCH_CHECK(offsets_flat.device() == trees.device(), "offsets must be on same device as trees");
+    TORCH_CHECK(child_indices.device() == trees.device(), "child_indices must be on same device as trees");
+    TORCH_CHECK(out_violation_mask.device() == trees.device(), "mask must be on same device as trees");
+
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(offsets_flat.size(0) == B * N + 1, "offsets size mismatch");
+    TORCH_CHECK(child_indices.numel() == offsets_flat.index({-1}).item<int>(),
+                "child_indices length must match offsets[-1]");
+    TORCH_CHECK(out_violation_mask.size(0) == B, "mask size mismatch");
+
+    c10::cuda::CUDAGuard guard(trees.device());
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    dim3 grid(B), block(256);
+    k_validate_adjacency<<<grid, block, 0, stream>>>(
+        trees.data_ptr<float>(), B, N, D,
+        offsets_flat.data_ptr<int>(),
+        child_indices.data_ptr<int>(),
+        max_children, max_depth,
+        out_violation_mask.data_ptr<int>()
+    );
+    CUDA_CHECK_ERRORS();
 }

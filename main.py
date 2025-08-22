@@ -161,7 +161,7 @@ def main():
         if gatree_cuda is not None and str(env_cfg['device']).startswith('cuda'):
             gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())
     except Exception as e:
-        logging.warning(f"Validation after CUDA init skipped due to error: {e}")
+        raise RuntimeError(f"validate_trees failed after CUDA init: {e}")
     logging.info("Population initialized successfully.")
 
     # ==========================================================================

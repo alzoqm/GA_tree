@@ -5,8 +5,8 @@ from typing import Tuple
 
 from models.constants import (
     COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1,
-    NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, ROOT_BRANCH_LONG,
-    ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
+    NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, NODE_TYPE_ACTION, ROOT_BRANCH_LONG,
+    ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ACTION_CLOSE_ALL
 )
 
 # C++/CUDA로 구현된 헬퍼 함수 임포트
@@ -102,11 +102,141 @@ class RootBranchCrossover(BaseCrossover):
             child_batch, p1_batch, p2_batch, donor_map,
             bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer
         )
+
+        # Post-crossover structural repair in CUDA using Python-allocated buffers
+        B = child_batch.size(0)
+        device = child_batch.device
+        max_nodes = child_batch.size(1)
+
+        # Work buffers allocated in Python only (as requested)
+        child_count_buf = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        act_cnt_buf     = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        dec_cnt_buf     = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        bfs_q_buf       = torch.empty((B, 2 * max_nodes), dtype=torch.int32, device=device)
+        bfs_res_buf     = torch.empty((B, 2 * max_nodes), dtype=torch.int32, device=device)
+
+        gatree_cuda.repair_after_root_branch(
+            child_batch,
+            child_count_buf,
+            act_cnt_buf,
+            dec_cnt_buf,
+            bfs_q_buf,
+            bfs_res_buf
+        )
+        
         # Validate trees after CUDA root-branch crossover (if available)
         try:
             if gatree_cuda is not None and child_batch.is_cuda:
                 gatree_cuda.validate_trees(child_batch.contiguous())
+                print('complete root branch crossover')
         except Exception:
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after root_branch crossover.\n{traceback.format_exc()}")
 
         return child_batch # GPU 텐서를 그대로 반환
+
+    def _fix_empty_root_branches(self, child_batch: torch.Tensor):
+        """
+        Fix any root branches that have no children by adding default ACTION nodes.
+        This ensures that root branches are never leaf nodes, which would violate
+        the tree structure constraint that only ACTION nodes can be leaves.
+        """
+        device = child_batch.device
+        batch_size, max_nodes, node_dim = child_batch.shape
+        
+        for b in range(batch_size):
+            # Check each root branch (indices 0, 1, 2) for children
+            for root_idx in range(3):
+                has_children = False
+                
+                # Check if this root branch has any children
+                for i in range(3, max_nodes):
+                    if child_batch[b, i, COL_NODE_TYPE] != NODE_TYPE_UNUSED:
+                        if child_batch[b, i, COL_PARENT_IDX] == root_idx:
+                            has_children = True
+                            break
+                
+                # If no children found, add a default ACTION node
+                if not has_children:
+                    # Find next available index
+                    next_available_idx = None
+                    for i in range(3, max_nodes):
+                        if child_batch[b, i, COL_NODE_TYPE] == NODE_TYPE_UNUSED:
+                            next_available_idx = i
+                            break
+                    
+                    if next_available_idx is not None:
+                        child_batch[b, next_available_idx, COL_NODE_TYPE] = NODE_TYPE_ACTION
+                        child_batch[b, next_available_idx, COL_PARENT_IDX] = root_idx
+                        child_batch[b, next_available_idx, COL_DEPTH] = 1
+                        child_batch[b, next_available_idx, COL_PARAM_1] = ACTION_CLOSE_ALL  # Safe default action
+                        
+                        # Clear other parameters
+                        for col in range(4, node_dim):
+                            child_batch[b, next_available_idx, col] = 0.0
+                    else:
+                        # Tree is full, need to find and fix the issue differently
+                        # Strategy: Find a DECISION node that became a leaf and convert it to ACTION
+                        from models.constants import NODE_TYPE_DECISION
+                        found_node = False
+                        for i in range(max_nodes-1, 2, -1):  # Search backwards
+                            if child_batch[b, i, COL_NODE_TYPE] == NODE_TYPE_DECISION:
+                                # Check if this DECISION node is a leaf (no children)
+                                has_children = False
+                                for j in range(3, max_nodes):
+                                    if (child_batch[b, j, COL_NODE_TYPE] != NODE_TYPE_UNUSED and
+                                        child_batch[b, j, COL_PARENT_IDX] == i):
+                                        has_children = True
+                                        break
+                                
+                                if not has_children:
+                                    # Convert this leaf DECISION to ACTION and reassign to empty root
+                                    child_batch[b, i, COL_NODE_TYPE] = NODE_TYPE_ACTION
+                                    child_batch[b, i, COL_PARENT_IDX] = root_idx
+                                    child_batch[b, i, COL_DEPTH] = 1
+                                    child_batch[b, i, COL_PARAM_1] = ACTION_CLOSE_ALL
+                                    for col in range(4, node_dim):
+                                        child_batch[b, i, col] = 0.0
+                                    found_node = True
+                                    break
+                        
+                        if not found_node:
+                            # Last resort: find ANY ACTION node and reassign it
+                            for i in range(max_nodes-1, 2, -1):
+                                if child_batch[b, i, COL_NODE_TYPE] == NODE_TYPE_ACTION:
+                                    child_batch[b, i, COL_PARENT_IDX] = root_idx
+                                    child_batch[b, i, COL_DEPTH] = 1
+                                    child_batch[b, i, COL_PARAM_1] = ACTION_CLOSE_ALL
+                                    for col in range(4, node_dim):
+                                        child_batch[b, i, col] = 0.0
+                                    found_node = True
+                                    break
+
+    def _fix_orphaned_decision_nodes(self, child_batch: torch.Tensor):
+        """
+        Fix DECISION nodes that have become leaves (have no children).
+        Convert them to ACTION nodes since only ACTION nodes can be leaves.
+        """
+        from models.constants import NODE_TYPE_DECISION, NODE_TYPE_ACTION
+        
+        batch_size, max_nodes, node_dim = child_batch.shape
+        
+        for b in range(batch_size):
+            # Find DECISION nodes that are leaves
+            for i in range(3, max_nodes):  # Skip root branches
+                if child_batch[b, i, COL_NODE_TYPE] == NODE_TYPE_DECISION:
+                    # Check if this DECISION node has any children
+                    has_children = False
+                    for j in range(3, max_nodes):
+                        if (child_batch[b, j, COL_NODE_TYPE] != NODE_TYPE_UNUSED and
+                            child_batch[b, j, COL_PARENT_IDX] == i):
+                            has_children = True
+                            break
+                    
+                    # If no children, convert to ACTION node
+                    if not has_children:
+                        child_batch[b, i, COL_NODE_TYPE] = NODE_TYPE_ACTION
+                        child_batch[b, i, COL_PARAM_1] = ACTION_CLOSE_ALL  # Safe default action
+                        # Clear other parameters that are not needed for ACTION nodes
+                        for col in range(4, node_dim):
+                            child_batch[b, i, col] = 0.0

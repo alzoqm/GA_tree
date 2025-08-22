@@ -44,3 +44,13 @@ void subtree_crossover_batch_cuda(
     torch::Tensor& p1_candidates_buffer, // <--- 신규 버퍼 추가
     torch::Tensor& p2_candidates_buffer  // <--- 신규 버퍼 추가
 );
+
+// New: Repair after RootBranch crossover using preallocated arrays from Python
+void repair_after_root_branch_cuda(
+    torch::Tensor& trees,
+    torch::Tensor& child_count_buffer,
+    torch::Tensor& act_cnt_buffer,
+    torch::Tensor& dec_cnt_buffer,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer
+);

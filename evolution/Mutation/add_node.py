@@ -216,8 +216,9 @@ class AddNodeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
+                print('complete add node mutation')
         except Exception as e:
-            # Non-fatal: continue even if validation fails
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after add_node mutation.\n{traceback.format_exc()}")
 
         return trees

@@ -849,7 +849,7 @@ class GATreePop:
             try:
                 gatree_cuda.validate_trees(self.population_tensor.contiguous())
             except Exception as e:
-                print(f"Warning: validate_trees failed after init_population_cuda: {e}")
+                raise RuntimeError(f"validate_trees failed after init_population_cuda: {e}")
 
             # 7) Stitch Python objects to GPU views (no CPU traversal here)
             self.population = []
@@ -924,6 +924,7 @@ class GATreePop:
         """
         [수정] 집단 내의 모든 GATree 개체에 대해 노드 재조직을 GPU에서 병렬로 수행합니다.
         Python 멀티프로세싱 로직을 CUDA 커널 직접 호출로 대체합니다.
+        배열 할당을 Python에서 수행하여 메모리 관리를 개선합니다.
         """
         if not self.initialized:
             print("Warning: Reorganizing an uninitialized population.")
@@ -937,13 +938,31 @@ class GATreePop:
                 tree.reorganize_nodes()
             return
         
-        # [수정] C++/CUDA 확장 모듈 직접 호출
-        gatree_cuda.reorganize_population(self.population_tensor)
+        # [수정] Python에서 배열 할당 수행
+        pop_size = self.population_tensor.size(0)
+        max_nodes = self.population_tensor.size(1)
+        total_nodes = pop_size * max_nodes
+        
+        device = self.population_tensor.device
+        int_options = {'device': device, 'dtype': torch.int32}
+        
+        # 필요한 배열들을 Python에서 미리 할당
+        active_counts_per_tree = torch.zeros(pop_size, **int_options)
+        old_gid_to_new_gid_map = torch.empty(total_nodes, **int_options)
+        
+        # [수정] C++/CUDA 확장 모듈에 사전 할당된 배열 전달
+        gatree_cuda.reorganize_population_with_arrays(
+            self.population_tensor,
+            active_counts_per_tree,
+            old_gid_to_new_gid_map
+        )
+        
         # Validate population after reorganization
         try:
             gatree_cuda.validate_trees(self.population_tensor.contiguous())
+            print('complete reoranize nodes')
         except Exception as e:
-            print(f"Warning: validate_trees failed after reorganize_population: {e}")
+            raise RuntimeError(f"validate_trees failed after reorganize_population: {e}")
         
         # [중요] CUDA 연산 후, Python GATree 객체들의 내부 상태를 텐서와 동기화합니다.
         # 이 과정이 없으면, 다음 연산(예: 시각화, CPU 기반 예측)에서 오류가 발생합니다.

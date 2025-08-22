@@ -62,7 +62,9 @@ class NodeParamMutation(BaseMutation):
         try:
             if gatree_cuda is not None and chromosomes.is_cuda:
                 gatree_cuda.validate_trees(chromosomes.contiguous())
+                print('complete node param mutation')
         except Exception:
-            pass
+            import traceback
+            raise RuntimeError(f"gatree_cuda.validate_trees failed after node_param mutation.\n{traceback.format_exc()}")
         
         return chromosomes

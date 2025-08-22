@@ -172,10 +172,10 @@ __global__ void copy_branches_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // [안전성] child 버퍼 전체를 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
-    // (블록당 1스레드 구성이라 직렬 초기화로 충분)
+    // [안전성] child 버퍼 중 non-root 노드만 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
+    // 루트 브랜치(0,1,2)는 Python에서 이미 설정되었으므로 건드리지 않음
     float* child_ptr_init = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
-    for (int i = 0; i < max_nodes; ++i) {
+    for (int i = 3; i < max_nodes; ++i) {  // Start from index 3, skip root branches (0,1,2)
         float* nd = child_ptr_init + i * NODE_INFO_DIM;
         nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
         // 부모/깊이/파라미터는 필요 시 이후 복사에서 덮어씀
@@ -284,7 +284,42 @@ __device__ int get_max_relative_depth(const float* tree_ptr, int* indices, int c
     return (int)(max_abs_depth - root_depth);
 }
 
-__device__ void transplant_one_way_device(
+__device__ bool would_violate_tree_structure(
+    const float* child_ptr, int parent_idx, int new_subtree_root_type, int max_nodes)
+{
+    if (parent_idx < 0 || parent_idx >= max_nodes) return true;
+    
+    // Count existing children by type
+    int action_children = 0;
+    int decision_children = 0;
+    
+    for (int i = 0; i < max_nodes; ++i) {
+        if ((int)child_ptr[i * NODE_INFO_DIM + COL_PARENT_IDX] == parent_idx) {
+            int child_type = (int)child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE];
+            if (child_type == NODE_TYPE_ACTION) {
+                action_children++;
+            } else if (child_type == NODE_TYPE_DECISION) {
+                decision_children++;
+            }
+        }
+    }
+    
+    // Check if adding new subtree would violate rules
+    if (new_subtree_root_type == NODE_TYPE_ACTION) {
+        // Rule 1: No mixed children (action + decision)
+        if (decision_children > 0) return true;
+        
+        // Rule 2: Parent with action child must have exactly one child
+        if (action_children > 0) return true; // Already has action child, can't add another
+    } else if (new_subtree_root_type == NODE_TYPE_DECISION) {
+        // Rule 1: No mixed children (action + decision)  
+        if (action_children > 0) return true;
+    }
+    
+    return false;
+}
+
+__device__ bool transplant_one_way_device(
     float* child_ptr, const float* recipient_ptr, const float* donor_ptr,
     int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
     int* my_old_to_new_map, int* my_empty_slots_buffer, int max_nodes)
@@ -307,7 +342,7 @@ __device__ void transplant_one_way_device(
             my_empty_slots_buffer[empty_count++] = i;
         }
     }
-    if (empty_count < d_count) return; // 공간 부족 시 이식 중단
+    if (empty_count < d_count) return false; // 공간 부족 시 이식 중단
 
     // 4. old_to_new_map 생성
     for (int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
@@ -317,9 +352,15 @@ __device__ void transplant_one_way_device(
     
     // 5. 깊이 오프셋 계산
     int r_parent_idx = (int)recipient_ptr[r_idx * NODE_INFO_DIM + COL_PARENT_IDX];
-    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return; // 유효하지 않은 부모
+    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return false; // 유효하지 않은 부모
     float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
     float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
+
+    // 5.5. Check if transplantation would violate tree structure rules
+    int donor_root_type = (int)donor_ptr[d_idx * NODE_INFO_DIM + COL_NODE_TYPE];
+    if (would_violate_tree_structure(child_ptr, r_parent_idx, donor_root_type, max_nodes)) {
+        return false; // Abort transplantation to avoid invalid structure
+    }
 
     // 6. 노드 복사 및 업데이트
     for (int i = 0; i < d_count; ++i) {
@@ -340,6 +381,7 @@ __device__ void transplant_one_way_device(
             dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
         }
     }
+    return true; // Success
 }
 
 
@@ -419,18 +461,19 @@ __global__ void subtree_crossover_kernel(
         if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
 
         // --- 5. 이식 수행 ---
-        transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
+        bool transplant1_success = transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
             p1_idx, p2_idx,
             my_results1, s1_count,
             my_results2, s2_count,
             my_old_to_new_map, my_queue1, max_nodes);
 
-        transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr,
+        bool transplant2_success = transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr,
             p2_idx, p1_idx,
             my_results2, s2_count,
             my_results1, s1_count,
             my_old_to_new_map, my_queue2, max_nodes);
-        success = true;
+        
+        success = transplant1_success && transplant2_success;
     }
 
     if (!success) {
@@ -546,5 +589,224 @@ void subtree_crossover_batch_cuda(
         p2_candidates_buffer.data_ptr<int>(),
         batch_size
     );
+    cudaDeviceSynchronize();
+}
+
+// ==============================================================================
+//                 NEW: Repair After RootBranch Crossover Kernel
+//   - All work buffers are allocated in Python and passed in here.
+//   - Ensures:
+//       1) Each root (0,1,2) has at least one child (adds default ACTION if empty)
+//       2) No DECISION leaves: convert DECISION with no children -> ACTION
+//       3) No mixing under a parent: if any ACTION child exists, remove all DECISION children
+//          and keep exactly one ACTION child (delete extra ACTION subtrees if any)
+//   - Deletions use BFS buffers to clear full subtrees.
+// ==============================================================================
+
+__device__ __forceinline__ int   rb_f2i(float x){ return __float2int_rn(x); }
+__device__ __forceinline__ float rb_i2f(int   x){ return static_cast<float>(x); }
+__device__ __forceinline__ bool  rb_valid_idx(int idx, int N){ return idx >= 0 && idx < N; }
+
+__device__ __forceinline__ float* rb_node(float* base, int D, int i){ return base + (size_t)i * D; }
+__device__ __forceinline__ const float* rb_node(const float* base, int D, int i){ return base + (size_t)i * D; }
+
+__device__ int rb_bfs_collect_subtree(
+    const float* tree, int N, int D, int root,
+    int* q, int* res, int cap
+){
+    if (!rb_valid_idx(root, N)) return 0;
+    const float* nb = rb_node(tree, D, root);
+    if (rb_f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) return 0;
+    int head=0, tail=0, outc=0;
+    if (cap > 0){ q[tail++] = root; res[outc++] = root; }
+    while (head < tail && tail < cap && outc < cap){
+        int cur = q[head++];
+        for (int j = 0; j < N && tail < cap && outc < cap; ++j){
+            const float* cb = rb_node(tree, D, j);
+            if (rb_f2i(cb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+            if (rb_f2i(cb[COL_PARENT_IDX]) == cur){
+                q[tail++] = j;
+                res[outc++] = j;
+            }
+        }
+    }
+    return outc;
+}
+
+__device__ void rb_clear_subtree(
+    float* tree, int N, int D, int root,
+    int* q, int* res, int cap
+){
+    int cnt = rb_bfs_collect_subtree(tree, N, D, root, q, res, cap);
+    for (int i = 0; i < cnt; ++i){
+        int idx = res[i];
+        if (!rb_valid_idx(idx, N)) continue;
+        float* nd = rb_node(tree, D, idx);
+        for (int k = 0; k < D; ++k) nd[k] = 0.0f;
+        nd[COL_NODE_TYPE]  = rb_i2f(NODE_TYPE_UNUSED);
+        nd[COL_PARENT_IDX] = rb_i2f(-1);
+        nd[COL_DEPTH]      = 0.0f;
+    }
+}
+
+__global__ void repair_after_root_branch_kernel(
+    float* __restrict__ trees, int B, int N, int D,
+    int* __restrict__ child_cnt, int* __restrict__ act_cnt, int* __restrict__ dec_cnt,
+    int* __restrict__ bfs_q, int* __restrict__ bfs_res
+){
+    int b = blockIdx.x;
+    if (b >= B) return;
+
+    float* tree = trees + (size_t)b * N * D;
+    int* ch = child_cnt + (size_t)b * N;
+    int* ac = act_cnt   + (size_t)b * N;
+    int* dc = dec_cnt   + (size_t)b * N;
+    int* q  = bfs_q     + (size_t)b * (2 * N);
+    int* rs = bfs_res   + (size_t)b * (2 * N);
+
+    // Zero counts in parallel
+    for (int i = threadIdx.x; i < N; i += blockDim.x){ ch[i] = 0; ac[i] = 0; dc[i] = 0; }
+    __syncthreads();
+
+    // Build counts in parallel
+    for (int j = threadIdx.x; j < N; j += blockDim.x){
+        const float* nb = rb_node(tree, D, j);
+        int t = rb_f2i(nb[COL_NODE_TYPE]);
+        if (t == NODE_TYPE_UNUSED) continue;
+        int p = rb_f2i(nb[COL_PARENT_IDX]);
+        if (!rb_valid_idx(p, N)) continue;
+        atomicAdd(&ch[p], 1);
+        if (t == NODE_TYPE_ACTION)   atomicAdd(&ac[p], 1);
+        if (t == NODE_TYPE_DECISION) atomicAdd(&dc[p], 1);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0){
+        // 1) Ensure roots (0,1,2) have ≥1 child: add default ACTION if empty
+        for (int r = 0; r < 3; ++r){
+            if (ch[r] == 0){
+                int slot = -1;
+                for (int i = 3; i < N; ++i){
+                    float* nd = rb_node(tree, D, i);
+                    if (rb_f2i(nd[COL_NODE_TYPE]) == NODE_TYPE_UNUSED){ slot = i; break; }
+                }
+                if (slot < 0){
+                    // Fallback: reuse the first ACTION node found by reparenting it to root r
+                    for (int i = 3; i < N && slot < 0; ++i){
+                        float* nd = rb_node(tree, D, i);
+                        if (rb_f2i(nd[COL_NODE_TYPE]) == NODE_TYPE_ACTION){ slot = i; break; }
+                    }
+                }
+                if (slot >= 0){
+                    float* nd = rb_node(tree, D, slot);
+                    nd[COL_NODE_TYPE]  = rb_i2f(NODE_TYPE_ACTION);
+                    nd[COL_PARENT_IDX] = rb_i2f(r);
+                    nd[COL_DEPTH]      = 1.0f;
+                    nd[COL_PARAM_1]    = rb_i2f(ACTION_CLOSE_ALL);
+                    // zero other params
+                    for (int c = 4; c < D; ++c) nd[c] = 0.0f;
+                    ch[r] = 1; ac[r] = 1; // reflect locally
+                }
+            }
+        }
+
+        // 2) Convert DECISION leaves → ACTION (safe default)
+        for (int i = 3; i < N; ++i){
+            float* nd = rb_node(tree, D, i);
+            if (rb_f2i(nd[COL_NODE_TYPE]) == NODE_TYPE_DECISION && ch[i] == 0){
+                nd[COL_NODE_TYPE] = rb_i2f(NODE_TYPE_ACTION);
+                nd[COL_PARAM_1]   = rb_i2f(ACTION_CLOSE_ALL);
+                for (int c = 4; c < D; ++c) nd[c] = 0.0f;
+            }
+        }
+    }
+    __syncthreads();
+
+    // Recompute counts after conversions
+    for (int i = threadIdx.x; i < N; i += blockDim.x){ ch[i] = 0; ac[i] = 0; dc[i] = 0; }
+    __syncthreads();
+    for (int j = threadIdx.x; j < N; j += blockDim.x){
+        const float* nb = rb_node(tree, D, j);
+        int t = rb_f2i(nb[COL_NODE_TYPE]);
+        if (t == NODE_TYPE_UNUSED) continue;
+        int p = rb_f2i(nb[COL_PARENT_IDX]);
+        if (!rb_valid_idx(p, N)) continue;
+        atomicAdd(&ch[p], 1);
+        if (t == NODE_TYPE_ACTION)   atomicAdd(&ac[p], 1);
+        if (t == NODE_TYPE_DECISION) atomicAdd(&dc[p], 1);
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0){
+        // 3) No-mix + single ACTION rule: if parent has any ACTION child, keep exactly one ACTION and delete all DECISION children
+        for (int p = 0; p < N; ++p){
+            if (ac[p] > 0){
+                bool kept = false;
+                // Enforce for children of p
+                for (int j = 3; j < N; ++j){
+                    float* nd = rb_node(tree, D, j);
+                    if (rb_f2i(nd[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+                    if (rb_f2i(nd[COL_PARENT_IDX]) != p) continue;
+                    int t = rb_f2i(nd[COL_NODE_TYPE]);
+                    if (t == NODE_TYPE_ACTION){
+                        if (!kept){
+                            kept = true;
+                            // Ensure ACTION has no children (clear if any)
+                            for (int k = 3; k < N; ++k){
+                                const float* cb = rb_node(tree, D, k);
+                                if (rb_f2i(cb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
+                                if (rb_f2i(cb[COL_PARENT_IDX]) == j){
+                                    rb_clear_subtree(tree, N, D, k, q, rs, 2*N);
+                                }
+                            }
+                        } else {
+                            // Delete extra ACTION subtree to ensure exactly one action child
+                            rb_clear_subtree(tree, N, D, j, q, rs, 2*N);
+                        }
+                    } else if (t == NODE_TYPE_DECISION){
+                        // Delete decision subtree to avoid mixing
+                        rb_clear_subtree(tree, N, D, j, q, rs, 2*N);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void repair_after_root_branch_cuda(
+    torch::Tensor& trees,
+    torch::Tensor& child_count_buffer,
+    torch::Tensor& act_cnt_buffer,
+    torch::Tensor& dec_cnt_buffer,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer
+){
+    TORCH_CHECK(trees.is_cuda(), "trees must be CUDA");
+    TORCH_CHECK(child_count_buffer.is_cuda() && act_cnt_buffer.is_cuda() && dec_cnt_buffer.is_cuda(), "count buffers must be CUDA");
+    TORCH_CHECK(bfs_queue_buffer.is_cuda() && result_indices_buffer.is_cuda(), "BFS buffers must be CUDA");
+    TORCH_CHECK(trees.scalar_type() == torch::kFloat32, "trees must be float32");
+    TORCH_CHECK(child_count_buffer.scalar_type() == torch::kInt32, "child_count_buffer int32");
+    TORCH_CHECK(act_cnt_buffer.scalar_type() == torch::kInt32, "act_cnt_buffer int32");
+    TORCH_CHECK(dec_cnt_buffer.scalar_type() == torch::kInt32, "dec_cnt_buffer int32");
+    TORCH_CHECK(bfs_queue_buffer.scalar_type() == torch::kInt32 && result_indices_buffer.scalar_type() == torch::kInt32, "BFS buffers int32");
+    TORCH_CHECK(trees.dim()==3 && trees.is_contiguous(), "trees must be (B,N,D) contiguous");
+
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(child_count_buffer.size(0)==B && child_count_buffer.size(1)==N, "child_count_buffer shape");
+    TORCH_CHECK(act_cnt_buffer.size(0)==B && act_cnt_buffer.size(1)==N, "act_cnt_buffer shape");
+    TORCH_CHECK(dec_cnt_buffer.size(0)==B && dec_cnt_buffer.size(1)==N, "dec_cnt_buffer shape");
+    TORCH_CHECK(bfs_queue_buffer.size(0)==B && bfs_queue_buffer.size(1)>=2*N, "bfs_queue_buffer shape (B,>=2N)");
+    TORCH_CHECK(result_indices_buffer.size(0)==B && result_indices_buffer.size(1)>=2*N, "result_indices_buffer shape (B,>=2N)");
+
+    dim3 grid(B), block(128);
+    repair_after_root_branch_kernel<<<grid, block>>>(
+        trees.data_ptr<float>(), B, N, D,
+        child_count_buffer.data_ptr<int>(),
+        act_cnt_buffer.data_ptr<int>(),
+        dec_cnt_buffer.data_ptr<int>(),
+        bfs_queue_buffer.data_ptr<int>(),
+        result_indices_buffer.data_ptr<int>()
+    );
+
     cudaDeviceSynchronize();
 }
