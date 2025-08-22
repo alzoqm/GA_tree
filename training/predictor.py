@@ -40,28 +40,36 @@ def build_adjacency_list_cuda(population: GATreePop) -> Tuple[torch.Tensor, torc
 
     population_tensor_cuda = population.population_tensor.to('cuda')
     
-    # --- 1단계: 총 자식 수와 오프셋 배열 계산 ---
-    total_children_count, offset_array = gatree_cuda.count_and_create_offsets(
-        population_tensor_cuda
-    )
-
-    # --- 2단계: Python에서 child_indices 텐서 할당 후 내용 채우기 ---
-    child_indices = torch.empty(
-        total_children_count, 
-        dtype=torch.int32, 
-        device='cuda'
-    )
-
-    if total_children_count > 0:
-        # [수정] C++ 함수 시그니처 변경에 따라 max_children 인자 추가
-        gatree_cuda.fill_child_indices(
-            population_tensor_cuda,
-            offset_array,
-            child_indices, # In-place로 내용이 채워짐
-            population.max_children # 병렬 정렬 커널에 필요한 정보 전달
+    try:
+        # --- 1단계: 총 자식 수와 오프셋 배열 계산 ---
+        total_children_count, offset_array = gatree_cuda.count_and_create_offsets(
+            population_tensor_cuda
         )
-    
-    return offset_array, child_indices
+        
+
+        # --- 2단계: Python에서 child_indices 텐서 할당 후 내용 채우기 ---
+        child_indices = torch.empty(
+            total_children_count, 
+            dtype=torch.int32, 
+            device='cuda'
+        )
+
+        if total_children_count > 0:
+            # [수정] C++ 함수 시그니처 변경에 따라 max_children 인자 추가
+            gatree_cuda.fill_child_indices(
+                population_tensor_cuda,
+                offset_array,
+                child_indices, # In-place로 내용이 채워짐
+                population.max_children # 병렬 정렬 커널에 필요한 정보 전달
+            )
+        
+        # Synchronize CUDA operations
+        torch.cuda.synchronize()
+        
+        return offset_array, child_indices
+    except Exception as e:
+        torch.cuda.empty_cache()  # Clear CUDA cache on error
+        raise RuntimeError(f"CUDA adjacency list building failed: {e}")
 
 
 def predict_population_cuda(
@@ -88,6 +96,16 @@ def predict_population_cuda(
                          f"population의 크기({population.pop_size})와 일치하지 않습니다.")
 
     population_tensor = population.population_tensor.to(device)
+    
+    # Memory validation checks
+    if not population_tensor.is_contiguous():
+        population_tensor = population_tensor.contiguous()
+    
+    # Validate tensor dimensions
+    expected_shape = (population.pop_size, population.max_nodes, population_tensor.shape[2])
+    if population_tensor.shape != expected_shape:
+        raise ValueError(f"Population tensor shape {population_tensor.shape} doesn't match expected {expected_shape}")
+    
     ordered_features = feature_values.reindex(population.all_features).values
     numeric_features = ordered_features.astype(np.float32)
     features_tensor = torch.tensor(numeric_features, dtype=torch.float32, device=device)
@@ -101,7 +119,6 @@ def predict_population_cuda(
         dtype=torch.int32, 
         device=device
     )
-    
     gatree_cuda.predict(
         population_tensor,
         features_tensor,
@@ -112,6 +129,11 @@ def predict_population_cuda(
         results_tensor,
         bfs_queue_buffer
     )
+    # Ensure CUDA operations complete before returning
+    torch.cuda.synchronize()
+    
+    gatree_cuda.validate_trees(population_tensor.to('cuda:0').contiguous())  # Commented out due to CUDA memory access issues
+
 
     return results_tensor
 

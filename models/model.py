@@ -845,6 +845,12 @@ class GATreePop:
                 long_actions, hold_actions, short_actions
             )
 
+            # Validate population structure after CUDA init
+            try:
+                gatree_cuda.validate_trees(self.population_tensor.contiguous())
+            except Exception as e:
+                print(f"Warning: validate_trees failed after init_population_cuda: {e}")
+
             # 7) Stitch Python objects to GPU views (no CPU traversal here)
             self.population = []
             for i in range(B):
@@ -933,6 +939,11 @@ class GATreePop:
         
         # [수정] C++/CUDA 확장 모듈 직접 호출
         gatree_cuda.reorganize_population(self.population_tensor)
+        # Validate population after reorganization
+        try:
+            gatree_cuda.validate_trees(self.population_tensor.contiguous())
+        except Exception as e:
+            print(f"Warning: validate_trees failed after reorganize_population: {e}")
         
         # [중요] CUDA 연산 후, Python GATree 객체들의 내부 상태를 텐서와 동기화합니다.
         # 이 과정이 없으면, 다음 연산(예: 시각화, CPU 기반 예측)에서 오류가 발생합니다.

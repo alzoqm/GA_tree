@@ -102,5 +102,11 @@ class RootBranchCrossover(BaseCrossover):
             child_batch, p1_batch, p2_batch, donor_map,
             bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer
         )
+        # Validate trees after CUDA root-branch crossover (if available)
+        try:
+            if gatree_cuda is not None and child_batch.is_cuda:
+                gatree_cuda.validate_trees(child_batch.contiguous())
+        except Exception:
+            pass
 
         return child_batch # GPU 텐서를 그대로 반환

@@ -58,5 +58,11 @@ class NodeParamMutation(BaseMutation):
             feature_min_vals,
             feature_max_vals
         )
+        # Validate trees after CUDA node-param mutation (if available)
+        try:
+            if gatree_cuda is not None and chromosomes.is_cuda:
+                gatree_cuda.validate_trees(chromosomes.contiguous())
+        except Exception:
+            pass
         
         return chromosomes

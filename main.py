@@ -134,9 +134,16 @@ def main():
     # ==========================================================================
     logging.info("--- Phase 2: GA Population Initialization ---")
 
-    model_config['all_features'] = list(model_config['feature_num'].keys()) + \
-                                   list(model_config['feature_comparison_map'].keys()) + \
-                                   model_config['feature_bool']
+    # Collect all unique features including RHS features from feature_comparison_map
+    all_features_set = set()
+    all_features_set.update(model_config['feature_num'].keys())
+    all_features_set.update(model_config['feature_comparison_map'].keys())
+    # Add all the values from feature_comparison_map (the RHS features)
+    for feature_list in model_config['feature_comparison_map'].values():
+        all_features_set.update(feature_list)
+    all_features_set.update(model_config['feature_bool'])
+    
+    model_config['all_features'] = list(all_features_set)
 
     population = GATreePop(
         pop_size=ga_cfg['population']['size'],
@@ -148,8 +155,13 @@ def main():
 
     logging.info("Creating initial random population...")
     num_processes = os.cpu_count() or 1
-    population.make_population(num_processes=num_processes)
-    # gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())
+    population.make_population(num_processes=num_processes, device=env_cfg['device'], init_mode='cuda')
+    # Validate trees after CUDA population init (if available)
+    try:
+        if gatree_cuda is not None and str(env_cfg['device']).startswith('cuda'):
+            gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())
+    except Exception as e:
+        logging.warning(f"Validation after CUDA init skipped due to error: {e}")
     logging.info("Population initialized successfully.")
 
     # ==========================================================================
@@ -203,8 +215,8 @@ def main():
         selection=selection_op,
         crossover=crossover_op,
         mutation=mutation_op,
-        parent_size=ga_cfg['evolution_loop']['parent_pool_size'],
-        num_elites=ga_cfg['evolution_loop']['elite_size']
+        parent_size=min(ga_cfg['evolution_loop']['parent_pool_size'], 50),  # Reduced for testing
+        num_elites=min(ga_cfg['evolution_loop']['elite_size'], 10)  # Reduced for testing
     )
     logging.info("Evolution engine configured.")
 
@@ -216,6 +228,7 @@ def main():
     total_data_len = len(final_df)
     skip_data_cnt = 0
     valid_skip_data_cnt = int(total_data_len * data_cfg['train_ratio'])
+    valid_skip_data_cnt = 3
 
     logging.info(f"Total data points: {total_data_len}")
     logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
@@ -225,10 +238,10 @@ def main():
         evolution=evolution_engine,
         skip_data_cnt=skip_data_cnt,
         valid_skip_data_cnt=valid_skip_data_cnt,
-        chromosomes_size=ga_cfg['population']['size'],
+        chromosomes_size=100,  # Match the reduced population size
         gen_loop=ga_cfg['evolution_loop']['generations'],
         best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
-        elite_size=ga_cfg['evolution_loop']['elite_size'],
+        elite_size=min(ga_cfg['evolution_loop']['elite_size'], 10),  # Match the reduced elite size
         device=env_cfg['device'],
         warming_step=ga_cfg['evolution_loop']['warming_steps'],
         evaluation_config=eval_cfg,

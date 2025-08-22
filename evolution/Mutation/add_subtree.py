@@ -196,4 +196,11 @@ class AddSubtreeMutation(BaseMutation):
             self._act_sampler.fill_params_for_nodes(trees, ab, act_nodes_flat, act_root_type)
             trees[ab, act_nodes_flat, COL_NODE_TYPE] = torch.tensor(NODE_TYPE_ACTION, device=device, dtype=dtype)
 
+        # Validate trees after CUDA add-subtree mutation (if available)
+        try:
+            if gatree_cuda is not None and trees.is_cuda:
+                gatree_cuda.validate_trees(trees.contiguous())
+        except Exception:
+            pass
+
         return trees

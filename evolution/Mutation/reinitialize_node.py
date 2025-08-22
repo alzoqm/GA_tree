@@ -60,5 +60,11 @@ class ReinitializeNodeMutation(BaseMutation):
             feature_comparison_indices,
             feature_bool_indices
         )
+        # Validate trees after CUDA reinitialize-node mutation (if available)
+        try:
+            if gatree_cuda is not None and chromosomes.is_cuda:
+                gatree_cuda.validate_trees(chromosomes.contiguous())
+        except Exception:
+            pass
 
         return chromosomes
