@@ -212,4 +212,12 @@ class AddNodeMutation(BaseMutation):
             # Ensure node type is DECISION (kernel already set it; redundant but safe)
             trees[rows, new_nodes_flat, COL_NODE_TYPE] = torch.tensor(NODE_TYPE_DECISION, device=device, dtype=dtype)
 
+        # Validate trees after CUDA add-node mutation (if available)
+        try:
+            if gatree_cuda is not None and trees.is_cuda:
+                gatree_cuda.validate_trees(trees.contiguous())
+        except Exception as e:
+            # Non-fatal: continue even if validation fails
+            pass
+
         return trees

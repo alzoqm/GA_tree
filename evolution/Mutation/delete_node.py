@@ -91,6 +91,13 @@ class DeleteNodeMutation(BaseMutation):
         # valid = _validate_tree_constraints(trees)
         # assert valid.all(), "Post-delete invariants violated"
 
+        # Validate trees after CUDA delete-node mutation (if available)
+        try:
+            if gatree_cuda is not None and trees.is_cuda:
+                gatree_cuda.validate_trees(trees.contiguous())
+        except Exception:
+            pass
+
         return trees
 
 

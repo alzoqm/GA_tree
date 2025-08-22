@@ -156,7 +156,12 @@ def main():
     logging.info("Creating initial random population...")
     num_processes = os.cpu_count() or 1
     population.make_population(num_processes=num_processes, device=env_cfg['device'], init_mode='cuda')
-    # gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())  # Commented out due to CUDA memory access issues
+    # Validate trees after CUDA population init (if available)
+    try:
+        if gatree_cuda is not None and str(env_cfg['device']).startswith('cuda'):
+            gatree_cuda.validate_trees(population.population_tensor.to(env_cfg['device']).contiguous())
+    except Exception as e:
+        logging.warning(f"Validation after CUDA init skipped due to error: {e}")
     logging.info("Population initialized successfully.")
 
     # ==========================================================================

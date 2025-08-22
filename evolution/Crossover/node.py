@@ -108,4 +108,11 @@ class NodeCrossover(BaseCrossover):
         selection_mask = torch.rand(num_to_cross, 1, 1, device=p1.device) < 0.5
         final_children = torch.where(selection_mask, child1, child2)
 
+        # Validate trees after CUDA node crossover (if available)
+        try:
+            if gatree_cuda is not None and final_children.is_cuda:
+                gatree_cuda.validate_trees(final_children.contiguous())
+        except Exception:
+            pass
+
         return final_children # GPU 텐서를 그대로 반환

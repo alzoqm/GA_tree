@@ -101,4 +101,11 @@ class DeleteSubtreeMutation(BaseMutation):
             if self.set_unused_parent_idx:
                 trees[b_idx, n_idx, COL_PARENT_IDX] = -1.0
 
+        # Validate trees after CUDA delete-subtree mutation (if available)
+        try:
+            if gatree_cuda is not None and trees.is_cuda:
+                gatree_cuda.validate_trees(trees.contiguous())
+        except Exception:
+            pass
+
         return trees

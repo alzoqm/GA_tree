@@ -30,7 +30,7 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 8192
+    size: 128
     max_nodes: 256
     max_depth: 10
     max_children: 30
