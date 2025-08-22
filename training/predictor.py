@@ -25,51 +25,64 @@ POSITION_TO_INT_MAP: Dict[str, int] = {
     'SHORT': ROOT_BRANCH_SHORT,
 }
 
-# [수정] 2단계 통신을 사용하여 인접 리스트를 생성하는 함수
-def build_adjacency_list_cuda(population: GATreePop) -> Tuple[torch.Tensor, torch.Tensor] | None:
+def build_adjacency_list_cuda(population: GATreePop,
+                              sort_children: bool = True,
+                              validate: bool = False,
+                              strict_overflow: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    GPU를 사용하여 GATree 집단의 인접 리스트(CSR 형식)를 병렬로 생성합니다.
-    내부적으로 2단계 통신을 통해 C++에서의 텐서 생성을 최소화합니다.
+    Build CSR adjacency (offsets, indices) for the whole population on GPU.
+    - Optionally sorts children per parent (determinism)
+    - Optionally validates invariants (bitmask per tree)
+    - Optionally fails early if any parent count > max_children (strict_overflow=True)
     """
     if gatree_cuda is None:
-        print("오류: gatree_cuda 모듈이 로드되지 않아 인접 리스트를 생성할 수 없습니다.")
-        return None, None
-
+        raise RuntimeError("gatree_cuda not loaded; build the extension first.")
     if not population.initialized:
-        raise RuntimeError("Population 객체가 초기화되지 않았습니다. make_population()을 먼저 호출하세요.")
+        raise RuntimeError("Population is not initialized. Call make_population() first.")
 
-    population_tensor_cuda = population.population_tensor.to('cuda')
-    
-    try:
-        # --- 1단계: 총 자식 수와 오프셋 배열 계산 ---
-        total_children_count, offset_array = gatree_cuda.count_and_create_offsets(
-            population_tensor_cuda
-        )
-        
+    trees = population.population_tensor.to('cuda')
+    if not trees.is_contiguous():
+        trees = trees.contiguous()
 
-        # --- 2단계: Python에서 child_indices 텐서 할당 후 내용 채우기 ---
-        child_indices = torch.empty(
-            total_children_count, 
-            dtype=torch.int32, 
-            device='cuda'
-        )
+    # Step 1: counts -> offsets (+ overflow mask)
+    total_children, offsets, overflow_mask = gatree_cuda.count_and_create_offsets(
+        trees, population.max_children
+    )
 
-        if total_children_count > 0:
-            # [수정] C++ 함수 시그니처 변경에 따라 max_children 인자 추가
-            gatree_cuda.fill_child_indices(
-                population_tensor_cuda,
-                offset_array,
-                child_indices, # In-place로 내용이 채워짐
-                population.max_children # 병렬 정렬 커널에 필요한 정보 전달
+    if strict_overflow:
+        bad = (overflow_mask != 0).nonzero(as_tuple=False).flatten()
+        if bad.numel() > 0:
+            raise RuntimeError(
+                f"[Adjacency] Count overflow: {bad.numel()} trees exceeded max_children "
+                f"(e.g., first few: {bad[:8].tolist()}). "
+                f"Rebuild/repair before CSR fill."
             )
-        
-        # Synchronize CUDA operations
-        torch.cuda.synchronize()
-        
-        return offset_array, child_indices
-    except Exception as e:
-        torch.cuda.empty_cache()  # Clear CUDA cache on error
-        raise RuntimeError(f"CUDA adjacency list building failed: {e}")
+
+    # Step 2: indices
+    indices = torch.empty(int(total_children), dtype=torch.int32, device=trees.device)
+    if indices.numel() > 0:
+        gatree_cuda.fill_child_indices(trees, offsets, indices,
+                                       population.max_children, sort_children)
+
+    # Length sanity check
+    if int(offsets[-1].item()) != int(indices.numel()):
+        raise RuntimeError("CSR length mismatch: offsets[-1] != child_indices.numel()")
+
+    if validate:
+        mask = torch.empty(population.pop_size, dtype=torch.int32, device=trees.device)
+        gatree_cuda.validate_adjacency(trees, offsets, indices,
+                                       population.max_children, population.max_depth, mask)
+        bad = (mask != 0).nonzero(as_tuple=False).flatten()
+        if bad.numel() > 0:
+            raise RuntimeError(
+                f"[Adjacency] Validation failed for {bad.numel()} trees "
+                f"(first few: {bad[:8].tolist()}). "
+                f"Mask bits: MIXED(1), LEAF!=ACT(2), ACT_HAS_CHILD(4), SINGLE_ACT(8), "
+                f"DEPTH(16), OVERFLOW(32), BAD_PARENT(64), ROOT(128), ROOT_LEAF(256)."
+            )
+
+    torch.cuda.synchronize()
+    return offsets, indices
 
 
 def predict_population_cuda(

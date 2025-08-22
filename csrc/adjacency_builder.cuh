@@ -1,29 +1,63 @@
-// csrc/adjacency_builder.cuh (수정된 파일)
+// csrc/adjacency_builder.cuh
 #pragma once
-
 #include <torch/extension.h>
-#include <vector>
-#include <utility> // for std::pair
+#include <tuple>
 
-// 1단계: 각 노드의 자식 수를 세고, 총 자식 수와 오프셋 배열을 반환하는 함수
-std::pair<long, torch::Tensor> count_and_create_offsets_cuda(
-    const torch::Tensor& population_tensor
+/**
+ * Pass 1: Count children and produce CSR offsets, with overflow detection.
+ * 
+ * @param trees          (B,N,D) float32 CUDA contiguous
+ * @param max_children   Maximum allowed children per parent
+ * @return (total_children, offsets_flat, overflow_mask)
+ *         total_children: long
+ *         offsets_flat:   (B*N+1) int32 CUDA
+ *         overflow_mask:  (B)     int32 CUDA (0 if OK, 1 if any parent in tree overflowed)
+ */
+std::tuple<long, torch::Tensor, torch::Tensor> count_and_create_offsets_cuda(
+    const torch::Tensor& trees,
+    int max_children
 );
 
-// 2단계: 사전에 할당된 child_indices 텐서의 내용을 채우고 정렬하는 함수
-// [수정] max_children 파라미터 추가
+/**
+ * Pass 2: Fill child_indices and (optionally) sort per parent.
+ * 
+ * - Uses dynamic shared memory only (no fixed arrays)
+ * - Automatically disables sorting if shared memory budget cannot accommodate it
+ * - Automatically switches to a global-cursor mode if tiling would cause excessive rescans
+ *
+ * @param trees           (B,N,D) float32 CUDA contiguous
+ * @param offsets_flat    (B*N+1) int32 CUDA
+ * @param child_indices   (total_children) int32 CUDA (output filled in-place)
+ * @param max_children    Maximum allowed children per parent
+ * @param sort_children   Whether to sort child lists per parent (default true)
+ */
 void fill_child_indices_cuda(
-    const torch::Tensor& population_tensor,
-    const torch::Tensor& offset_array,
-    torch::Tensor& child_indices, // 입력이자 출력 (in-place modification)
-    int max_children
+    const torch::Tensor& trees,
+    const torch::Tensor& offsets_flat,
+    torch::Tensor&       child_indices,
+    int                  max_children,
+    bool                 sort_children = true
 );
 
-// [수정] 자식 리스트를 정렬하는 커널을 호출하는 런처 함수 선언. max_children 추가
-void launch_sort_children_kernel(
-    const int* offset_ptr,
-    int* child_indices_ptr,
-    int pop_size,
-    int max_nodes,
-    int max_children
+/**
+ * Validator: CSR-based structural checks. Writes per-tree bitmask (0 means OK).
+ * 
+ * Bits (ViolBits):
+ *  - V_MIXED_CHILDREN   (1<<0)  parent has both ACTION and DECISION children
+ *  - V_LEAF_NOT_ACTION  (1<<1)  leaf that is not ACTION (excluding roots)
+ *  - V_ACTION_HAS_CHILD (1<<2)  ACTION node with any child
+ *  - V_SINGLE_ACTION_BR (1<<3)  parent has action children but deg != 1 (single-action rule)
+ *  - V_DEPTH_MISMATCH   (1<<4)  child's depth != parent's + 1, or >= max_depth
+ *  - V_CHILD_OVERFLOW   (1<<5)  degree > max_children
+ *  - V_BAD_PARENT       (1<<6)  child index out of [0,N)
+ *  - V_ROOT_BROKEN      (1<<7)  parent == -1 but node not ROOT_BRANCH or depth != 0
+ *  - V_ROOT_LEAF        (1<<8)  root (parent == -1) has no children (optional diagnostic)
+ */
+void validate_adjacency_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& offsets_flat,
+    const torch::Tensor& child_indices,
+    int                  max_children,
+    int                  max_depth,
+    torch::Tensor        out_violation_mask
 );

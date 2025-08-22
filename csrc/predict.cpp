@@ -83,16 +83,30 @@ void predict_cuda(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "High-performance CUDA kernels for GATree";
 
-    // --- 구조 관련 함수 ---
-    m.def("count_and_create_offsets", &count_and_create_offsets_cuda, "Build adjacency list step 1");
-    
-    m.def("fill_child_indices", &fill_child_indices_cuda, 
-          "Build adjacency list step 2: fill and sort child indices",
+    // --- Adjacency (Step 1: counts + offsets + overflow mask) ---
+    m.def("count_and_create_offsets", &count_and_create_offsets_cuda,
+          "Step 1: Count children, build CSR offsets, and return per-tree overflow mask",
+          py::arg("population_tensor"),
+          py::arg("max_children"));
+
+    // --- Adjacency (Step 2: fill + optional sort) ---
+    m.def("fill_child_indices", &fill_child_indices_cuda,
+          "Step 2: Fill CSR child indices and (optionally) sort per parent",
           py::arg("population_tensor"),
           py::arg("offset_array"),
           py::arg("child_indices"),
-          py::arg("max_children")
-    );
+          py::arg("max_children"),
+          py::arg("sort_children") = true);
+
+    // --- Validator ---
+    m.def("validate_adjacency", &validate_adjacency_cuda,
+          "Validate CSR/structure; writes per-tree violation bitmask (0 means OK)",
+          py::arg("population_tensor"),
+          py::arg("offset_array"),
+          py::arg("child_indices"),
+          py::arg("max_children"),
+          py::arg("max_depth"),
+          py::arg("out_violation_mask"));
 
     // --- 예측 함수 ---
     m.def("predict", &predict_cuda, "GATree Prediction on CUDA");
