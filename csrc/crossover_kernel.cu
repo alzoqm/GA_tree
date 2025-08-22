@@ -319,7 +319,7 @@ __device__ bool would_violate_tree_structure(
     return false;
 }
 
-__device__ void transplant_one_way_device(
+__device__ bool transplant_one_way_device(
     float* child_ptr, const float* recipient_ptr, const float* donor_ptr,
     int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
     int* my_old_to_new_map, int* my_empty_slots_buffer, int max_nodes)
@@ -342,7 +342,7 @@ __device__ void transplant_one_way_device(
             my_empty_slots_buffer[empty_count++] = i;
         }
     }
-    if (empty_count < d_count) return; // 공간 부족 시 이식 중단
+    if (empty_count < d_count) return false; // 공간 부족 시 이식 중단
 
     // 4. old_to_new_map 생성
     for (int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
@@ -352,14 +352,14 @@ __device__ void transplant_one_way_device(
     
     // 5. 깊이 오프셋 계산
     int r_parent_idx = (int)recipient_ptr[r_idx * NODE_INFO_DIM + COL_PARENT_IDX];
-    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return; // 유효하지 않은 부모
+    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return false; // 유효하지 않은 부모
     float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
     float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
 
     // 5.5. Check if transplantation would violate tree structure rules
     int donor_root_type = (int)donor_ptr[d_idx * NODE_INFO_DIM + COL_NODE_TYPE];
     if (would_violate_tree_structure(child_ptr, r_parent_idx, donor_root_type, max_nodes)) {
-        return; // Abort transplantation to avoid invalid structure
+        return false; // Abort transplantation to avoid invalid structure
     }
 
     // 6. 노드 복사 및 업데이트
@@ -381,6 +381,7 @@ __device__ void transplant_one_way_device(
             dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
         }
     }
+    return true; // Success
 }
 
 
@@ -460,18 +461,19 @@ __global__ void subtree_crossover_kernel(
         if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
 
         // --- 5. 이식 수행 ---
-        transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
+        bool transplant1_success = transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
             p1_idx, p2_idx,
             my_results1, s1_count,
             my_results2, s2_count,
             my_old_to_new_map, my_queue1, max_nodes);
 
-        transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr,
+        bool transplant2_success = transplant_one_way_device(c2_ptr, p2_ptr, p1_ptr,
             p2_idx, p1_idx,
             my_results2, s2_count,
             my_results1, s1_count,
             my_old_to_new_map, my_queue2, max_nodes);
-        success = true;
+        
+        success = transplant1_success && transplant2_success;
     }
 
     if (!success) {
