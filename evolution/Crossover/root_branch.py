@@ -102,12 +102,27 @@ class RootBranchCrossover(BaseCrossover):
             child_batch, p1_batch, p2_batch, donor_map,
             bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer
         )
-        
-        # Fix any root branches that have no children by adding default ACTION nodes
-        self._fix_empty_root_branches(child_batch)
-        
-        # Fix any orphaned DECISION nodes that became leaves
-        self._fix_orphaned_decision_nodes(child_batch)
+
+        # Post-crossover structural repair in CUDA using Python-allocated buffers
+        B = child_batch.size(0)
+        device = child_batch.device
+        max_nodes = child_batch.size(1)
+
+        # Work buffers allocated in Python only (as requested)
+        child_count_buf = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        act_cnt_buf     = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        dec_cnt_buf     = torch.empty((B, max_nodes), dtype=torch.int32, device=device)
+        bfs_q_buf       = torch.empty((B, 2 * max_nodes), dtype=torch.int32, device=device)
+        bfs_res_buf     = torch.empty((B, 2 * max_nodes), dtype=torch.int32, device=device)
+
+        gatree_cuda.repair_after_root_branch(
+            child_batch,
+            child_count_buf,
+            act_cnt_buf,
+            dec_cnt_buf,
+            bfs_q_buf,
+            bfs_res_buf
+        )
         
         # Validate trees after CUDA root-branch crossover (if available)
         try:

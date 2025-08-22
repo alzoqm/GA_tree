@@ -131,6 +131,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("result_indices_buffer"),
         py::arg("old_to_new_map_buffer")
     );
+
+    // Repair after RootBranch crossover (arrays allocated in Python)
+    m.def("repair_after_root_branch", &repair_after_root_branch_cuda,
+        "Repair structural invariants after root-branch crossover using preallocated buffers.",
+        py::arg("trees"),
+        py::arg("child_count_buffer"),
+        py::arg("act_cnt_buffer"),
+        py::arg("dec_cnt_buffer"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"));
     
     // [수정된] SubtreeCrossover 바인딩 (시그니처 변경)
     m.def("subtree_crossover_batch", &subtree_crossover_batch_cuda,
