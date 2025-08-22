@@ -95,6 +95,7 @@ class DeleteNodeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
+                print('complete delete node mutation')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after delete_node mutation.\n{traceback.format_exc()}")

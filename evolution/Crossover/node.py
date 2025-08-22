@@ -112,6 +112,7 @@ class NodeCrossover(BaseCrossover):
         try:
             if gatree_cuda is not None and final_children.is_cuda:
                 gatree_cuda.validate_trees(final_children.contiguous())
+                print('complete node crossover')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after node crossover.\n{traceback.format_exc()}")

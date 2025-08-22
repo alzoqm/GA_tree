@@ -960,6 +960,7 @@ class GATreePop:
         # Validate population after reorganization
         try:
             gatree_cuda.validate_trees(self.population_tensor.contiguous())
+            print('complete reoranize nodes')
         except Exception as e:
             raise RuntimeError(f"validate_trees failed after reorganize_population: {e}")
         
