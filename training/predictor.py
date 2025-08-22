@@ -30,7 +30,8 @@ def build_adjacency_list_cuda(population: GATreePop,
                               validate: bool = False,
                               strict_overflow: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Build CSR adjacency (offsets, indices) for the whole population on GPU.
+    Build CSR adjacency (offsets, children) for the whole population on GPU.
+    Returns properly formatted CSR with (B, N+1) offsets for the optimized predict kernel.
     - Optionally sorts children per parent (determinism)
     - Optionally validates invariants (bitmask per tree)
     - Optionally fails early if any parent count > max_children (strict_overflow=True)
@@ -45,7 +46,7 @@ def build_adjacency_list_cuda(population: GATreePop,
         trees = trees.contiguous()
 
     # Step 1: counts -> offsets (+ overflow mask)
-    total_children, offsets, overflow_mask = gatree_cuda.count_and_create_offsets(
+    total_children, flat_offsets, overflow_mask = gatree_cuda.count_and_create_offsets(
         trees, population.max_children
     )
 
@@ -61,16 +62,54 @@ def build_adjacency_list_cuda(population: GATreePop,
     # Step 2: indices
     indices = torch.empty(int(total_children), dtype=torch.int32, device=trees.device)
     if indices.numel() > 0:
-        gatree_cuda.fill_child_indices(trees, offsets, indices,
+        gatree_cuda.fill_child_indices(trees, flat_offsets, indices,
                                        population.max_children, sort_children)
 
     # Length sanity check
-    if int(offsets[-1].item()) != int(indices.numel()):
+    if int(flat_offsets[-1].item()) != int(indices.numel()):
         raise RuntimeError("CSR length mismatch: offsets[-1] != child_indices.numel()")
+
+    # Step 3: Convert to per-tree CSR format for optimized predict kernel
+    B, N = population.pop_size, population.max_nodes
+    
+    # Create proper per-tree offsets tensor (B, N+1)
+    per_tree_offsets = torch.zeros((B, N + 1), dtype=torch.int32, device=trees.device)
+    
+    # Fill per-tree offsets from flat offsets
+    for tree_idx in range(B):
+        tree_start = tree_idx * (N + 1)
+        tree_end = tree_start + (N + 1)
+        if tree_end <= flat_offsets.size(0):
+            per_tree_offsets[tree_idx] = flat_offsets[tree_start:tree_end]
+        else:
+            # Handle case where flat_offsets doesn't have enough elements
+            available = flat_offsets.size(0) - tree_start
+            if available > 0:
+                per_tree_offsets[tree_idx, :available] = flat_offsets[tree_start:tree_start + available]
+    
+    # Calculate max edges per tree for proper children tensor sizing
+    edge_counts = per_tree_offsets[:, N]  # Last column contains total edge count per tree
+    max_edges = edge_counts.max().item()
+    print(f'max_edges: {max_edges}')
+    # Reshape children to (B, Emax) format
+    if max_edges > 0:
+        # Pad children to ensure each tree has the same number of allocated edges
+        per_tree_children = torch.zeros((B, max_edges), dtype=torch.int32, device=trees.device)
+        
+        # Fill children data per tree
+        for tree_idx in range(B):
+            start_idx = tree_idx * N if tree_idx == 0 else per_tree_offsets[tree_idx - 1, N].item()
+            end_idx = per_tree_offsets[tree_idx, N].item()
+            tree_edge_count = end_idx - start_idx
+            
+            if tree_edge_count > 0:
+                per_tree_children[tree_idx, :tree_edge_count] = indices[start_idx:end_idx]
+    else:
+        per_tree_children = torch.zeros((B, 1), dtype=torch.int32, device=trees.device)
 
     if validate:
         mask = torch.empty(population.pop_size, dtype=torch.int32, device=trees.device)
-        gatree_cuda.validate_adjacency(trees, offsets, indices,
+        gatree_cuda.validate_adjacency(trees, flat_offsets, indices,
                                        population.max_children, population.max_depth, mask)
         bad = (mask != 0).nonzero(as_tuple=False).flatten()
         if bad.numel() > 0:
@@ -82,7 +121,7 @@ def build_adjacency_list_cuda(population: GATreePop,
             )
 
     torch.cuda.synchronize()
-    return offsets, indices
+    return per_tree_offsets, per_tree_children
 
 
 def predict_population_cuda(
@@ -95,7 +134,11 @@ def predict_population_cuda(
 ) -> torch.Tensor | None:
     """
     사전 생성된 인접 리스트를 이용하여 전체 GATree 집단의 예측을 병렬로 수행합니다.
-    (변경 없음)
+    
+    새 CUDA 커널 인터페이스와 호환되는 최적화된 예측 함수:
+    - BFS queue와 visited 버퍼를 별도로 할당하여 메모리 안전성 보장
+    - CSR (Compressed Sparse Row) 형식의 adjacency 데이터 사용
+    - 각 트리당 하나의 블록으로 확장성 최적화
     """
     if gatree_cuda is None:
         print("오류: gatree_cuda 모듈이 로드되지 않아 예측을 수행할 수 없습니다.")
@@ -123,11 +166,14 @@ def predict_population_cuda(
     numeric_features = ordered_features.astype(np.float32)
     features_tensor = torch.tensor(numeric_features, dtype=torch.float32, device=device)
     positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
-    positions_tensor = torch.tensor(positions_int, dtype=torch.int64, device=device)
-    next_indices = population.return_next_idx()
-    next_indices_tensor = torch.tensor(next_indices, dtype=torch.int32, device=device)
+    positions_tensor = torch.tensor(positions_int, dtype=torch.int32, device=device)
     results_tensor = torch.zeros((population.pop_size, 4), dtype=torch.float32, device=device)
     bfs_queue_buffer = torch.zeros(
+        (population.pop_size, population.max_nodes), 
+        dtype=torch.int32, 
+        device=device
+    )
+    visited_buffer = torch.zeros(
         (population.pop_size, population.max_nodes), 
         dtype=torch.int32, 
         device=device
@@ -136,11 +182,11 @@ def predict_population_cuda(
         population_tensor,
         features_tensor,
         positions_tensor,
-        next_indices_tensor,
         adj_offsets,
         adj_indices,
         results_tensor,
-        bfs_queue_buffer
+        bfs_queue_buffer,
+        visited_buffer
     )
     # Ensure CUDA operations complete before returning
     torch.cuda.synchronize()

@@ -17,65 +17,11 @@
 
 
 // ==============================================================================
-//           Helper 1: 예측 커널에 전달될 텐서 유효성 검사 함수 (변경 없음)
+//           Optimized Prediction Function - Updated for New API
 // ==============================================================================
-void check_predict_tensors(
-    const torch::Tensor& population,
-    const torch::Tensor& features,
-    const torch::Tensor& positions,
-    const torch::Tensor& next_indices,
-    const torch::Tensor& offset_array,
-    const torch::Tensor& child_indices,
-    const torch::Tensor& results,
-    const torch::Tensor& bfs_queue_buffer) {
-
-    // Device, Data Type, Contiguity, Dimension 검사
-    TORCH_CHECK(population.is_cuda() && features.is_cuda() && positions.is_cuda() &&
-                next_indices.is_cuda() && offset_array.is_cuda() && child_indices.is_cuda() &&
-                results.is_cuda() && bfs_queue_buffer.is_cuda(),
-                "All input tensors for prediction must be on a CUDA device");
-    TORCH_CHECK(population.dim() == 3, "Population tensor must be 3D");
-    const int pop_size = population.size(0);
-    const int max_nodes = population.size(1);
-    TORCH_CHECK(positions.size(0) == pop_size, "Positions tensor pop_size mismatch");
-    TORCH_CHECK(results.size(0) == pop_size, "Results tensor pop_size mismatch");
-    TORCH_CHECK(population.size(2) == NODE_INFO_DIM, "Population tensor node_dim mismatch");
-}
-
-// ==============================================================================
-//           Helper 2: CUDA 커널을 호출하는 C++ 래퍼 함수 (변경 없음)
-// ==============================================================================
-void predict_cuda(
-    torch::Tensor population_tensor,
-    torch::Tensor features_tensor,
-    torch::Tensor positions_tensor,
-    torch::Tensor next_indices_tensor,
-    torch::Tensor offset_array_tensor,
-    torch::Tensor child_indices_tensor,
-    torch::Tensor results_tensor,
-    torch::Tensor bfs_queue_buffer) {
-
-    check_predict_tensors(population_tensor, features_tensor, positions_tensor, next_indices_tensor,
-                          offset_array_tensor, child_indices_tensor, results_tensor, bfs_queue_buffer);
-
-    const int pop_size = population_tensor.size(0);
-    const int max_nodes = population_tensor.size(1);
-    const int num_features = features_tensor.size(0);
-
-    launch_predict_kernel(
-        population_tensor.data_ptr<float>(),
-        features_tensor.data_ptr<float>(),
-        positions_tensor.data_ptr<long>(),
-        next_indices_tensor.data_ptr<int>(),
-        offset_array_tensor.data_ptr<int>(),
-        child_indices_tensor.data_ptr<int>(),
-        results_tensor.data_ptr<float>(),
-        bfs_queue_buffer.data_ptr<int>(),
-        pop_size,
-        max_nodes,
-        num_features
-    );
-}
+// NOTE: The new predict_cuda function is already defined in predict_kernel.cuh
+// and implemented in predict_kernel.cu. This wrapper is no longer needed as
+// the validation and implementation are now integrated.
 
 // ==============================================================================
 //               Pybind11 모듈 정의: Python과 C++ 연결
@@ -108,8 +54,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("max_depth"),
           py::arg("out_violation_mask"));
 
-    // --- 예측 함수 ---
-    m.def("predict", &predict_cuda, "GATree Prediction on CUDA");
+    // --- Optimized prediction function with safety guarantees ---
+    m.def("predict", &predict_cuda, 
+          "GPU-accelerated prediction for GA-Tree populations with safety guarantees",
+          py::arg("trees"), py::arg("features"), py::arg("positions"), 
+          py::arg("offsets"), py::arg("children"), py::arg("results"),
+          py::arg("bfs_q"), py::arg("visited"));
 
     // --- 값 기반 돌연변이 함수 바인딩 ---
     m.def("node_param_mutate", 
