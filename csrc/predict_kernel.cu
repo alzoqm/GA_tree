@@ -8,15 +8,24 @@
 // --- Device-level Helper Function ---
 __device__ bool evaluate_node_device(
     const float* node_data,
-    const float* feature_values) {
+    const float* feature_values,
+    int num_features) {
 
     int comp_type = static_cast<int>(node_data[COL_PARAM_3]);
     int feat1_idx = static_cast<int>(node_data[COL_PARAM_1]);
+    
+    // Bounds check for feat1_idx
+    if (feat1_idx >= num_features || feat1_idx < 0) return false;
+    
     float val1 = feature_values[feat1_idx];
     float val2 = node_data[COL_PARAM_4];
 
     if (comp_type == COMP_TYPE_FEAT_FEAT) {
         int feat2_idx = static_cast<int>(node_data[COL_PARAM_4]);
+        
+        // Bounds check for feat2_idx
+        if (feat2_idx >= num_features || feat2_idx < 0) return false;
+        
         val2 = feature_values[feat2_idx];
     }
     
@@ -121,7 +130,7 @@ __global__ void predict_kernel(
                 break;
             }
             else if (child_node_type == NODE_TYPE_DECISION) {
-                if (evaluate_node_device(child_node_data, feature_cache)) {
+                if (evaluate_node_device(child_node_data, feature_cache, num_features)) {
                     if (queue_tail < max_nodes) {
                         bfs_queue[queue_tail++] = child_idx;
                     }
