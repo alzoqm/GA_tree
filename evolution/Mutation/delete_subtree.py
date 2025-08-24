@@ -7,7 +7,7 @@ from models.constants import (
 )
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     raise RuntimeError(
         "gatree_cuda module not built. Run: python setup.py build_ext --inplace"

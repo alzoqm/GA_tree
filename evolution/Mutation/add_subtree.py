@@ -12,7 +12,7 @@ from models.constants import (
 )
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     print("="*60)
     print(">>> Warning: 'gatree_cuda' module not found.")

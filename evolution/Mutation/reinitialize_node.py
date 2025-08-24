@@ -7,7 +7,7 @@ from .utils import _create_random_action_params, _create_random_decision_params
 from typing import Dict, Any
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     gatree_cuda = None
 
