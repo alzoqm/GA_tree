@@ -6,7 +6,7 @@
 # 1. 환경 및 경로 설정
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
-  seed: 777
+  seed: 111
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/dataset"
 
@@ -30,7 +30,7 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 128
+    size: 1024
     max_nodes: 256
     max_depth: 10
     max_children: 30

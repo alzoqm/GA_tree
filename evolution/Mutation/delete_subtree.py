@@ -3,7 +3,9 @@ import torch
 from typing import Dict, Any
 from .base import BaseMutation
 from models.constants import (
-    COL_NODE_TYPE, COL_PARENT_IDX, NODE_TYPE_UNUSED,
+    COL_NODE_TYPE, COL_PARENT_IDX, COL_DEPTH, COL_PARAM_1,
+    NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, NODE_TYPE_ACTION, 
+    ACTION_CLOSE_ALL,
 )
 
 try:
@@ -100,6 +102,35 @@ class DeleteSubtreeMutation(BaseMutation):
             # Optional: Set parent_idx to -1 for UNUSED nodes (as requested by user)
             if self.set_unused_parent_idx:
                 trees[b_idx, n_idx, COL_PARENT_IDX] = -1.0
+
+        # ---- Critical repair: Ensure no root branch is left without children ----
+        for batch_idx in range(B):
+            # Check each root branch (indices 0, 1, 2)
+            for root_idx in range(3):
+                if trees[batch_idx, root_idx, COL_NODE_TYPE] != NODE_TYPE_ROOT_BRANCH:
+                    continue
+                    
+                # Count children of this root branch
+                has_children = False
+                for child_idx in range(3, N):
+                    if (trees[batch_idx, child_idx, COL_NODE_TYPE] != NODE_TYPE_UNUSED and
+                        trees[batch_idx, child_idx, COL_PARENT_IDX].int() == root_idx):
+                        has_children = True
+                        break
+                
+                # If no children, add a default ACTION child
+                if not has_children:
+                    # Find an available slot
+                    for slot_idx in range(3, N):
+                        if trees[batch_idx, slot_idx, COL_NODE_TYPE] == NODE_TYPE_UNUSED:
+                            trees[batch_idx, slot_idx, COL_NODE_TYPE] = NODE_TYPE_ACTION
+                            trees[batch_idx, slot_idx, COL_PARENT_IDX] = root_idx
+                            trees[batch_idx, slot_idx, COL_DEPTH] = 1.0
+                            trees[batch_idx, slot_idx, COL_PARAM_1] = ACTION_CLOSE_ALL
+                            # Clear other parameters
+                            for col in range(4, D):
+                                trees[batch_idx, slot_idx, col] = 0.0
+                            break
 
         # Validate trees after CUDA delete-subtree mutation (if available)
         try:
