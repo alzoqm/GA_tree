@@ -103,6 +103,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("chosen_roots_buffer")
     );
 
+    // --- NEW: Critical repair function (CUDA replacement for slow Python loops) ---
+    m.def("critical_repair_batch", &critical_repair_batch_cuda,
+        "Critical repair: Ensure no root branch is left without children (CUDA replacement for slow Python loops).",
+        py::arg("trees")
+    );
+
     // --- NEW: mutation utils (GPU variants of utils.py) ---
     m.def("find_subtree_nodes_batch", &find_subtree_nodes_batch_cuda,
         "Collect subtree nodes for each (b, root_idx) into result buffer.",

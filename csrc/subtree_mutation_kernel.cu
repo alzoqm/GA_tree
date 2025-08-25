@@ -788,3 +788,73 @@ void delete_subtrees_batch_cuda(
         chosen_roots_buffer.data_ptr<int>());
     CUDA_CHECK_ERRORS();
 }
+
+// =============================================================================
+// CRITICAL REPAIR: CUDA KERNEL TO REPLACE SLOW PYTHON LOOPS
+// =============================================================================
+
+// Critical repair kernel: Ensure no root branch is left without children
+__global__ void k_critical_repair_batch(
+    float* __restrict__ trees, int B, int N, int D
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+    
+    float* tree = trees + (size_t)b * N * D;
+    
+    // Only thread 0 performs the repair logic for this tree
+    if (threadIdx.x == 0) {
+        // Check each root branch (indices 0, 1, 2)
+        for (int root_idx = 0; root_idx < 3; ++root_idx) {
+            const float* root_node = d_node(tree, D, root_idx);
+            if (d_f2i(root_node[COL_NODE_TYPE]) != NODE_TYPE_ROOT_BRANCH) {
+                continue;
+            }
+            
+            // Count children of this root branch
+            bool has_children = false;
+            for (int child_idx = 3; child_idx < N; ++child_idx) {
+                const float* child_node = d_node(tree, D, child_idx);
+                if (d_f2i(child_node[COL_NODE_TYPE]) != NODE_TYPE_UNUSED && 
+                    d_f2i(child_node[COL_PARENT_IDX]) == root_idx) {
+                    has_children = true;
+                    break;
+                }
+            }
+            
+            // If no children, add a default ACTION child
+            if (!has_children) {
+                // Find an available slot
+                for (int slot_idx = 3; slot_idx < N; ++slot_idx) {
+                    float* slot_node = d_node(tree, D, slot_idx);
+                    if (d_f2i(slot_node[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) {
+                        slot_node[COL_NODE_TYPE] = d_i2f(NODE_TYPE_ACTION);
+                        slot_node[COL_PARENT_IDX] = d_i2f(root_idx);
+                        slot_node[COL_DEPTH] = 1.0f;
+                        slot_node[COL_PARAM_1] = d_i2f(ACTION_CLOSE_ALL);
+                        
+                        // Clear other parameters
+                        for (int col = 4; col < D; ++col) {
+                            slot_node[col] = 0.0f;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Host wrapper for critical repair
+void critical_repair_batch_cuda(torch::Tensor trees) {
+    TORCH_CHECK(trees.is_cuda(), "trees must be CUDA");
+    TORCH_CHECK(trees.scalar_type() == torch::kFloat32, "trees must be float32");
+    TORCH_CHECK(trees.dim() == 3 && trees.is_contiguous(), "trees must be (B,N,D) contiguous");
+    
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    
+    dim3 grid(B), block(1); // Single thread per tree for simplicity
+    k_critical_repair_batch<<<grid, block>>>(
+        trees.data_ptr<float>(), B, N, D);
+    CUDA_CHECK_ERRORS();
+}

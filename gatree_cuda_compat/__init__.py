@@ -25,6 +25,7 @@ try:
     add_decision_nodes_batch = gatree_mutation.add_decision_nodes_batch
     delete_nodes_batch = gatree_mutation.delete_nodes_batch
     reinitialize_node_mutate = gatree_mutation.reinitialize_node_mutate
+    critical_repair_batch = gatree_mutation.critical_repair_batch
     
     # Crossover functions (from gatree_crossover)
     swap_node_params = gatree_crossover.swap_node_params
@@ -63,6 +64,7 @@ except ImportError as e:
     add_decision_nodes_batch = None
     delete_nodes_batch = None
     reinitialize_node_mutate = None
+    critical_repair_batch = None
     swap_node_params = None
     swap_node_params_cuda = None
     get_contextual_mask = None
