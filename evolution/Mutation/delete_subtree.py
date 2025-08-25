@@ -3,11 +3,12 @@ import torch
 from typing import Dict, Any
 from .base import BaseMutation
 from models.constants import (
-    COL_NODE_TYPE, COL_PARENT_IDX, NODE_TYPE_UNUSED,
+    COL_NODE_TYPE, COL_PARENT_IDX,
+    NODE_TYPE_UNUSED,
 )
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     raise RuntimeError(
         "gatree_cuda module not built. Run: python setup.py build_ext --inplace"
@@ -47,7 +48,7 @@ class DeleteSubtreeMutation(BaseMutation):
             raise ValueError("Trees must be on CUDA device.")
 
         trees = chromosomes.clone().contiguous()
-        B, N, D = trees.shape
+        B, N, _ = trees.shape
         if N > self.max_nodes:
             raise ValueError(f"max_nodes({self.max_nodes}) < N({N}). Increase max_nodes.")
 
@@ -100,6 +101,9 @@ class DeleteSubtreeMutation(BaseMutation):
             # Optional: Set parent_idx to -1 for UNUSED nodes (as requested by user)
             if self.set_unused_parent_idx:
                 trees[b_idx, n_idx, COL_PARENT_IDX] = -1.0
+
+        # ---- Critical repair: Ensure no root branch is left without children (CUDA version) ----
+        gatree_cuda.critical_repair_batch(trees.contiguous())
 
         # Validate trees after CUDA delete-subtree mutation (if available)
         try:

@@ -13,7 +13,7 @@ from models.constants import (
 
 # C++/CUDA로 구현된 헬퍼 함수 임포트
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     print("="*60)
     print(">>> 경고: 'gatree_cuda' 모듈을 찾을 수 없습니다.")

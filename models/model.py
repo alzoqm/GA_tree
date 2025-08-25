@@ -19,7 +19,7 @@ except ImportError:
     PYVIS_AVAILABLE = False
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     gatree_cuda = None
 

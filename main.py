@@ -21,7 +21,7 @@ from evolution.Mutation import (
 from training.trading_env import generation_valid, generation_test, calculate_fitness
 
 try:
-    import gatree_cuda
+    import gatree_cuda_compat as gatree_cuda
 except ImportError:
     print("="*60)
     print(">>> Warning: 'gatree_cuda' module not found.")
@@ -71,7 +71,7 @@ def setup_environment(output_dir):
     """학습 환경을 설정하고 필요한 디렉토리를 생성합니다."""
     logging.info("Setting up environment...")
     try:
-        import gatree_cuda
+        import gatree_cuda_compat as gatree_cuda
         logging.info("'gatree_cuda' module found. Running on GPU is enabled.")
     except ImportError:
         logging.error("FATAL: 'gatree_cuda' module not found.")

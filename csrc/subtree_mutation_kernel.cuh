@@ -47,3 +47,8 @@ void delete_subtrees_batch_cuda(
 
     torch::Tensor chosen_roots_buffer       // (B,) int32 out
 );
+
+// Critical repair: Ensure no root branch is left without children (CUDA replacement for slow Python loops)
+void critical_repair_batch_cuda(
+    torch::Tensor trees                     // (B, N, D) float32
+);
