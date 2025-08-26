@@ -179,7 +179,6 @@ def main():
     crossover_ops = [
         SubtreeCrossover(
             max_nodes=ga_cfg['population']['max_nodes'],
-            max_depth=ga_cfg['population']['max_depth'],
             mode=op_cfg['crossover']['subtree_crossover']['mode']
         ),
         NodeCrossover(mode=op_cfg['crossover']['node_crossover']['mode']),

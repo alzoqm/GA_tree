@@ -400,7 +400,6 @@ __global__ void k_validate_adjacency(
   const float* __restrict__ trees, int B, int N, int D,
   const int*   __restrict__ off,
   const int*   __restrict__ chi,
-  int max_children, int max_depth,
   int*         __restrict__ out_mask
 ){
   const int b = blockIdx.x;
@@ -413,7 +412,7 @@ __global__ void k_validate_adjacency(
     int s = off[(size_t)b * N + p];
     int e = off[(size_t)b * N + p + 1];
     int deg = e - s;
-    if (deg > max_children) local_mask |= V_CHILD_OVERFLOW;
+    // No constraint on max_children
 
     int act=0, dec=0;
     for (int k = s; k < e; ++k){
@@ -425,7 +424,7 @@ __global__ void k_validate_adjacency(
 
       int pd = f2i(node_ptr(tree, D, p)[COL_DEPTH]);
       int cd = f2i(node_ptr(tree, D, c)[COL_DEPTH]);
-      if (cd != pd + 1 || cd >= max_depth) local_mask |= V_DEPTH_MISMATCH;
+      if (cd != pd + 1) local_mask |= V_DEPTH_MISMATCH; // Only check parent-child depth consistency
     }
 
     // Mixed children
@@ -451,9 +450,7 @@ __global__ void k_validate_adjacency(
     } else if (parent < -1 || parent >= N){
         local_mask |= V_BAD_PARENT;
     }
-    // Depth range
-    int depth = f2i(node_ptr(tree, D, p)[COL_DEPTH]);
-    if (depth >= max_depth) local_mask |= V_DEPTH_MISMATCH;
+    // No depth range constraint
   }
 
   __shared__ int s;
@@ -468,8 +465,6 @@ void validate_adjacency_cuda(
     const torch::Tensor& trees,
     const torch::Tensor& offsets_flat,
     const torch::Tensor& child_indices,
-    int                  max_children,
-    int                  max_depth,
     torch::Tensor        out_violation_mask
 ){
     TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
@@ -499,7 +494,6 @@ void validate_adjacency_cuda(
         trees.data_ptr<float>(), B, N, D,
         offsets_flat.data_ptr<int>(),
         child_indices.data_ptr<int>(),
-        max_children, max_depth,
         out_violation_mask.data_ptr<int>()
     );
     CUDA_CHECK_ERRORS();

@@ -27,8 +27,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("population_tensor"),
           py::arg("offset_array"),
           py::arg("child_indices"),
-          py::arg("max_children"),
-          py::arg("max_depth"),
           py::arg("out_violation_mask"));
 
     // --- Adjacency Dictionary Builder for Python Synchronization ---

@@ -151,7 +151,7 @@ __device__ bool transplant_one_way_device(
 __global__ void subtree_crossover_kernel(
     float* child1_out_ptr, float* child2_out_ptr,
     const float* p1_batch_ptr, const float* p2_batch_ptr,
-    int mode, int max_depth, int max_nodes, int max_retries,
+    int mode, int max_nodes, int max_retries,
     const int* branch_perm_ptr,
     int* bfs_queue_buffer_ptr, int* result_indices_buffer_ptr, int* old_to_new_map_buffer_ptr,
     int* p1_candidates_buffer_ptr, int* p2_candidates_buffer_ptr,
@@ -210,17 +210,13 @@ __global__ void subtree_crossover_kernel(
         int p1_total_nodes = get_active_node_count(p1_ptr, max_nodes);
         int p2_total_nodes = get_active_node_count(p2_ptr, max_nodes);
         
-        // --- 4. 제약 조건 검증 ---
+        // --- 4. 제약 조건 검증 (only node count limits) ---
         int p1_parent_idx = (int)p1_ptr[p1_idx*NODE_INFO_DIM + COL_PARENT_IDX];
         if(p1_parent_idx < 0 || p1_parent_idx >= max_nodes) continue;
-        float p1_ins_depth = p1_ptr[p1_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
-        if(p1_ins_depth + get_max_relative_depth(p2_ptr, my_results2, s2_count, max_nodes) > max_depth) continue;
         if(p1_total_nodes - s1_count + s2_count > max_nodes) continue;
 
         int p2_parent_idx = (int)p2_ptr[p2_idx*NODE_INFO_DIM + COL_PARENT_IDX];
         if(p2_parent_idx < 0 || p2_parent_idx >= max_nodes) continue;
-        float p2_ins_depth = p2_ptr[p2_parent_idx*NODE_INFO_DIM + COL_DEPTH] + 1;
-        if(p2_ins_depth + get_max_relative_depth(p1_ptr, my_results1, s1_count, max_nodes) > max_depth) continue;
         if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
 
         // --- 5. 이식 수행 ---
@@ -256,7 +252,6 @@ void subtree_crossover_batch_cuda(
     const torch::Tensor& p1_batch,
     const torch::Tensor& p2_batch,
     int mode,
-    int max_depth,
     int max_nodes,
     int max_retries,
     const torch::Tensor& branch_perm,
@@ -286,7 +281,7 @@ void subtree_crossover_batch_cuda(
         child2_out.data_ptr<float>(),
         p1_batch.data_ptr<float>(),
         p2_batch.data_ptr<float>(),
-        mode, max_depth, max_nodes, max_retries,
+        mode, max_nodes, max_retries,
         branch_perm.data_ptr<int>(),
         bfs_queue_buffer.data_ptr<int>(),
         result_indices_buffer.data_ptr<int>(),

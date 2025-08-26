@@ -217,8 +217,9 @@ class GATree:
             parent_id = random.choice(open_list)
             parent_depth = self.data[parent_id, COL_DEPTH].item()
 
-            # CASE 1: 최대 깊이에 도달하여 Action 노드를 생성해야 하는 경우
-            if parent_depth >= self.max_depth - 1:
+            # No depth constraint - allow unlimited growth
+            # Randomly choose between ACTION and DECISION
+            if random.random() < 0.3:  # 30% chance for action
                 new_node_id = self._create_action_node(parent_id)
                 if new_node_id is not None:
                     nodes_to_create -= 1
@@ -246,9 +247,7 @@ class GATree:
                 leaf_list.append(child_id)      # 자식은 새로운 리프임
                 open_list.append(child_id)      # 자식은 새로운 성장 후보임
 
-                # 부모의 자식 수가 최대치에 도달하면 성장 후보에서 제외
-                if child_counts[parent_id] >= self.max_children:
-                    open_list.remove(parent_id)
+                # No children limit constraint
             else:
                 # 노드 생성 실패 시 (e.g. 전역 노드 풀 고갈)
                 # 해당 부모는 더 이상 성장할 수 없으므로 성장 후보에서 제외

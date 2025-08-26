@@ -43,7 +43,7 @@ __device__ int get_root_branch_type(const float* tree, int D, int N, int start_i
 __global__ void k_add_subtrees_batch(
     float* __restrict__ trees, int B, int N, int D,
     const int* __restrict__ num_to_grow,
-    int max_children, int max_depth, int max_nodes, int max_new_nodes,
+    int max_nodes, int max_new_nodes,
     int* __restrict__ out_dec_nodes, int* __restrict__ out_act_nodes, float* __restrict__ out_act_rtype,
     int* __restrict__ bfs_queue, int* __restrict__ scratch, // (B, 2*N)
     int* __restrict__ child_cnt, int* __restrict__ act_cnt, int* __restrict__ dec_cnt,
@@ -109,15 +109,12 @@ __global__ void k_add_subtrees_batch(
         if (!(t == NODE_TYPE_DECISION || t == NODE_TYPE_ROOT_BRANCH)) continue;
 
         int d = f2i(nb[COL_DEPTH]);
-        if (d >= max_depth - 1) continue; // too deep
-
         int cc = ch[i];
-        if (cc >= max_children) continue; // full capacity
 
         // exclude parents with action children to avoid mixing
         if (ac[i] > 0) continue;
 
-        float w = (float)(max_children - cc) / (float)(d + 1);
+        float w = 1.0f / (float)(d + 1);
         if (w <= 0.0f) continue;
 
         int pos = atomicAdd(&scr[0], 1); // candidate_count++
@@ -221,7 +218,7 @@ __global__ void k_add_subtrees_batch(
 
             const float* pb = node_ptr(tree, D, cur_parent);
             int pd = f2i(pb[COL_DEPTH]);
-            bool force_action = (pd + 1 >= max_depth - 1);
+            bool force_action = false;
 
             int cur_childs = ch[cur_parent];
             bool choose_action = force_action || (rng.nextf() < 0.5f);
@@ -252,13 +249,11 @@ __global__ void k_add_subtrees_batch(
                 continue; // ACTION is leaf, no further expansion
             }
 
-            // DECISION path: cannot mix and must have capacity
+            // DECISION path: cannot mix
             if (ac[cur_parent] > 0) continue; // no mixing rule
-            int can_add = max_children - cur_childs;
-            if (can_add <= 0) continue;
 
             int remaining_budget = budget - created;
-            int kmax = (can_add < remaining_budget ? can_add : remaining_budget);
+            int kmax = remaining_budget; // no children limit
             if (kmax <= 0) continue;
 
             // Queue capacity guard: must be able to enqueue all new decisions
@@ -305,24 +300,22 @@ __global__ void k_add_subtrees_batch(
             if (ch[dp] == 0){
                 const float* pb2 = node_ptr(tree, D, dp);
                 int d2 = f2i(pb2[COL_DEPTH]);
-                if (d2 + 1 < max_depth){
-                    int slot;
-                    if (!alloc_slot(slot)) break;
+                int slot;
+                if (!alloc_slot(slot)) break;
 
-                    float* nb2 = node_ptr(tree, D, slot);
-                    nb2[COL_NODE_TYPE]  = i2f(NODE_TYPE_ACTION);
-                    nb2[COL_PARENT_IDX] = i2f(dp);
-                    nb2[COL_DEPTH]      = i2f(d2 + 1);
+                float* nb2 = node_ptr(tree, D, slot);
+                nb2[COL_NODE_TYPE]  = i2f(NODE_TYPE_ACTION);
+                nb2[COL_PARENT_IDX] = i2f(dp);
+                nb2[COL_DEPTH]      = i2f(d2 + 1);
 
-                    ch[dp] = 1;
-                    ac[dp] = 1;
+                ch[dp] = 1;
+                ac[dp] = 1;
 
-                    int rbt = get_root_branch_type(tree, D, N, dp);
-                    if (act_out < max_new_nodes){ 
-                        out_act[act_out] = slot; 
-                        out_rt[act_out] = i2f(rbt); 
-                        ++act_out; 
-                    }
+                int rbt = get_root_branch_type(tree, D, N, dp);
+                if (act_out < max_new_nodes){ 
+                    out_act[act_out] = slot; 
+                    out_rt[act_out] = i2f(rbt); 
+                    ++act_out; 
                 }
             }
         }
@@ -334,7 +327,7 @@ __global__ void k_add_subtrees_batch(
 
 void add_subtrees_batch_cuda(
     torch::Tensor trees, torch::Tensor num_to_grow,
-    int max_children, int max_depth, int max_nodes, int max_new_nodes,
+    int max_nodes, int max_new_nodes,
     torch::Tensor new_decision_nodes, torch::Tensor new_action_nodes, torch::Tensor action_root_branch_type,
     torch::Tensor bfs_queue_buffer, torch::Tensor result_indices_buffer,
     torch::Tensor child_count_buffer, torch::Tensor act_cnt_buffer, torch::Tensor dec_cnt_buffer,
@@ -377,7 +370,7 @@ void add_subtrees_batch_cuda(
     k_add_subtrees_batch<<<grid, block>>>(
         trees.data_ptr<float>(), B, N, D,
         num_to_grow.data_ptr<int>(),
-        max_children, max_depth, max_nodes, max_new_nodes,
+        max_nodes, max_new_nodes,
         new_decision_nodes.data_ptr<int>(),
         new_action_nodes.data_ptr<int>(),
         action_root_branch_type.data_ptr<float>(),

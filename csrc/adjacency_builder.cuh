@@ -57,8 +57,6 @@ void validate_adjacency_cuda(
     const torch::Tensor& trees,
     const torch::Tensor& offsets_flat,
     const torch::Tensor& child_indices,
-    int                  max_children,
-    int                  max_depth,
     torch::Tensor        out_violation_mask
 );
 

@@ -5,7 +5,6 @@
 void add_decision_nodes_batch_cuda(
     torch::Tensor trees,                 // (B, max_nodes, node_dim) float32
     torch::Tensor num_to_add,            // (B,) int32
-    int max_depth,
     int max_nodes,
     int max_add_nodes,                   // max_add_nodes per tree (for indexing)
     torch::Tensor out_new_node_indices,  // (B, max_add_nodes) int32, -1 on fail
@@ -17,8 +16,6 @@ void add_decision_nodes_batch_cuda(
 void delete_nodes_batch_cuda(
     torch::Tensor trees,                    // (B, N, D) float32, in/out
     torch::Tensor num_to_delete,            // (B,) int32
-    int max_children,
-    int max_depth,
     int max_nodes,
     int max_delete_nodes,
     torch::Tensor deleted_nodes,            // (B, K) int32, initialized to -1
