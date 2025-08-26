@@ -212,8 +212,8 @@ def main():
         selection=selection_op,
         crossover=crossover_op,
         mutation=mutation_op,
-        parent_size=min(ga_cfg['evolution_loop']['parent_pool_size'], 50),  # Reduced for testing
-        num_elites=min(ga_cfg['evolution_loop']['elite_size'], 10)  # Reduced for testing
+        parent_size=ga_cfg['evolution_loop']['parent_pool_size'],  # Reduced for testing
+        num_elites=ga_cfg['evolution_loop']['elite_size'] # Reduced for testing
     )
     logging.info("Evolution engine configured.")
 
