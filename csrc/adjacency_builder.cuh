@@ -61,3 +61,20 @@ void validate_adjacency_cuda(
     int                  max_depth,
     torch::Tensor        out_violation_mask
 );
+
+/**
+ * Build adjacency dictionaries for Python synchronization.
+ * 
+ * This function replaces the Python loop in _build_adjacency_list() 
+ * by performing adjacency list building for all trees in parallel on GPU.
+ * 
+ * @param trees          (B,N,D) float32 CUDA contiguous
+ * @param next_idxs      (B) int32 CUDA - next_idx per tree (number of active nodes)
+ * @return (offsets, children)
+ *         offsets:      (B*N+1) int32 CUDA - CSR offsets for each tree
+ *         children:     (total_children) int32 CUDA - child node indices
+ */
+std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& next_idxs
+);

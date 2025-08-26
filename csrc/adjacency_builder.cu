@@ -504,3 +504,105 @@ void validate_adjacency_cuda(
     );
     CUDA_CHECK_ERRORS();
 }
+
+// -----------------------------------------------------------------------------
+// Build adjacency dictionaries for Python synchronization (block = tree)
+// -----------------------------------------------------------------------------
+__global__ void k_build_adjacency_dicts(
+    const float* __restrict__ trees,     // (B,N,D)
+    const int*   __restrict__ next_idxs, // (B) next_idx per tree
+    int B, int N, int D,
+    int* __restrict__ offsets,           // (B*N+1) output offsets 
+    int* __restrict__ children           // (total_children) output children indices
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+
+    const float* tree = trees + (size_t)b * N * D;
+    const int next_idx = next_idxs[b];
+    int* tree_offsets = offsets + (size_t)b * N;
+    
+    // First pass: count children per parent
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        tree_offsets[p] = 0;
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < next_idx; i += blockDim.x){
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]);
+        if (nt == NODE_TYPE_UNUSED) continue;
+        
+        int parent_idx = f2i(nb[COL_PARENT_IDX]);
+        if (parent_idx != -1 && valid_idx(parent_idx, N)) {
+            atomicAdd(&tree_offsets[parent_idx], 1);
+        }
+    }
+    __syncthreads();
+
+    // Convert counts to offsets using prefix sum  
+    if (threadIdx.x == 0) {
+        // Get the starting offset for this tree from the global offsets array
+        int global_start = (b == 0) ? 0 : offsets[b * N];
+        int current_offset = global_start;
+        
+        for (int p = 0; p < N; p++) {
+            int count = tree_offsets[p];
+            tree_offsets[p] = current_offset;  // store start position for this parent
+            current_offset += count;
+        }
+    }
+    __syncthreads();
+
+    // Second pass: fill children indices
+    extern __shared__ int s_write_cursors[];
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        s_write_cursors[p] = tree_offsets[p];
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < next_idx; i += blockDim.x){
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]);
+        if (nt == NODE_TYPE_UNUSED) continue;
+        
+        int parent_idx = f2i(nb[COL_PARENT_IDX]);
+        if (parent_idx != -1 && valid_idx(parent_idx, N)) {
+            int pos = atomicAdd(&s_write_cursors[parent_idx], 1);
+            children[pos] = i;
+        }
+    }
+}
+
+std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& next_idxs
+){
+    TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
+                "trees must be (B,N,D) float32 CUDA contiguous");
+    TORCH_CHECK(next_idxs.is_cuda() && next_idxs.dtype()==torch::kInt32 && next_idxs.dim()==1,
+                "next_idxs must be (B,) int32 CUDA");
+
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(next_idxs.size(0) == B, "next_idxs size must match batch size");
+
+    auto i32 = torch::TensorOptions().device(trees.device()).dtype(torch::kInt32);
+    
+    c10::cuda::CUDAGuard guard(trees.device());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    
+    // Use existing CSR building functions for consistency
+    long total_children;
+    torch::Tensor offsets_flat, overflow_mask;
+    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, 1000); // high max_children limit
+    
+    // Allocate children indices
+    auto children = torch::empty({(long)total_children}, i32);
+    
+    if (total_children > 0) {
+        // Use existing fill function
+        fill_child_indices_cuda(trees, offsets_flat, children, 1000, false); // no sorting needed for dict building
+    }
+    
+    return {offsets_flat, children};
+}

@@ -31,6 +31,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("max_depth"),
           py::arg("out_violation_mask"));
 
+    // --- Adjacency Dictionary Builder for Python Synchronization ---
+    m.def("build_adjacency_dicts", &build_adjacency_dicts_cuda,
+          "Build adjacency dictionaries for all trees in parallel (replaces Python _build_adjacency_list loop)",
+          py::arg("trees"),
+          py::arg("next_idxs"));
+
     // --- Optimized prediction function with safety guarantees ---
     m.def("predict", &predict_cuda, 
           "GPU-accelerated prediction for GA-Tree populations with safety guarantees",

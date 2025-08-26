@@ -862,8 +862,7 @@ class GATreePop:
         # [중요] CUDA 연산 후, Python GATree 객체들의 내부 상태를 텐서와 동기화합니다.
         # 이 과정이 없으면, 다음 연산(예: 시각화, CPU 기반 예측)에서 오류가 발생합니다.
         self.set_next_idx()  # 모든 트리의 next_idx 값을 텐서 기준으로 다시 계산
-        for tree in self.population:
-            tree._build_adjacency_list() # 모든 트리의 인접 리스트를 텐서 기준으로 재생성
+        self.build_adjacency_dicts_cuda()  # CUDA를 사용하여 모든 트리의 인접 리스트를 병렬로 재생성
 
     def set_next_idx(self):
         """
@@ -885,6 +884,51 @@ class GATreePop:
             return [0] * self.pop_size
 
         return [tree.return_next_idx() for tree in self.population]
+
+    def build_adjacency_dicts_cuda(self):
+        """
+        CUDA 병렬 처리를 사용하여 모든 트리의 인접 리스트를 재생성합니다.
+        Python 루프 대신 GPU에서 모든 트리의 부모-자식 관계를 동시에 계산합니다.
+        """
+        if not self.initialized:
+            return
+
+        try:
+            import gatree_predict as gatree_cuda
+        except ImportError:
+            print("Warning: gatree_predict not available, falling back to CPU version")
+            for tree in self.population:
+                tree._build_adjacency_list()
+            return
+
+        # Get next_idx values for all trees
+        next_idxs = torch.tensor(self.return_next_idx(), dtype=torch.int32, device='cuda')
+        trees_cuda = self.population_tensor.to('cuda').contiguous()
+        
+        # Build adjacency dictionaries using CUDA
+        offsets, children = gatree_cuda.build_adjacency_dicts(trees_cuda, next_idxs)
+        
+        # Convert CUDA CSR format back to Python dictionaries
+        offsets_cpu = offsets.cpu()
+        children_cpu = children.cpu()
+        
+        for tree_idx, tree in enumerate(self.population):
+            tree._adjacency_list.clear()
+            
+            # Extract offsets for this tree (tree_idx * max_nodes)
+            tree_start = tree_idx * self.max_nodes
+            
+            for parent_idx in range(self.max_nodes):
+                offset_idx = tree_start + parent_idx
+                if offset_idx + 1 < len(offsets_cpu):
+                    start_pos = offsets_cpu[offset_idx].item()
+                    end_pos = offsets_cpu[offset_idx + 1].item()
+                    
+                    if end_pos > start_pos:
+                        # Get children for this parent
+                        children_list = children_cpu[start_pos:end_pos].tolist()
+                        if children_list:
+                            tree._adjacency_list[parent_idx] = children_list
 
     def save(self, filepath):
         """집단 전체의 상태를 파일로 저장합니다."""
