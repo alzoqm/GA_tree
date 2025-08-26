@@ -31,7 +31,6 @@ class SubtreeCrossover(BaseCrossover):
         self,
         rate: float = 0.8,
         max_nodes: int = 100,
-        max_depth: int = 3,
         max_retries: int = 5,
         mode: str = "free",
     ):
@@ -42,7 +41,7 @@ class SubtreeCrossover(BaseCrossover):
             raise ValueError(f"Invalid mode '{mode}'. Choose 'free' or 'context'.")
 
         self.max_nodes = max_nodes
-        self.max_depth = max_depth
+        # Remove max_depth constraint
         self.max_retries = max_retries
         self.mode = mode
         self.BRANCH_TYPES = [ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT]
@@ -124,7 +123,7 @@ class SubtreeCrossover(BaseCrossover):
         gatree_cuda.subtree_crossover_batch(
             child1_out, child2_out, p1_batch, p2_batch,
             1 if self.mode == "context" else 0,
-            int(self.max_depth), int(self.max_nodes), int(self.max_retries),
+            int(self.max_nodes), int(self.max_retries),
             branch_perm, bfs_queue_buffer, result_indices_buffer,
             old_to_new_map_buffer, p1_candidates_buffer, p2_candidates_buffer
         )

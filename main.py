@@ -7,7 +7,6 @@ import pandas as pd
 import logging
 import random
 import numpy as np
-import torch.multiprocessing as mp  # 멀티프로세싱 임포트
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
@@ -153,9 +152,8 @@ def main():
         **model_config
     )
 
-    logging.info("Creating initial random population...")
-    num_processes = os.cpu_count() or 1
-    population.make_population(num_processes=num_processes, device=env_cfg['device'], init_mode='cuda')
+    logging.info("Creating initial random population using GPU...")
+    population.make_population(device=env_cfg['device'])
     # Validate trees after CUDA population init (if available)
     try:
         if gatree_cuda is not None and str(env_cfg['device']).startswith('cuda'):
@@ -181,7 +179,6 @@ def main():
     crossover_ops = [
         SubtreeCrossover(
             max_nodes=ga_cfg['population']['max_nodes'],
-            max_depth=ga_cfg['population']['max_depth'],
             mode=op_cfg['crossover']['subtree_crossover']['mode']
         ),
         NodeCrossover(mode=op_cfg['crossover']['node_crossover']['mode']),

@@ -7,8 +7,6 @@
 void add_subtrees_batch_cuda(
     torch::Tensor trees,                    // (B, N, D) float32
     torch::Tensor num_to_grow,              // (B,) int32
-    int max_children,
-    int max_depth,
     int max_nodes,
     int max_new_nodes,
     torch::Tensor new_decision_nodes,       // (B, K) int32, init -1

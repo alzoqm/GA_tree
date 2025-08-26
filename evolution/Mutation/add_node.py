@@ -158,7 +158,7 @@ class AddNodeMutation(BaseMutation):
         if not isinstance(max_add_nodes, int) or max_add_nodes < 1:
             raise ValueError("max_add_nodes must be a positive integer.")
         self.config = config
-        self.max_depth = int(config['max_depth'])
+        # Remove constraint storage - no longer needed
         self.max_add_nodes = int(max_add_nodes)
         self.max_nodes = int(max_nodes)
         self._sampler = None
@@ -196,7 +196,6 @@ class AddNodeMutation(BaseMutation):
         gatree_cuda.add_decision_nodes_batch(
             trees,
             num_to_add,
-            int(self.max_depth),
             int(self.max_nodes),
             int(self.max_add_nodes),
             new_node_indices,

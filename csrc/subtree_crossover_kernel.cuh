@@ -9,7 +9,6 @@ void subtree_crossover_batch_cuda(
     const torch::Tensor& p1_batch,
     const torch::Tensor& p2_batch,
     int mode,
-    int max_depth,
     int max_nodes,
     int max_retries,
     const torch::Tensor& branch_perm,

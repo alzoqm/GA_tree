@@ -455,7 +455,7 @@ def generation_valid(
     for gen_idx in range(start_gen, gen_loop):
         print(f'generation {gen_idx}: ')
         
-        adj_offsets, adj_indices = build_adjacency_list_cuda(population)
+        adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
         if adj_offsets is None:
             raise RuntimeError("Failed to build adjacency list on GPU.")
 
@@ -526,7 +526,7 @@ def generation_test(
 
     all_feature_names = population.all_features
     
-    adj_offsets, adj_indices = build_adjacency_list_cuda(population)
+    adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
     if adj_offsets is None:
         raise RuntimeError("Failed to build adjacency list on GPU for test.")
         

@@ -35,8 +35,7 @@ class DeleteNodeMutation(BaseMutation):
             raise ValueError("max_delete_nodes must be a positive integer.")
 
         self.config = config
-        self.max_children = int(config['max_children'])
-        self.max_depth    = int(config['max_depth'])
+        # Remove constraint storage - no longer needed
         self.max_nodes    = int(max_nodes)
         self.max_delete_nodes = int(max_delete_nodes)
 
@@ -73,8 +72,6 @@ class DeleteNodeMutation(BaseMutation):
         gatree_cuda.delete_nodes_batch(
             trees,
             num_to_delete,
-            int(self.max_children),
-            int(self.max_depth),
             int(self.max_nodes),
             int(self.max_delete_nodes),
             deleted_nodes,

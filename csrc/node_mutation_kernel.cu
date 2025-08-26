@@ -121,7 +121,6 @@ __device__ int collect_weighted_candidates(
     int* candidates, 
     float* weights, 
     int max_candidates,
-    int max_depth,
     int* q, int* res, int cap
 ) {
     int count = 0;
@@ -144,9 +143,7 @@ __device__ int collect_weighted_candidates(
             if (cc != 1) continue;
         }
         
-        // Depth check
-        int md = subtree_max_depth(tv, j, q, res, cap);
-        if (md + 1 >= max_depth) continue;
+        // No depth check - allow unlimited depth
         
         // Add to candidates
         candidates[count] = j;
@@ -193,7 +190,7 @@ __device__ int weighted_select(float* weights, int count, float rand_val) {
 
 __global__ void k_add_decision_nodes_batch(
     float* __restrict__ trees, int B, int max_nodes, int node_dim,
-    const int* __restrict__ num_to_add, int max_depth, int max_add_nodes,
+    const int* __restrict__ num_to_add, int max_add_nodes,
     int* __restrict__ out_new_node_indices,
     int* __restrict__ bfs_queue_buffer,
     int* __restrict__ result_indices_buffer,
@@ -223,7 +220,7 @@ __global__ void k_add_decision_nodes_batch(
     for (int attempt = 0; attempt < tv.max_nodes && inserted < K; ++attempt) {
         // Collect weighted candidates
         int candidate_count = collect_weighted_candidates(
-            tv, candidates, weights, MAX_CANDIDATES, max_depth, q, res, 2*max_nodes
+            tv, candidates, weights, MAX_CANDIDATES, q, res, 2*max_nodes
         );
         
         if (candidate_count == 0) break; // No valid candidates
@@ -283,7 +280,6 @@ __global__ void k_add_decision_nodes_batch(
 void add_decision_nodes_batch_cuda(
     torch::Tensor trees,
     torch::Tensor num_to_add,
-    int max_depth,
     int max_nodes,
     int max_add_nodes,
     torch::Tensor out_new_node_indices,
@@ -318,7 +314,7 @@ void add_decision_nodes_batch_cuda(
     dim3 grid(B), block(1);
     k_add_decision_nodes_batch<<<grid, block>>>(
         trees.data_ptr<float>(), B, max_nodes, node_dim,
-        num_to_add.data_ptr<int>(), max_depth, max_add_nodes,
+        num_to_add.data_ptr<int>(), max_add_nodes,
         out_new_node_indices.data_ptr<int>(),
         bfs_queue_buffer.data_ptr<int>(),
         result_indices_buffer.data_ptr<int>(),
@@ -377,7 +373,6 @@ __device__ int collect_delete_candidates(
     const int* child_cnt,     // N
     const int* act_cnt,       // N
     const int* dec_cnt,       // N
-    int max_children,
     int* cand_idx_out,        // N
     float* cand_w_out         // N
 ){
@@ -417,9 +412,8 @@ __device__ int collect_delete_candidates(
             continue;
         }
 
-        // Guard 3: max_children after reattach
+        // Guard 3: no limit on children after reattach
         int future_children = p_childs - 1 + u_childs;
-        if (future_children > max_children) continue;
 
         // Guard 4: root orphan handled by Guard 1 (p_childs==1 & u_childs==0)
 
@@ -495,7 +489,7 @@ __device__ void rewire_children_and_lift_depth(
 __global__ void k_delete_nodes_batch(
     float* __restrict__ trees, int B, int max_nodes, int node_dim,
     const int* __restrict__ num_to_delete,
-    int max_children, int max_depth, int max_delete_nodes,
+    int max_delete_nodes,
     int* __restrict__ deleted_nodes,            // (B, K)
     int* __restrict__ bfs_queue_buffer,         // (B, 2N)
     int* __restrict__ result_indices_buffer,    // (B, 2N)
@@ -538,7 +532,7 @@ __global__ void k_delete_nodes_batch(
         build_child_and_type_counts(tv, ch, ac, dc);
 
         // Collect valid candidates under invariants
-        int cand_n = collect_delete_candidates(tv, ch, ac, dc, max_children, cidx, cw);
+        int cand_n = collect_delete_candidates(tv, ch, ac, dc, cidx, cw);
         if (cand_n <= 0) break;
 
         // Weighted sampling (no replacement by recomputing next round)
@@ -566,8 +560,6 @@ __global__ void k_delete_nodes_batch(
 void delete_nodes_batch_cuda(
     torch::Tensor trees,
     torch::Tensor num_to_delete,
-    int max_children,
-    int /*max_depth*/,   // kept for symmetry; not needed by current guards
     int max_nodes,
     int max_delete_nodes,
     torch::Tensor deleted_nodes,
@@ -621,7 +613,7 @@ void delete_nodes_batch_cuda(
     k_delete_nodes_batch<<<grid, block>>>(
         trees.data_ptr<float>(), B, N, D,
         num_to_delete.data_ptr<int>(),
-        max_children, /*max_depth*/0, max_delete_nodes,
+        max_delete_nodes,
         deleted_nodes.data_ptr<int>(),
         bfs_queue_buffer.data_ptr<int>(),
         result_indices_buffer.data_ptr<int>(),

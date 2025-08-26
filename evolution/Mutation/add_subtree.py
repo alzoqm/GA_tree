@@ -111,8 +111,7 @@ class AddSubtreeMutation(BaseMutation):
         if config is None:
             raise ValueError("AddSubtreeMutation requires a 'config' dictionary.")
         self.config = config
-        self.max_depth    = int(config['max_depth'])
-        self.max_children = int(config['max_children'])
+        # Remove constraint storage - no longer needed
         self.node_count_range = (int(node_count_range[0]), int(node_count_range[1]))
         self.max_nodes    = int(max_nodes)
         self.max_new_nodes = int(max_new_nodes)
@@ -172,7 +171,6 @@ class AddSubtreeMutation(BaseMutation):
 
         gatree_cuda.add_subtrees_batch(
             trees, num_to_grow,
-            int(self.max_children), int(self.max_depth),
             int(self.max_nodes), int(self.max_new_nodes),
             new_decision_nodes, new_action_nodes, action_root_type,
             bfs_queue_buffer, result_indices_buffer,

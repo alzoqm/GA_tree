@@ -176,7 +176,7 @@ def test_subtree_crossover():
             child1_out, child2_out,
             p1_batch, p2_batch,
             0,  # mode: 0=free, 1=context
-            max_depth, max_nodes, max_retries,
+            max_nodes, max_retries,
             branch_perm,
             bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer,
             p1_candidates_buffer, p2_candidates_buffer

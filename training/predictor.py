@@ -46,8 +46,9 @@ def build_adjacency_list_cuda(population: GATreePop,
         trees = trees.contiguous()
 
     # Step 1: counts -> offsets (+ overflow mask)
+    # Use a reasonable max_children value that won't cause CUDA shared memory issues
     total_children, flat_offsets, overflow_mask = gatree_cuda.count_and_create_offsets(
-        trees, population.max_children
+        trees, 512  # High enough to allow growth, low enough for CUDA shared memory
     )
 
     if strict_overflow:
@@ -63,7 +64,7 @@ def build_adjacency_list_cuda(population: GATreePop,
     indices = torch.empty(int(total_children), dtype=torch.int32, device=trees.device)
     if indices.numel() > 0:
         gatree_cuda.fill_child_indices(trees, flat_offsets, indices,
-                                       population.max_children, sort_children)
+                                       512, sort_children)  # Use reasonable limit for shared memory
 
     # Length sanity check
     if int(flat_offsets[-1].item()) != int(indices.numel()):
@@ -109,8 +110,7 @@ def build_adjacency_list_cuda(population: GATreePop,
 
     if validate:
         mask = torch.empty(population.pop_size, dtype=torch.int32, device=trees.device)
-        gatree_cuda.validate_adjacency(trees, flat_offsets, indices,
-                                       population.max_children, population.max_depth, mask)
+        gatree_cuda.validate_adjacency(trees, flat_offsets, indices, mask)
         bad = (mask != 0).nonzero(as_tuple=False).flatten()
         if bad.numel() > 0:
             raise RuntimeError(
