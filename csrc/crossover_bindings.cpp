@@ -75,6 +75,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dec_cnt_buffer"),
         py::arg("bfs_queue_buffer"),
         py::arg("result_indices_buffer"));
+
+    m.def("root_branch_sampling_crossover", &root_branch_sampling_crossover_cuda,
+        "Parent-pool sampling root branch crossover with proactive size validation and retry mechanism.",
+        py::arg("child_batch"),
+        py::arg("parent_pool"),
+        py::arg("max_nodes"),
+        py::arg("max_retries"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer"));
+
+    m.def("root_branch_sampling_crossover_cuda", &root_branch_sampling_crossover_cuda,
+        "Parent-pool sampling root branch crossover with proactive size validation and retry mechanism (direct).",
+        py::arg("child_batch"),
+        py::arg("parent_pool"),
+        py::arg("max_nodes"),
+        py::arg("max_retries"),
+        py::arg("bfs_queue_buffer"),
+        py::arg("result_indices_buffer"),
+        py::arg("old_to_new_map_buffer"));
     
     // [수정된] SubtreeCrossover 바인딩 (시그니처 변경)
     m.def("subtree_crossover_batch", &subtree_crossover_batch_cuda,

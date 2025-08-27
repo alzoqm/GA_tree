@@ -223,6 +223,223 @@ __global__ void repair_after_root_branch_kernel(
 }
 
 // ==============================================================================
+//                NEW: Parent Pool Sampling Root Branch Crossover Kernel
+// ==============================================================================
+
+__global__ void root_branch_sampling_crossover_kernel(
+    float* child_batch_ptr,
+    const float* parent_pool_ptr,
+    int batch_size,
+    int pool_size,
+    int max_nodes,
+    int max_retries,
+    int* bfs_queue_buffer_ptr,
+    int* result_indices_buffer_ptr,
+    int* old_to_new_map_buffer_ptr
+)
+{
+    const int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    // --- 1. Thread-local pointers and buffer setup ---
+    float* child_ptr = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
+    int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
+    int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
+    int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
+
+    // Initialize child tree (roots should already be set by Python)
+    // Clear non-root nodes to UNUSED
+    for (int i = 3; i < max_nodes; ++i) {
+        float* nd = child_ptr + i * NODE_INFO_DIM;
+        nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
+        nd[COL_PARENT_IDX] = -1;
+        nd[COL_DEPTH] = 0;
+        for (int c = 3; c < NODE_INFO_DIM; ++c) nd[c] = 0.0f;
+    }
+
+    // Initialize RNG for this batch
+    curandState state;
+    curand_init(batch_idx, 0, 0, &state);
+
+    int child_next_idx = 3; // Start after root branches (0,1,2)
+    bool success = false;
+
+    // --- 2. Retry mechanism for valid offspring generation ---
+    for (int retry = 0; retry < max_retries && !success; ++retry) {
+        // Reset child pointer for this retry
+        child_next_idx = 3;
+        for (int i = 3; i < max_nodes; ++i) {
+            child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] = NODE_TYPE_UNUSED;
+        }
+
+        // Sample three parents independently for LONG, HOLD, SHORT branches
+        int branch_parents[3];
+        int total_estimated_size = 3; // Start with 3 roots
+        bool size_ok = true;
+        
+        if (batch_idx == 0) {
+            printf("[DEBUG] Batch %d, Retry %d: Starting retry\n", batch_idx, retry);
+        }
+
+        for (int branch = 0; branch < 3; ++branch) {
+            // Sample random parent from pool
+            branch_parents[branch] = (int)(curand_uniform(&state) * pool_size);
+            
+            if (batch_idx == 0) {
+                // Selected parent for this branch
+            }
+            
+            // Get pointer to selected parent tree
+            const float* parent_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
+            
+            int branch_child_count = 0;
+            // Find all children of this branch in the selected parent
+            for (int node_idx = 0; node_idx < max_nodes; ++node_idx) {
+                int node_parent_idx = (int)parent_ptr[node_idx * NODE_INFO_DIM + COL_PARENT_IDX];
+                
+                // Checking node for parent relationship
+                
+                if (node_parent_idx == branch) {
+                    // This node is a child of the current branch, measure its subtree
+                    int subtree_size = find_subtree_nodes_device(parent_ptr, node_idx, my_queue, my_results, max_nodes);
+                    total_estimated_size += subtree_size;
+                    branch_child_count++;
+                    
+                    if (batch_idx == 0) {
+                        // Found child node for this branch
+                    }
+                }
+            }
+            
+            if (batch_idx == 0) {
+                // Total children found for this branch
+            }
+        }
+
+        // Check if estimated size fits
+        if (batch_idx == 0) {
+            // Checking size constraint
+        }
+        
+        if (total_estimated_size > max_nodes) {
+            size_ok = false;
+            if (batch_idx == 0) {
+                // Size constraint violated, retrying
+            }
+            continue; // Retry with different parent selection
+        }
+
+        // --- 3. Copy branches from selected parents ---
+        if (size_ok) {
+            bool copy_success = true;
+            
+            if (batch_idx == 0) {
+                // Starting copy phase
+            }
+            
+            for (int branch = 0; branch < 3 && copy_success; ++branch) {
+                const float* donor_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
+                
+                // Find and copy all subtrees under this branch
+                for (int donor_node_idx = 0; donor_node_idx < max_nodes && copy_success; ++donor_node_idx) {
+                    if ((int)donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_PARENT_IDX] == branch) {
+                        // This is a child of the current branch, copy its entire subtree
+                        int subtree_size = find_subtree_nodes_device(donor_ptr, donor_node_idx, my_queue, my_results, max_nodes);
+                        
+                        // Check if we have space
+                        if (child_next_idx + subtree_size > max_nodes) {
+                            copy_success = false;
+                            break;
+                        }
+
+                        // Initialize old_to_new_map
+                        for(int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
+                        for (int k = 0; k < subtree_size; ++k) {
+                            my_old_to_new_map[my_results[k]] = child_next_idx + k;
+                        }
+
+                        // Calculate depth offset
+                        float dest_parent_depth = child_ptr[branch * NODE_INFO_DIM + COL_DEPTH]; // Root depth is 0
+                        float source_root_depth = donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_DEPTH];
+                        float depth_offset = (dest_parent_depth + 1) - source_root_depth;
+
+                        // Copy subtree nodes
+                        for (int k = 0; k < subtree_size; ++k) {
+                            int old_idx = my_results[k];
+                            int new_idx = my_old_to_new_map[old_idx];
+                            
+                            const float* src_node_data = donor_ptr + old_idx * NODE_INFO_DIM;
+                            float* dest_node_data = child_ptr + new_idx * NODE_INFO_DIM;
+
+                            // Copy all node data
+                            for(int d = 0; d < NODE_INFO_DIM; ++d) dest_node_data[d] = src_node_data[d];
+
+                            // Adjust depth
+                            dest_node_data[COL_DEPTH] += depth_offset;
+                            
+                            // Remap parent index
+                            int old_parent_idx = (int)src_node_data[COL_PARENT_IDX];
+                            if (old_idx == donor_node_idx) {
+                                // This is the subtree root, parent is the branch root
+                                dest_node_data[COL_PARENT_IDX] = (float)branch;
+                            } else {
+                                // Internal node, parent is within the subtree
+                                dest_node_data[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
+                            }
+                        }
+                        child_next_idx += subtree_size;
+                    }
+                }
+            }
+            
+            if (copy_success) {
+                success = true;
+                if (batch_idx == 0) {
+                    // Copy phase completed successfully
+                }
+            } else {
+                if (batch_idx == 0) {
+                    // Copy phase failed during branch copying
+                }
+            }
+        }
+    }
+
+    // --- 4. Fallback: Create minimal valid tree if all retries failed ---
+    if (!success) {
+        if (batch_idx == 0) {
+            // All retries failed, using fallback mechanism
+        }
+        // Conservative fallback: one ACTION per root branch
+        child_next_idx = 3;
+        for (int branch = 0; branch < 3; ++branch) {
+            if (child_next_idx < max_nodes) {
+                float* action_node = child_ptr + child_next_idx * NODE_INFO_DIM;
+                action_node[COL_NODE_TYPE] = (float)NODE_TYPE_ACTION;
+                action_node[COL_PARENT_IDX] = (float)branch;
+                action_node[COL_DEPTH] = 1.0f;
+                action_node[COL_PARAM_1] = (float)ACTION_CLOSE_ALL; // Safe default action
+                // Zero other parameters
+                for (int c = 4; c < NODE_INFO_DIM; ++c) action_node[c] = 0.0f;
+                
+                if (batch_idx == 0) {
+                    // Created fallback ACTION node
+                }
+                child_next_idx++;
+            } else {
+                if (batch_idx == 0) {
+                    // No space for ACTION node in fallback
+                }
+            }
+        }
+        
+        if (batch_idx == 0) {
+            // Fallback completed
+        }
+    }
+}
+
+// ==============================================================================
 //                       C++ 래퍼 함수 (커널 런처)
 // ==============================================================================
 
@@ -289,5 +506,48 @@ void repair_after_root_branch_cuda(
         result_indices_buffer.data_ptr<int>()
     );
 
+    cudaDeviceSynchronize();
+}
+
+void root_branch_sampling_crossover_cuda(
+    torch::Tensor& child_batch,
+    const torch::Tensor& parent_pool,
+    int max_nodes,
+    int max_retries,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer
+)
+{
+    const int batch_size = child_batch.size(0);
+    const int pool_size = parent_pool.size(0);
+    if (batch_size == 0 || pool_size == 0) return;
+
+    // Validate tensor shapes
+    TORCH_CHECK(child_batch.is_cuda(), "child_batch must be CUDA");
+    TORCH_CHECK(parent_pool.is_cuda(), "parent_pool must be CUDA");
+    TORCH_CHECK(child_batch.scalar_type() == torch::kFloat32, "child_batch must be float32");
+    TORCH_CHECK(parent_pool.scalar_type() == torch::kFloat32, "parent_pool must be float32");
+    TORCH_CHECK(child_batch.dim() == 3 && child_batch.is_contiguous(), "child_batch must be (B,N,D) contiguous");
+    TORCH_CHECK(parent_pool.dim() == 3 && parent_pool.is_contiguous(), "parent_pool must be (P,N,D) contiguous");
+    
+    TORCH_CHECK(bfs_queue_buffer.size(0) == batch_size && bfs_queue_buffer.size(1) >= max_nodes, 
+                "bfs_queue_buffer shape mismatch");
+    TORCH_CHECK(result_indices_buffer.size(0) == batch_size && result_indices_buffer.size(1) >= max_nodes,
+                "result_indices_buffer shape mismatch");
+    TORCH_CHECK(old_to_new_map_buffer.size(0) == batch_size && old_to_new_map_buffer.size(1) >= max_nodes,
+                "old_to_new_map_buffer shape mismatch");
+
+    root_branch_sampling_crossover_kernel<<<batch_size, 1>>>(
+        child_batch.data_ptr<float>(),
+        parent_pool.data_ptr<float>(),
+        batch_size,
+        pool_size,
+        max_nodes,
+        max_retries,
+        bfs_queue_buffer.data_ptr<int>(),
+        result_indices_buffer.data_ptr<int>(),
+        old_to_new_map_buffer.data_ptr<int>()
+    );
     cudaDeviceSynchronize();
 }
