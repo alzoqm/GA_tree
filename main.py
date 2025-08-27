@@ -238,7 +238,7 @@ def main():
         chromosomes_size=100,  # Match the reduced population size
         gen_loop=ga_cfg['evolution_loop']['generations'],
         best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
-        elite_size=min(ga_cfg['evolution_loop']['elite_size'], 10),  # Match the reduced elite size
+        elite_size=ga_cfg['evolution_loop']['elite_size'],  # Match the reduced elite size
         device=env_cfg['device'],
         warming_step=ga_cfg['evolution_loop']['warming_steps'],
         evaluation_config=eval_cfg,
