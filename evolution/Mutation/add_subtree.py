@@ -5,7 +5,7 @@ from typing import Dict, Any, Tuple
 from .base import BaseMutation
 from models.constants import (
     COL_NODE_TYPE, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
-    NODE_TYPE_DECISION, NODE_TYPE_ACTION,
+    NODE_TYPE_DECISION, NODE_TYPE_ACTION, NODE_TYPE_UNUSED,
     ROOT_BRANCH_HOLD, ROOT_BRANCH_LONG, ROOT_BRANCH_SHORT,
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL, ACTION_CLOSE_PARTIAL,
     ACTION_ADD_POSITION, ACTION_FLIP_POSITION,
@@ -201,6 +201,21 @@ class AddSubtreeMutation(BaseMutation):
                 print('complete add subtree mutation')
         except Exception:
             import traceback
-            raise RuntimeError(f"gatree_cuda.validate_trees failed after add_subtree mutation.\n{traceback.format_exc()}")
+            
+            # Enhanced error reporting with capacity information
+            B, N, D = trees.shape
+            used_nodes_per_tree = []
+            for b in range(min(B, 5)):  # Check first 5 trees for diagnostics
+                used = (trees[b, :, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item()
+                used_nodes_per_tree.append(used)
+            
+            capacity_info = (f"Tree capacity: {N} nodes per tree, "
+                           f"Sample usage: {used_nodes_per_tree}, "
+                           f"Max new nodes limit: {self.max_new_nodes}")
+            
+            error_msg = (f"gatree_cuda.validate_trees failed after add_subtree mutation.\n"
+                        f"Capacity Info: {capacity_info}\n"
+                        f"Original error:\n{traceback.format_exc()}")
+            raise RuntimeError(error_msg)
 
         return trees

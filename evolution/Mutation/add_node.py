@@ -6,7 +6,7 @@ from typing import Dict, Any
 from .base import BaseMutation
 from models.constants import (
     COL_NODE_TYPE, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
-    NODE_TYPE_DECISION, OP_GTE, OP_LTE,
+    NODE_TYPE_DECISION, NODE_TYPE_UNUSED, OP_GTE, OP_LTE,
     COMP_TYPE_FEAT_NUM, COMP_TYPE_FEAT_FEAT, COMP_TYPE_FEAT_BOOL
 )
 
@@ -218,6 +218,21 @@ class AddNodeMutation(BaseMutation):
                 print('complete add node mutation')
         except Exception as e:
             import traceback
-            raise RuntimeError(f"gatree_cuda.validate_trees failed after add_node mutation.\n{traceback.format_exc()}")
+            
+            # Enhanced error reporting with capacity information
+            B, N, D = trees.shape
+            used_nodes_per_tree = []
+            for b in range(min(B, 5)):  # Check first 5 trees for diagnostics
+                used = (trees[b, :, COL_NODE_TYPE] != NODE_TYPE_UNUSED).sum().item()
+                used_nodes_per_tree.append(used)
+            
+            capacity_info = (f"Tree capacity: {N} nodes per tree, "
+                           f"Sample usage: {used_nodes_per_tree}, "
+                           f"Max add nodes limit: {self.max_add_nodes}")
+            
+            error_msg = (f"gatree_cuda.validate_trees failed after add_node mutation.\n"
+                        f"Capacity Info: {capacity_info}\n"
+                        f"Original error:\n{traceback.format_exc()}")
+            raise RuntimeError(error_msg)
 
         return trees
