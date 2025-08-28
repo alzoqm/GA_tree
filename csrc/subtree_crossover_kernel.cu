@@ -88,6 +88,23 @@ __device__ bool transplant_one_way_device(
     int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
     int* my_old_to_new_map, int* my_empty_slots_buffer, int max_nodes)
 {
+    // [FIX 1] Early validation: Check if we have enough space before any modifications
+    if (d_count <= 0 || r_count < 0 || d_count > max_nodes) return false;
+    
+    // Count current empty slots before modification
+    int available_empty_slots = 0;
+    for (int i = 0; i < max_nodes; ++i) {
+        if (recipient_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
+            available_empty_slots++;
+        }
+    }
+    
+    // Add slots that will be freed by removing r_indices
+    int slots_after_removal = available_empty_slots + r_count;
+    if (slots_after_removal < d_count) {
+        return false; // Not enough space even after removal - abort early
+    }
+
     // 1. recipient로부터 child를 초기화
     for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
 
@@ -99,38 +116,54 @@ __device__ bool transplant_one_way_device(
         }
     }
 
-    // 3. 비어있는 슬롯 찾기
+    // 3. [FIX 2] 비어있는 슬롯 찾기 with bounds checking
     int empty_count = 0;
     for (int i = 0; i < max_nodes && empty_count < d_count; ++i) {
         if (child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
-            my_empty_slots_buffer[empty_count++] = i;
+            if (empty_count < max_nodes) { // Prevent buffer overflow
+                my_empty_slots_buffer[empty_count++] = i;
+            }
         }
     }
-    if (empty_count < d_count) return false; // 공간 부족 시 이식 중단
+    if (empty_count < d_count) {
+        // [FIX 3] Restore original state on failure
+        for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
+        return false;
+    }
 
-    // 4. old_to_new_map 생성
+    // 4. old_to_new_map 생성 with bounds checking
     for (int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
     for (int i = 0; i < d_count; ++i) {
-        my_old_to_new_map[d_indices[i]] = my_empty_slots_buffer[i];
+        if (i < empty_count && d_indices[i] >= 0 && d_indices[i] < max_nodes) {
+            my_old_to_new_map[d_indices[i]] = my_empty_slots_buffer[i];
+        }
     }
     
     // 5. 깊이 오프셋 계산
     int r_parent_idx = (int)recipient_ptr[r_idx * NODE_INFO_DIM + COL_PARENT_IDX];
-    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) return false; // 유효하지 않은 부모
+    if(r_parent_idx < 0 || r_parent_idx >= max_nodes) {
+        // [FIX 3] Restore original state on failure
+        for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
+        return false;
+    }
     float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
     float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
 
     // 5.5. Check if transplantation would violate tree structure rules
     int donor_root_type = (int)donor_ptr[d_idx * NODE_INFO_DIM + COL_NODE_TYPE];
     if (would_violate_tree_structure(child_ptr, r_parent_idx, donor_root_type, max_nodes)) {
-        return false; // Abort transplantation to avoid invalid structure
+        // [FIX 3] Restore original state on failure
+        for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
+        return false;
     }
 
-    // 6. 노드 복사 및 업데이트
+    // 6. [FIX 4] 노드 복사 및 업데이트 with atomic-style validation
     for (int i = 0; i < d_count; ++i) {
         int old_idx = d_indices[i];
+        if (old_idx < 0 || old_idx >= max_nodes) continue;
+        
         int new_idx = my_old_to_new_map[old_idx];
-        if (new_idx == -1) continue;
+        if (new_idx < 0 || new_idx >= max_nodes) continue;
 
         const float* src_node = donor_ptr + old_idx * NODE_INFO_DIM;
         float* dest_node = child_ptr + new_idx * NODE_INFO_DIM;
@@ -142,7 +175,13 @@ __device__ bool transplant_one_way_device(
         if (old_idx == d_idx) {
             dest_node[COL_PARENT_IDX] = (float)r_parent_idx;
         } else {
-            dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
+            if (old_parent_idx >= 0 && old_parent_idx < max_nodes && my_old_to_new_map[old_parent_idx] != -1) {
+                dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
+            } else {
+                // [FIX 3] Invalid parent mapping - restore and abort
+                for(int j=0; j < max_nodes * NODE_INFO_DIM; ++j) child_ptr[j] = recipient_ptr[j];
+                return false;
+            }
         }
     }
     return true; // Success
