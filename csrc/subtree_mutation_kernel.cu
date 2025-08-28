@@ -145,9 +145,25 @@ __global__ void k_add_subtrees_batch(
 
     // If no candidates or zero budget, done
     const int budget = num_to_grow[b];
+    int effective_budget = budget;
     if (threadIdx.x == 0){
         const int cand_count = scr[0];
         if (cand_count == 0 || budget <= 0) return;
+        
+        // Enhanced pre-allocation validation: ensure sufficient capacity
+        int freelist_count_raw = scr[1];
+        int freelist_cap = 2 * N - 3;
+        if (freelist_cap < 0) freelist_cap = 0;
+        int actual_free_slots = freelist_count_raw;
+        if (actual_free_slots > freelist_cap) actual_free_slots = freelist_cap;
+        
+        // Conservative estimation: each budget unit may need up to 2 nodes (1 DECISION + 1 ACTION)
+        int estimated_needed = budget * 2;
+        if (estimated_needed > actual_free_slots) {
+            // Reduce budget to what we can safely allocate
+            effective_budget = actual_free_slots / 2;
+            if (effective_budget <= 0) return; // No capacity for safe allocation
+        }
     }
     __syncthreads();
 
@@ -195,13 +211,23 @@ __global__ void k_add_subtrees_batch(
         if (freelist_count > freelist_cap) freelist_count = freelist_cap;
         int free_cursor = scr[2];
 
-        // O(1) slot allocation from freelist
+        // Enhanced O(1) slot allocation from freelist with bounds checking
         auto alloc_slot = [&](int& out_idx) -> bool {
             if (free_cursor >= freelist_count) return false;
-            int idx = scr[3 + free_cursor++];
+            
+            // Bounds check for freelist access
+            int freelist_entry_idx = 3 + free_cursor;
+            if (freelist_entry_idx >= 2 * N) return false; // Safety guard against OOB access
+            
+            int idx = scr[freelist_entry_idx];
+            free_cursor++;
+            
             if (!valid_node_index(idx, N)) return false;
             const float* nb = node_ptr(tree, D, idx);
-            if (f2i(nb[COL_NODE_TYPE]) != NODE_TYPE_UNUSED) return false;
+            if (f2i(nb[COL_NODE_TYPE]) != NODE_TYPE_UNUSED) {
+                // Double-check: the slot should be unused. If not, it's an error in freelist management
+                return false;
+            }
             out_idx = idx; 
             return true;
         };
@@ -211,7 +237,7 @@ __global__ void k_add_subtrees_batch(
         int it = 0;
 
         // Growth loop with invariant enforcement
-        while (created < budget && q_head < q_tail && it < max_iters){
+        while (created < effective_budget && q_head < q_tail && it < max_iters){
             ++it;
             int cur_parent = open_q[q_head++];
             if (!valid_node_index(cur_parent, N)) continue;
@@ -252,7 +278,7 @@ __global__ void k_add_subtrees_batch(
             // DECISION path: cannot mix
             if (ac[cur_parent] > 0) continue; // no mixing rule
 
-            int remaining_budget = budget - created;
+            int remaining_budget = effective_budget - created;
             int kmax = remaining_budget; // no children limit
             if (kmax <= 0) continue;
 
@@ -288,36 +314,82 @@ __global__ void k_add_subtrees_batch(
                 open_q[q_tail++] = slot;
 
                 ++created;
-                if (created >= budget) break;
+                if (created >= effective_budget) break;
             }
         }
 
         // Dangling DECISION parents → attach exactly one ACTION (if depth allows)
         // This ensures the leaf rule: all leaves must be ACTION
-        while (q_head < q_tail){
-            int dp = open_q[q_head++];
-            if (!valid_node_index(dp, N)) continue;
-            if (ch[dp] == 0){
-                const float* pb2 = node_ptr(tree, D, dp);
-                int d2 = f2i(pb2[COL_DEPTH]);
-                int slot;
-                if (!alloc_slot(slot)) break;
+        // Enhanced with constraint enforcement and failure detection
+        bool dangling_repair_failed = false;
+        int dangling_decisions_count = 0;
+        
+        // First pass: count dangling decisions to ensure we have enough slots
+        for (int head_check = q_head; head_check < q_tail; head_check++){
+            int dp_check = open_q[head_check];
+            if (valid_node_index(dp_check, N) && ch[dp_check] == 0){
+                dangling_decisions_count++;
+            }
+        }
+        
+        // Check if we have enough remaining slots for all dangling decisions
+        int remaining_slots = freelist_count - free_cursor;
+        if (dangling_decisions_count > remaining_slots){
+            dangling_repair_failed = true;
+        }
+        
+        // Second pass: perform repairs only if we verified sufficient capacity
+        if (!dangling_repair_failed){
+            while (q_head < q_tail){
+                int dp = open_q[q_head++];
+                if (!valid_node_index(dp, N)) continue;
+                if (ch[dp] == 0){
+                    const float* pb2 = node_ptr(tree, D, dp);
+                    int d2 = f2i(pb2[COL_DEPTH]);
+                    int slot;
+                    if (!alloc_slot(slot)){
+                        // This should not happen if our pre-check was correct
+                        dangling_repair_failed = true;
+                        break;
+                    }
 
-                float* nb2 = node_ptr(tree, D, slot);
-                nb2[COL_NODE_TYPE]  = i2f(NODE_TYPE_ACTION);
-                nb2[COL_PARENT_IDX] = i2f(dp);
-                nb2[COL_DEPTH]      = i2f(d2 + 1);
+                    float* nb2 = node_ptr(tree, D, slot);
+                    nb2[COL_NODE_TYPE]  = i2f(NODE_TYPE_ACTION);
+                    nb2[COL_PARENT_IDX] = i2f(dp);
+                    nb2[COL_DEPTH]      = i2f(d2 + 1);
 
-                ch[dp] = 1;
-                ac[dp] = 1;
+                    ch[dp] = 1;
+                    ac[dp] = 1;
 
-                int rbt = get_root_branch_type(tree, D, N, dp);
-                if (act_out < max_new_nodes){ 
-                    out_act[act_out] = slot; 
-                    out_rt[act_out] = i2f(rbt); 
-                    ++act_out; 
+                    int rbt = get_root_branch_type(tree, D, N, dp);
+                    if (act_out < max_new_nodes){ 
+                        out_act[act_out] = slot; 
+                        out_rt[act_out] = i2f(rbt); 
+                        ++act_out; 
+                    }
                 }
             }
+        }
+        
+        // If dangling repair failed, we need to rollback recent DECISION additions
+        // This prevents validation errors where DECISION nodes don't have ACTION children
+        if (dangling_repair_failed){
+            // Mark recently created DECISION nodes for removal by setting them back to UNUSED
+            for (int rollback_idx = 0; rollback_idx < dec_out; rollback_idx++){
+                int dec_node = out_dec[rollback_idx];
+                if (valid_node_index(dec_node, N)){
+                    float* nb = node_ptr(tree, D, dec_node);
+                    if (f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_DECISION){
+                        nb[COL_NODE_TYPE] = i2f(NODE_TYPE_UNUSED);
+                        nb[COL_PARENT_IDX] = i2f(-1);
+                        nb[COL_DEPTH] = i2f(0);
+                        // Clear all parameters
+                        for (int col = 3; col < D; col++) nb[col] = 0.0f;
+                    }
+                }
+                out_dec[rollback_idx] = -1; // Mark as invalid
+            }
+            dec_out = 0; // Reset decision output count
         }
 
         // write back cursor (not used after kernel, but good practice)
