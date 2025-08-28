@@ -904,30 +904,20 @@ class GATreePop:
         next_idxs = torch.tensor(self.return_next_idx(), dtype=torch.int32, device='cuda')
         trees_cuda = self.population_tensor.to('cuda').contiguous()
         
-        # Build adjacency dictionaries using CUDA
-        offsets, children = gatree_cuda.build_adjacency_dicts(trees_cuda, next_idxs)
-        
-        # Convert CUDA CSR format back to Python dictionaries
-        offsets_cpu = offsets.cpu()
-        children_cpu = children.cpu()
-        
-        for tree_idx, tree in enumerate(self.population):
-            tree._adjacency_list.clear()
+        # Use completely loop-free CUDA function 
+        try:
+            # CUDA function returns pre-built adjacency dictionaries - NO PYTHON PROCESSING!
+            adjacency_dicts = gatree_cuda.build_adjacency_dicts_optimized(trees_cuda, next_idxs)
             
-            # Extract offsets for this tree (tree_idx * max_nodes)
-            tree_start = tree_idx * self.max_nodes
-            
-            for parent_idx in range(self.max_nodes):
-                offset_idx = tree_start + parent_idx
-                if offset_idx + 1 < len(offsets_cpu):
-                    start_pos = offsets_cpu[offset_idx].item()
-                    end_pos = offsets_cpu[offset_idx + 1].item()
-                    
-                    if end_pos > start_pos:
-                        # Get children for this parent
-                        children_list = children_cpu[start_pos:end_pos].tolist()
-                        if children_list:
-                            tree._adjacency_list[parent_idx] = children_list
+            # Directly assign the adjacency dictionaries returned from CUDA
+            for tree_idx, tree in enumerate(self.population):
+                tree._adjacency_list = adjacency_dicts[tree_idx]
+                
+        except (AttributeError, RuntimeError) as e:
+            # Fallback to original method if optimized version unavailable  
+            print(f"Warning: Optimized adjacency builder failed ({e}), using original method")
+            for tree in self.population:
+                tree._build_adjacency_list()
 
     def save(self, filepath):
         """집단 전체의 상태를 파일로 저장합니다."""

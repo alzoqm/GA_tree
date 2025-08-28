@@ -35,6 +35,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("trees"),
           py::arg("next_idxs"));
 
+    // --- Memory-Optimized Adjacency Dictionary Builder ---
+    m.def("build_adjacency_dicts_optimized", &build_adjacency_dicts_optimized_cuda,
+          "Memory-optimized adjacency dict builder eliminating Python loops with compact format",
+          py::arg("trees"),
+          py::arg("next_idxs"));
+
     // --- Optimized prediction function with safety guarantees ---
     m.def("predict", &predict_cuda, 
           "GPU-accelerated prediction for GA-Tree populations with safety guarantees",
