@@ -21,3 +21,13 @@ void repair_after_root_branch_cuda(
     torch::Tensor& bfs_queue_buffer,
     torch::Tensor& result_indices_buffer
 );
+
+void root_branch_sampling_crossover_cuda(
+    torch::Tensor& child_batch,
+    const torch::Tensor& parent_pool,
+    int max_nodes,
+    int max_retries,
+    torch::Tensor& bfs_queue_buffer,
+    torch::Tensor& result_indices_buffer,
+    torch::Tensor& old_to_new_map_buffer
+);

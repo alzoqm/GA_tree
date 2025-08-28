@@ -38,6 +38,8 @@ try:
     copy_branches_batch_cuda = gatree_crossover.copy_branches_batch_cuda
     repair_after_root_branch = gatree_crossover.repair_after_root_branch
     repair_after_root_branch_cuda = gatree_crossover.repair_after_root_branch_cuda
+    root_branch_sampling_crossover = gatree_crossover.root_branch_sampling_crossover
+    root_branch_sampling_crossover_cuda = gatree_crossover.root_branch_sampling_crossover_cuda
     
     # Utility functions (from gatree_utils)
     validate_trees = gatree_utils.validate_trees
@@ -75,6 +77,8 @@ except ImportError as e:
     copy_branches_batch_cuda = None
     repair_after_root_branch = None
     repair_after_root_branch_cuda = None
+    root_branch_sampling_crossover = None
+    root_branch_sampling_crossover_cuda = None
     validate_trees = None
     init_population_cuda = None
     reorganize_population_with_arrays = None
