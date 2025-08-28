@@ -1,7 +1,10 @@
 // csrc/adjacency_builder.cuh
 #pragma once
 #include <torch/extension.h>
+#include <pybind11/pybind11.h>
 #include <tuple>
+
+namespace py = pybind11;
 
 /**
  * Pass 1: Count children and produce CSR offsets, with overflow detection.
@@ -73,6 +76,22 @@ void validate_adjacency_cuda(
  *         children:     (total_children) int32 CUDA - child node indices
  */
 std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& next_idxs
+);
+
+/**
+ * Memory-optimized adjacency dict builder that returns Python dictionaries directly.
+ * 
+ * Completely eliminates Python loops by building adjacency dictionaries in C++
+ * and returning them as Python objects ready for direct assignment.
+ * 
+ * @param trees          (B,N,D) float32 CUDA contiguous
+ * @param next_idxs      (B) int32 CUDA - next_idx per tree (number of active nodes)
+ * @return py::list      List of B Python dictionaries, each containing adjacency 
+ *                       lists for one tree (parent_idx -> [child_indices])
+ */
+py::list build_adjacency_dicts_optimized_cuda(
     const torch::Tensor& trees,
     const torch::Tensor& next_idxs
 );

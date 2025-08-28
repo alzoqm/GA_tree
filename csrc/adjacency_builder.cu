@@ -600,3 +600,144 @@ std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
     
     return {offsets_flat, children};
 }
+
+// -----------------------------------------------------------------------------
+// Memory-optimized adjacency dict builder using compact format
+// -----------------------------------------------------------------------------
+__global__ void k_build_adjacency_compact(
+    const float* __restrict__ trees,     // (B,N,D)
+    const int*   __restrict__ next_idxs, // (B) next_idx per tree
+    int B, int N, int D,
+    int* __restrict__ parent_counts,     // (B*N) output: child count per parent
+    int* __restrict__ parent_starts,     // (B*N) output: start index in children array
+    int* __restrict__ children_flat,     // (total_children) output: flattened children
+    int* __restrict__ tree_offsets       // (B+1) cumulative children count per tree
+){
+    const int b = blockIdx.x;
+    if (b >= B) return;
+
+    const float* tree = trees + (size_t)b * N * D;
+    const int next_idx = next_idxs[b];
+    int* counts = parent_counts + (size_t)b * N;
+    
+    // Step 1: Count children per parent using minimal shared memory
+    extern __shared__ int s_temp[];
+    const int threads = blockDim.x;
+    const int warps = (threads + 31) / 32;
+    
+    // Initialize counts to zero
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        counts[p] = 0;
+    }
+    __syncthreads();
+
+    // Count children with warp-level optimization
+    for (int i = threadIdx.x; i < next_idx; i += blockDim.x) {
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]);
+        if (nt == NODE_TYPE_UNUSED) continue;
+        
+        int parent_idx = f2i(nb[COL_PARENT_IDX]);
+        if (parent_idx != -1 && valid_idx(parent_idx, N)) {
+            atomicAdd(&counts[parent_idx], 1);
+        }
+    }
+    __syncthreads();
+
+    // Step 2: Compute prefix sum for start positions (single thread per block)
+    if (threadIdx.x == 0) {
+        int tree_base = (b == 0) ? 0 : tree_offsets[b];
+        int cumsum = tree_base;
+        
+        for (int p = 0; p < N; p++) {
+            parent_starts[(size_t)b * N + p] = cumsum;
+            cumsum += counts[p];
+        }
+    }
+    __syncthreads();
+
+    // Step 3: Fill children array with coalesced memory access
+    int* starts = parent_starts + (size_t)b * N;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        s_temp[p] = starts[p]; // Copy start positions to shared memory
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < next_idx; i += blockDim.x) {
+        const float* nb = node_ptr(tree, D, i);
+        int nt = f2i(nb[COL_NODE_TYPE]);
+        if (nt == NODE_TYPE_UNUSED) continue;
+        
+        int parent_idx = f2i(nb[COL_PARENT_IDX]);
+        if (parent_idx != -1 && valid_idx(parent_idx, N)) {
+            int pos = atomicAdd(&s_temp[parent_idx], 1);
+            children_flat[pos] = i;
+        }
+    }
+}
+
+py::list build_adjacency_dicts_optimized_cuda(
+    const torch::Tensor& trees,
+    const torch::Tensor& next_idxs
+){
+    TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(),
+                "trees must be (B,N,D) float32 CUDA contiguous");
+    TORCH_CHECK(next_idxs.is_cuda() && next_idxs.dtype()==torch::kInt32 && next_idxs.dim()==1,
+                "next_idxs must be (B,) int32 CUDA");
+
+    const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
+    TORCH_CHECK(next_idxs.size(0) == B, "next_idxs size must match batch size");
+
+    auto i32 = torch::TensorOptions().device(trees.device()).dtype(torch::kInt32);
+    
+    c10::cuda::CUDAGuard guard(trees.device());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    
+    // Use existing efficient functions for memory optimization
+    long total_children;
+    torch::Tensor offsets_flat, overflow_mask;
+    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, 1000);
+    
+    auto children_flat = torch::empty({(long)total_children}, i32);
+    
+    if (total_children > 0) {
+        fill_child_indices_cuda(trees, offsets_flat, children_flat, 1000, false);
+    }
+    
+    // Convert tensors to CPU for processing
+    auto offsets_cpu = offsets_flat.cpu();
+    auto children_cpu = children_flat.cpu();
+    
+    // Build Python list of dictionaries directly in C++ - NO PYTHON LOOPS!
+    py::list adjacency_dicts_list;
+    
+    for (int tree_idx = 0; tree_idx < B; tree_idx++) {
+        py::dict tree_dict;
+        
+        // Extract offsets for this tree 
+        int tree_start = tree_idx * N;
+        
+        for (int parent_idx = 0; parent_idx < N; parent_idx++) {
+            int offset_idx = tree_start + parent_idx;
+            if (offset_idx + 1 < offsets_cpu.numel()) {
+                int start_pos = offsets_cpu[offset_idx].item<int>();
+                int end_pos = offsets_cpu[offset_idx + 1].item<int>();
+                
+                if (end_pos > start_pos) {
+                    // Extract children for this parent
+                    py::list children_list;
+                    for (int i = start_pos; i < end_pos; i++) {
+                        children_list.append(children_cpu[i].item<int>());
+                    }
+                    if (py::len(children_list) > 0) {
+                        tree_dict[py::int_(parent_idx)] = children_list;
+                    }
+                }
+            }
+        }
+        
+        adjacency_dicts_list.append(tree_dict);
+    }
+    
+    return adjacency_dicts_list;
+}
