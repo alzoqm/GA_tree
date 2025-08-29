@@ -38,6 +38,9 @@ class TradingEnvironment:
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
         self.funding_fee_hours = {0, 8, 16}
+        # Minimum constraints
+        self.min_entry_ratio = env_config.get('min_entry_ratio', 0.05)
+        self.min_leverage = int(env_config.get('min_leverage', 2))
         self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.05)
         self.max_additional_entries = env_config.get('max_additional_entries', 1e9)
 
@@ -140,7 +143,10 @@ class TradingEnvironment:
             if not action_mask.any():
                 continue
             enter_ratio = actions_tensor[action_mask, 1]
-            leverage = actions_tensor[action_mask, 2].long()
+            # Enforce minimum entry ratio and cap at remaining capacity (for new pos, remaining is 1.0)
+            enter_ratio = torch.clamp(enter_ratio, min=self.min_entry_ratio, max=1.0)
+            # Enforce minimum leverage
+            leverage = torch.clamp(actions_tensor[action_mask, 2].long(), min=self.min_leverage)
             fee = enter_ratio * leverage.float() * self.taker_fee_rate
             self.profit[action_mask] -= fee
             self.pos_list[action_mask] = target_pos
@@ -179,24 +185,78 @@ class TradingEnvironment:
             return
         long_p_close_mask = action_mask & currently_long
         if long_p_close_mask.any():
+            idxs = torch.where(long_p_close_mask)[0]
             ratio = actions_tensor[long_p_close_mask, 1]
             entry_price = self.price_list[long_p_close_mask]
             leverage = self.leverage_ratio[long_p_close_mask].float()
-            closed_margin = self.enter_ratio[long_p_close_mask] * ratio
-            pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * closed_margin
-            fee = closed_margin * leverage * self.taker_fee_rate
-            self.profit[long_p_close_mask] += (pnl - fee)
-            self.enter_ratio[long_p_close_mask] -= closed_margin
+            current_er = self.enter_ratio[long_p_close_mask]
+            remaining_after = current_er * (1.0 - ratio)
+            close_all_sub = remaining_after <= self.min_entry_ratio
+            partial_sub = ~close_all_sub
+
+            # Full close for those that would leave <= min_entry_ratio
+            if close_all_sub.any():
+                cidx = idxs[close_all_sub]
+                eprice = self.price_list[cidx]
+                lev = self.leverage_ratio[cidx].float()
+                er = self.enter_ratio[cidx]
+                pnl = ((sell_exec_price - eprice) / eprice) * lev * er
+                fee = er * lev * self.taker_fee_rate
+                self.profit[cidx] += (pnl - fee)
+                self.pos_list[cidx] = 0
+                self.price_list[cidx] = -1.0
+                self.leverage_ratio[cidx] = -1
+                self.enter_ratio[cidx] = -1.0
+                self.additional_count[cidx] = 0
+
+            # Partial close for the rest
+            if partial_sub.any():
+                pidx = idxs[partial_sub]
+                pratio = ratio[partial_sub]
+                eprice = entry_price[partial_sub]
+                lev = leverage[partial_sub]
+                closed_margin = self.enter_ratio[pidx] * pratio
+                pnl = ((sell_exec_price - eprice) / eprice) * lev * closed_margin
+                fee = closed_margin * lev * self.taker_fee_rate
+                self.profit[pidx] += (pnl - fee)
+                self.enter_ratio[pidx] -= closed_margin
         short_p_close_mask = action_mask & currently_short
         if short_p_close_mask.any():
+            idxs = torch.where(short_p_close_mask)[0]
             ratio = actions_tensor[short_p_close_mask, 1]
             entry_price = self.price_list[short_p_close_mask]
             leverage = self.leverage_ratio[short_p_close_mask].float()
-            closed_margin = self.enter_ratio[short_p_close_mask] * ratio
-            pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * closed_margin
-            fee = closed_margin * leverage * self.taker_fee_rate
-            self.profit[short_p_close_mask] += (pnl - fee)
-            self.enter_ratio[short_p_close_mask] -= closed_margin
+            current_er = self.enter_ratio[short_p_close_mask]
+            remaining_after = current_er * (1.0 - ratio)
+            close_all_sub = remaining_after <= self.min_entry_ratio
+            partial_sub = ~close_all_sub
+
+            # Full close for those that would leave <= min_entry_ratio
+            if close_all_sub.any():
+                cidx = idxs[close_all_sub]
+                eprice = self.price_list[cidx]
+                lev = self.leverage_ratio[cidx].float()
+                er = self.enter_ratio[cidx]
+                pnl = ((eprice - buy_exec_price) / eprice) * lev * er
+                fee = er * lev * self.taker_fee_rate
+                self.profit[cidx] += (pnl - fee)
+                self.pos_list[cidx] = 0
+                self.price_list[cidx] = -1.0
+                self.leverage_ratio[cidx] = -1
+                self.enter_ratio[cidx] = -1.0
+                self.additional_count[cidx] = 0
+
+            # Partial close for the rest
+            if partial_sub.any():
+                pidx = idxs[partial_sub]
+                pratio = ratio[partial_sub]
+                eprice = entry_price[partial_sub]
+                lev = leverage[partial_sub]
+                closed_margin = self.enter_ratio[pidx] * pratio
+                pnl = ((eprice - buy_exec_price) / eprice) * lev * closed_margin
+                fee = closed_margin * lev * self.taker_fee_rate
+                self.profit[pidx] += (pnl - fee)
+                self.enter_ratio[pidx] -= closed_margin
 
     def _add_to_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
         action_mask = (actions_tensor[:, 0] == ACTION_ADD_POSITION) & (self.pos_list != 0)
@@ -211,10 +271,19 @@ class TradingEnvironment:
                 continue
             current_enter_ratio = self.enter_ratio[add_mask]
             current_requested_ratio = actions_tensor[add_mask, 1]
-            intended_add_amount = current_requested_ratio
-            remaining_capital = 1.0 - current_enter_ratio
-            actual_add_ratio = torch.min(intended_add_amount, remaining_capital)
-            valid_add_mask = actual_add_ratio > self.min_additional_enter_ratio
+            # Remaining capacity to add
+            remaining_capital = torch.clamp(1.0 - current_enter_ratio, min=0.0)
+            # Require at least 5% remaining capacity; otherwise skip adding
+            capacity_ok_mask = remaining_capital >= self.min_additional_enter_ratio
+            if not capacity_ok_mask.any():
+                continue
+            # Enforce minimum add size (5%) when capacity allows
+            desired_add = torch.maximum(
+                current_requested_ratio,
+                torch.full_like(current_requested_ratio, self.min_additional_enter_ratio)
+            )
+            actual_add_ratio = torch.min(desired_add, remaining_capital)
+            valid_add_mask = (actual_add_ratio > 0) & capacity_ok_mask
             if not valid_add_mask.any():
                 continue
             final_add_mask = torch.where(add_mask)[0][valid_add_mask]
@@ -235,7 +304,10 @@ class TradingEnvironment:
         flip_to_short_mask = action_mask & currently_long
         if flip_to_short_mask.any():
             ratio = actions_tensor[flip_to_short_mask, 1]
-            lev = actions_tensor[flip_to_short_mask, 2].long()
+            # Enforce minimum entry ratio for the new flipped position
+            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=1.0)
+            # Enforce minimum leverage for the new flipped position
+            lev = torch.clamp(actions_tensor[flip_to_short_mask, 2].long(), min=self.min_leverage)
             entry_price = self.price_list[flip_to_short_mask]
             leverage = self.leverage_ratio[flip_to_short_mask].float()
             pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
@@ -251,7 +323,8 @@ class TradingEnvironment:
         flip_to_long_mask = action_mask & currently_short
         if flip_to_long_mask.any():
             ratio = actions_tensor[flip_to_long_mask, 1]
-            lev = actions_tensor[flip_to_long_mask, 2].long()
+            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=1.0)
+            lev = torch.clamp(actions_tensor[flip_to_long_mask, 2].long(), min=self.min_leverage)
             entry_price = self.price_list[flip_to_long_mask]
             leverage = self.leverage_ratio[flip_to_long_mask].float()
             pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
