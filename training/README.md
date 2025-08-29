@@ -99,3 +99,61 @@ metrics = fitness_fn(
 )
 print(metrics.shape)  # (B, 5): mean, PF, winrate, maxDD, compound
 ```
+
+## TradingEnvironment 규칙 상세
+
+- 체결 가격 및 수수료/슬리피지:
+  - 체결 기준은 항상 다음 캔들의 시가 `next_open_price`.
+  - 매수체결가: `buy_exec_price = next_open_price * (1 + fixed_slippage_rate)`.
+  - 매도체결가: `sell_exec_price = next_open_price * (1 - fixed_slippage_rate)`.
+  - 테이커 수수료: `fee = position_size_ratio * leverage * taker_fee_rate`.
+
+- 포지션/상태 변수:
+  - `pos_list`: 0=HOLD, 1=SHORT, 2=LONG.
+  - `price_list`: 평균 진입가(없으면 -1.0).
+  - `leverage_ratio`: 현재 레버리지(없으면 -1).
+  - `enter_ratio`: 현재 투입 비율(없으면 -1.0). 전체 자본 대비 비율로 0~1 범위.
+  - `additional_count`: 피라미딩(추가 진입) 횟수.
+
+- 최소 제약(기본값은 `experiment_config.yaml`의 `evaluation.simulation_env`로부터 주입):
+  - `min_entry_ratio`: 0.05 (5%). 신규 진입 및 플립 시 최소 진입 비율로 적용.
+  - `min_leverage`: 2. 신규 진입 및 플립 시 레버리지 하한.
+  - `min_additional_enter_ratio`: 0.05 (5%). 추가 진입의 최소 단위 및 남은 자본 용량 판정에 사용.
+
+- 신규 진입(ACTION_NEW_LONG / ACTION_NEW_SHORT):
+  - 입력 비율은 `[min_entry_ratio, 1.0]`로 클램프.
+  - 레버리지는 최소 `min_leverage`로 클램프.
+  - 수수료 차감 후 포지션, 평균가, 레버리지, 진입 비율 초기화.
+
+- 포지션 플립(ACTION_FLIP_POSITION):
+  - 기존 포지션을 청산(PnL 및 수수료 정산) 후, 동일 바에서 즉시 반대 포지션으로 진입.
+  - 새 진입 비율은 `[min_entry_ratio, 1.0]`로, 레버리지는 최소 `min_leverage`로 강제.
+  - 청산 수수료(기존 비율/레버리지) + 신규 진입 수수료(새 비율/레버리지) 모두 반영.
+
+- 전부 청산(ACTION_CLOSE_ALL):
+  - LONG: `((sell_exec_price - entry_price) / entry_price) * leverage * enter_ratio - fee`.
+  - SHORT: `((entry_price - buy_exec_price) / entry_price) * leverage * enter_ratio - fee`.
+  - 상태값 초기화(포지션 0, 가격/레버리지/비율 초기화).
+
+- 부분 청산(ACTION_CLOSE_PARTIAL):
+  - 요청 청산 비율을 `ratio`라 할 때, 부분 청산 후 남을 비율은 `enter_ratio * (1 - ratio)`.
+  - 남을 비율이 `<= min_entry_ratio(=5%)`이면, 1단계 판단으로 전부 청산으로 대체하여 한 번에 처리.
+  - 그 외에는 부분 청산만 수행: LONG/SHORT 각각 위의 전부 청산 식에서 `enter_ratio` 대신 `closed_margin = enter_ratio * ratio` 사용 후 `enter_ratio -= closed_margin`.
+
+- 추가 진입(ACTION_ADD_POSITION):
+  - 남은 자본 용량 `remaining = max(0, 1.0 - enter_ratio)`가 `>= min_additional_enter_ratio(=5%)`일 때만 수행.
+  - 실제 추가 비율은 `actual = min(max(requested, min_additional_enter_ratio), remaining)`.
+  - 수수료 차감 후, 새 평균가: `new_avg = (old_price * old_ratio + exec_price * actual) / (old_ratio + actual + 1e-9)`.
+  - `enter_ratio += actual`, `additional_count += 1`.
+
+- 펀딩 수수료(_apply_funding_fees):
+  - 0/8/16시 타임스탬프 경계에서 적용.
+  - `funding_pnl = funding_rate * leverage`를 기반으로, LONG은 비용(차감), SHORT은 수익(가산)으로 `profit`에 반영하며 규모는 `enter_ratio`에 비례.
+
+- 청산 체크(_check_liquidation):
+  - 현재 캔들의 저가/고가와 유지증거금율을 사용해 강제 청산 여부 평가.
+  - 청산 발생 시 포지션 전부 정리 및 손익 반영(세부 수식은 코드 참조).
+
+- 기타:
+  - 모든 계산은 텐서 연산으로 배치(염색체 단위) 처리.
+  - 드로다운/복리/수익 집계는 `get_final_metrics` 내에서 계산되며, 유효 거래 수(`minimum_trades`) 미달 샘플은 패널티 적용.
