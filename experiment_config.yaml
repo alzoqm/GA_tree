@@ -8,13 +8,13 @@ environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 12
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
-  data_dir: "/root/workspace/dataset"
+  data_dir: "/Users/yoon-seunggyu/Documents/GA_Tree/dataset"
 
 # 2. 데이터 설정
 data:
   symbol: "BTCUSDT"
   interval: "5m"
-  days_to_fetch: 30
+  days_to_fetch: 365
   train_ratio: 0.8 # 학습 데이터 비율
   # 생성된 데이터가 저장될 경로
   merged_csv_path: "BTCUSDT_5m_30d.csv"
@@ -83,6 +83,11 @@ evaluation:
     taker_fee_rate: 0.0004
     maintenance_margin_rate: 0.005
     fixed_slippage_rate: 0.0005
+    # Mark price / equity options
+    use_real_mark_price: false
+    equity_mtm_basis: "mark_proxy"  # "mark_price" | "mark_proxy"
+    # Liquidation clearance fee (insurance): approx 0.3%~0.5% depending on tier
+    liq_clearance_fee_rate: 0.003
     # Minimums for entries and leverage
     min_entry_ratio: 0.05
     min_leverage: 2

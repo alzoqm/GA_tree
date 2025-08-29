@@ -18,10 +18,10 @@ GA 트리 집단의 예측을 CUDA로 가속하고, 거래 시뮬레이션 환�
   - `TradingEnvironment`:
     - 염색체별 상태: 포지션/진입가/레버리지/진입비율/추가진입/보유기간/수익누적/드로다운/복리 등
     - 펀딩 수수료(`_apply_funding_fees`): 0/8/16시 적용
-    - 청산 체크(`_check_liquidation`): 현재 캔들의 고가/저가를 사용해 유지증거금 대비 마진 평가
+    - 청산 체크(`_check_liquidation`): 라스트가 아닌 마크 프라이스 근사(보수적 프록시: 바의 저가/고가)로 유지증거금 대비 마진 평가. 청산 시 초기증거금 손실 + 청산 정리 수수료(`liq_clearance_fee_rate`) 반영
     - 액션 실행(`_execute_actions`): 예측된 액션을 다음 캔들 시가(`next_open_price`) 기준으로 체결, 슬리피지/테이커 수수료 적용. 신규 진입/전부/부분 청산/추가 진입/포지션 플립 지원
-    - `step(market_data, next_open_price, predicted_actions)`: 한 바 진행(펀딩/청산 후 액션 실행). 룩어헤드 바이어스 방지를 위해 다음 바 시가로 체결
-    - `get_final_metrics(minimum_date=40)`: 평균 수익, PF(상한 처리), 승률, 최대 낙폭, 누적 복리 값 집계
+    - `step(market_data, next_open_price, predicted_actions)`: 한 바 진행(펀딩/청산 후 액션 실행). 룩어헤드 바이어스 방지를 위해 다음 바 시가로 체결. 에쿼티는 마크‑투‑마켓(MtM)으로 계산(typical price: (H+L+C)/3 프록시)
+    - `get_final_metrics(minimum_date=40)`: 평균 수익, PF(상한 처리), 이벤트 기반 승률, 최대 낙폭, 누적 복리 값, 트레이드 기반 승률(신규) 집계
   - 피트니스 유틸:
     - `calculate_fitness(metrics, weights)`: 지표를 방향성에 맞춰 min‑max 정규화 후 가중합, 유효하지 않은 샘플 패널티 적용
     - `fitness_fn(...)`: 시간 구동 루프에서 예측→환경 step을 수행하고 최종 지표 반환
@@ -76,6 +76,9 @@ evaluation_config = {
         'taker_fee_rate': 0.0004,
         'maintenance_margin_rate': 0.005,
         'fixed_slippage_rate': 0.0005,
+        'use_real_mark_price': False,
+        'equity_mtm_basis': 'mark_proxy',
+        'liq_clearance_fee_rate': 0.003,
         'min_additional_enter_ratio': 0.05,
         'max_additional_entries': 3,
     },
@@ -97,7 +100,7 @@ metrics = fitness_fn(
     device='cuda',
     evaluation_config=evaluation_config,
 )
-print(metrics.shape)  # (B, 5): mean, PF, winrate, maxDD, compound
+print(metrics.shape)  # (B, 6): mean, PF, winrate(event), maxDD, compound, winrate(trade)
 ```
 
 ## TradingEnvironment 규칙 상세
@@ -106,7 +109,8 @@ print(metrics.shape)  # (B, 5): mean, PF, winrate, maxDD, compound
   - 체결 기준은 항상 다음 캔들의 시가 `next_open_price`.
   - 매수체결가: `buy_exec_price = next_open_price * (1 + fixed_slippage_rate)`.
   - 매도체결가: `sell_exec_price = next_open_price * (1 - fixed_slippage_rate)`.
-  - 테이커 수수료: `fee = position_size_ratio * leverage * taker_fee_rate`.
+- 테이커 수수료: `fee = position_size_ratio * leverage * taker_fee_rate`.
+  - 청산 정리 수수료: `liq_fee = (enter_ratio * leverage) * liq_clearance_fee_rate` (청산 발생 시 추가 차감)
 
 - 포지션/상태 변수:
   - `pos_list`: 0=HOLD, 1=SHORT, 2=LONG.
@@ -151,8 +155,16 @@ print(metrics.shape)  # (B, 5): mean, PF, winrate, maxDD, compound
   - `funding_pnl = funding_rate * leverage`를 기반으로, LONG은 비용(차감), SHORT은 수익(가산)으로 `profit`에 반영하며 규모는 `enter_ratio`에 비례.
 
 - 청산 체크(_check_liquidation):
-  - 현재 캔들의 저가/고가와 유지증거금율을 사용해 강제 청산 여부 평가.
-  - 청산 발생 시 포지션 전부 정리 및 손익 반영(세부 수식은 코드 참조).
+  - 마크 프라이스 근사(보수적: 저가/고가 경계)로 강제 청산 여부 평가.
+  - 청산 발생 시 초기증거금 전액 손실에 더해 청산 정리 수수료 반영. 트레이드 기반 집계는 해당 시점을 1회 종료로 기록.
+
+- 에쿼티/드로다운:
+  - 에쿼티 = 누적 실현 PnL + 미실현 PnL(MtM, typical price 기반)으로 계산하여 드로다운 갱신.
+  - 복리 값은 실현손익 이벤트를 기준으로 갱신(옵션에 따라 대체 가능).
+
+- 승률 집계 체계:
+  - 이벤트 기반: 스텝별 실현 이벤트 기준(부분청산 포함)으로 승/패 집계.
+  - 트레이드 기반(신규): 비보유→보유 시 트레이드 시작, 부분청산은 누적만, 전부청산/플립/청산 시점에 1회만 승패 판정.
 
 - 기타:
   - 모든 계산은 텐서 연산으로 배치(염색체 단위) 처리.
