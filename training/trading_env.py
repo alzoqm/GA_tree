@@ -590,6 +590,7 @@ def calculate_fitness(metrics, weights):
     normalized_metrics[:, 2] = normalize_metric(metrics[:, 2], higher_is_better=True)
     normalized_metrics[:, 3] = normalize_metric(metrics[:, 3], higher_is_better=False)
     normalized_metrics[:, 4] = normalize_metric(metrics[:, 4], higher_is_better=True)
+    normalized_metrics[:, 5] = normalize_metric(metrics[:, 5], higher_is_better=True)
     
     fitness_values = np.sum(normalized_metrics * np.array(weights), axis=1)
     invalid_trade_mask = metrics[:, 0] == -1e9

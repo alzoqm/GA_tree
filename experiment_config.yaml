@@ -8,7 +8,7 @@ environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 12
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
-  data_dir: "/Users/yoon-seunggyu/Documents/GA_Tree/dataset"
+  data_dir: "/root/workspace/dataset"
 
 # 2. 데이터 설정
 data:
@@ -94,8 +94,8 @@ evaluation:
     min_additional_enter_ratio: 0.05
     max_additional_entries: 5
   fitness_function:
-    # Mean Return, Profit Factor, Win Rate, Max DD, Compound Value 순서
-    weights: [0.1, 0.2, 0.15, 0.15, 0.4]
+    # Mean Return, Profit Factor, Win Rate, Max DD, Compound Value, 6th Metric 순서
+    weights: [0.1, 0.2, 0.15, 0.15, 0.3, 0.1]
     minimum_trades: 40
 
 # 6. 피처 분류 및 모델 입력 설정 (수정됨)
