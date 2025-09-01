@@ -27,6 +27,33 @@ class PPTSSelection(BaseSelection):
         """
         self.chunk_size = chunk_size
         self.generator = generator
+
+    def _get_device_generator(self, device: torch.device | str | None):
+        """Return a torch.Generator compatible with the given device.
+
+        If a generator was provided at construction time but lives on a different
+        device than requested here, create a new generator on the target device
+        using the same initial seed for reproducibility. If no generator was
+        provided, return None to use PyTorch's default RNG.
+        """
+        if device is None:
+            return self.generator
+        if self.generator is None:
+            return None
+        target = torch.device(device)
+        # Some torch.Generator implementations expose `.device`
+        gen_device = getattr(self.generator, 'device', torch.device('cpu'))
+        if torch.device(gen_device).type == target.type:
+            return self.generator
+        # Create a new generator on the target device with the same seed
+        try:
+            seed = self.generator.initial_seed()
+        except Exception:
+            # Fallback: let PyTorch choose a seed if not available
+            return None
+        new_gen = torch.Generator(device=target)
+        new_gen.manual_seed(seed)
+        return new_gen
     
     def _auto_tournament_size(self, population_size: int) -> int:
         """Auto-size tournament using k ≈ ceil(log2(N)) rule."""
@@ -72,7 +99,7 @@ class PPTSSelection(BaseSelection):
             candidates_mask: [B, k] boolean mask of candidates to consider
             
         Returns:
-            winners: [B] tensor of winner indices within each tournament
+            winners_k: [B] tensor of winner indices in original k-space for each tournament
         """
         B, k, M = objectives.shape
         device = objectives.device
@@ -81,21 +108,23 @@ class PPTSSelection(BaseSelection):
         # For tournaments with no candidates, we'll handle separately
         num_candidates = candidates_mask.sum(dim=-1)  # [B]
         max_candidates = num_candidates.max().item()
-        
+
         if max_candidates == 0:
             # No candidates anywhere - return first index as fallback
             return torch.zeros(B, dtype=torch.long, device=device)
-        
-        # Create dense candidate matrix [B, max_candidates, M]
+
+        # Create dense candidate matrix [B, max_candidates, M] and index map back to original k
         candidates = torch.zeros(B, max_candidates, M, device=device)
         valid_mask = torch.zeros(B, max_candidates, dtype=torch.bool, device=device)
-        
+        index_map = torch.zeros(B, max_candidates, dtype=torch.long, device=device)
+
         for b in range(B):
             candidate_indices = torch.where(candidates_mask[b])[0]
             n_cand = len(candidate_indices)
             if n_cand > 0:
                 candidates[b, :n_cand] = objectives[b, candidate_indices]
                 valid_mask[b, :n_cand] = True
+                index_map[b, :n_cand] = candidate_indices  # map compacted -> original k
         
         # Robust ε calculation using MAD (Median Absolute Deviation)
         # For each tournament, compute per-objective epsilon
@@ -112,7 +141,8 @@ class PPTSSelection(BaseSelection):
                 # If only one candidate or MAD is 0, eps remains 0
         
         # Random objective permutation per tournament
-        noise = torch.randn(B, M, device=device, generator=self.generator)
+        gen = self._get_device_generator(device)
+        noise = torch.randn(B, M, device=device, generator=gen)
         perm = torch.argsort(noise, dim=-1)  # [B, M]
         
         # ε-lexicase filtering
@@ -142,18 +172,20 @@ class PPTSSelection(BaseSelection):
                     survivors[b] = new_survivors
         
         # Select final winners (random choice among remaining survivors)
-        winners = torch.zeros(B, dtype=torch.long, device=device)
-        
+        winners_k = torch.zeros(B, dtype=torch.long, device=device)
+
         for b in range(B):
             survivor_indices = torch.where(survivors[b])[0]
             if len(survivor_indices) > 0:
                 # Random choice among survivors
                 choice_idx = torch.randint(0, len(survivor_indices), (1,), 
-                                        generator=self.generator, device=device)[0]
-                winners[b] = survivor_indices[choice_idx]
-            # else: winners[b] remains 0 (fallback)
+                                        generator=gen, device=device)[0]
+                compact_idx = survivor_indices[choice_idx]
+                # Map compacted candidate index back to original k index
+                winners_k[b] = index_map[b, compact_idx]
+            # else: winners_k[b] remains 0 (fallback -> first participant)
         
-        return winners
+        return winners_k
     
     def _run_tournaments(self, objectives: torch.Tensor, num_tournaments: int, k: int) -> torch.Tensor:
         """
@@ -178,8 +210,9 @@ class PPTSSelection(BaseSelection):
             B = end_idx - start_idx
             
             # Sample tournament participants [B, k]
+            gen = self._get_device_generator(device)
             tournament_indices = torch.randint(0, N, (B, k), 
-                                             generator=self.generator, device=device)
+                                             generator=gen, device=device)
             
             # Gather objectives for tournaments [B, k, M]
             tournament_objectives = objectives[tournament_indices]  # [B, k, M]
@@ -226,7 +259,7 @@ class PPTSSelection(BaseSelection):
             if no_winner_mask.any():
                 no_winner_tournaments = torch.where(no_winner_mask)[0]
                 for b_idx in no_winner_tournaments:
-                    random_pos = torch.randint(0, k, (1,), generator=self.generator, device=device)[0]
+                    random_pos = torch.randint(0, k, (1,), generator=gen, device=device)[0]
                     chunk_winners[b_idx] = tournament_indices[b_idx, random_pos]
             
             all_winners.append(chunk_winners)
@@ -289,10 +322,10 @@ class PPTSSelection(BaseSelection):
         # Run tournaments for elites with potential duplicates
         num_tournaments = num_elites * 3  # Oversample to ensure uniqueness
         winners = self._run_tournaments(objectives, num_tournaments, k)
-        
+
         # Remove duplicates and take top num_elites
         unique_winners = torch.unique(winners)
-        
+
         if len(unique_winners) >= num_elites:
             return unique_winners[:num_elites]
         else:
@@ -304,8 +337,29 @@ class PPTSSelection(BaseSelection):
             # Combine and remove duplicates
             all_winners = torch.cat([unique_winners, additional_winners])
             final_unique = torch.unique(all_winners)
-            
-            return final_unique[:num_elites]
+            if len(final_unique) >= num_elites:
+                return final_unique[:num_elites]
+            # Still short: fill deterministically from remaining indices
+            missing = num_elites - len(final_unique)
+            device = objectives.device
+            all_indices = torch.arange(N, device=device)
+            # Build mask of already selected
+            selected_mask = torch.zeros(N, dtype=torch.bool, device=device)
+            selected_mask[final_unique] = True
+            remaining = all_indices[~selected_mask]
+            if len(remaining) > 0:
+                # If fewer remaining than needed, just take all remaining and then repeat from start
+                take = min(missing, len(remaining))
+                filler = remaining[:take]
+                combined = torch.cat([final_unique, filler])
+                if len(combined) < num_elites:
+                    # As an absolute fallback (rare), repeat from beginning to reach exact size
+                    repeat_needed = num_elites - len(combined)
+                    combined = torch.cat([combined, final_unique[:repeat_needed]])
+                return combined[:num_elites]
+            else:
+                # No remaining (shouldn't happen unless N==0); fallback to return what we have
+                return final_unique
     
     def _pick_parents_multi(self, objectives: torch.Tensor, num_parents: int) -> torch.Tensor:
         """Internal multi-objective parent selection."""

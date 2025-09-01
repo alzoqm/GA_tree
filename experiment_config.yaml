@@ -44,8 +44,9 @@ ga_core:
 # 4. GA 연산자 상세 설정
 operators:
   selection:
-    type: "RouletteSelection" # "TournamentSelection" 또는 "RouletteSelection"
+    type: "PPTSSelection" # Multi-objective PPTS selection
     tournament_k_size: 5
+    chunk_size: 8192
 
   crossover:
     # ChainCrossover에 전달될 가중치 (Subtree, Node, RootBranch 순서)
@@ -93,9 +94,17 @@ evaluation:
     min_leverage: 2
     min_additional_enter_ratio: 0.05
     max_additional_entries: 5
+  # 멀티 오브젝트 설정 (PPTS 전용)
+  multi_objectives:
+    # 사용될 목표 목록 (예시)
+    objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "win_rate"]
+    # 각 목표에 대한 최소화 여부 (True면 최소화, False면 최대화)
+    minimize: [false, true, false, false]
+    # 선택적 파라미터들
+    risk_free_rate: 0.0
+    volatility_lookback: 30
   fitness_function:
-    # Mean Return, Profit Factor, Win Rate, Max DD, Compound Value, 6th Metric 순서
-    weights: [0.1, 0.2, 0.15, 0.15, 0.3, 0.1]
+    # 최소 거래 수 등 유틸 파라미터 (일부 로직에서 활용)
     minimum_trades: 40
 
 # 6. 피처 분류 및 모델 입력 설정 (수정됨)
