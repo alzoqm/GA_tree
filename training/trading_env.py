@@ -37,6 +37,11 @@ class TradingEnvironment:
         self.taker_fee_rate = env_config['taker_fee_rate']
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
+        # Mark price / equity options
+        self.use_real_mark_price = env_config.get('use_real_mark_price', False)
+        self.equity_mtm_basis = env_config.get('equity_mtm_basis', 'mark_proxy')  # 'mark_price' | 'mark_proxy'
+        # Liquidation clearance fee (insurance fund/clearance)
+        self.liq_clearance_fee_rate = env_config.get('liq_clearance_fee_rate', 0.0)
         self.funding_fee_hours = {0, 8, 16}
         # Minimum constraints
         self.min_entry_ratio = env_config.get('min_entry_ratio', 0.05)
@@ -65,6 +70,13 @@ class TradingEnvironment:
         self.running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
+        # Mark-to-market equity tracking
+        self.realized_cum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        # Trade-based stats (vs event-based)
+        self.trade_open = torch.zeros(chromosomes_size, device=device, dtype=torch.bool)
+        self.trade_realized_pnl = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        self.trade_win_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+        self.trade_total_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
 
     def _apply_funding_fees(self, current_timestamp, funding_rate):
         if self.last_timestamp is None:
@@ -84,15 +96,17 @@ class TradingEnvironment:
                     self.profit[short_mask] += funding_pnl[short_mask] * self.enter_ratio[short_mask]
                     break
 
-    def _check_liquidation(self, curr_low, curr_high):
-        # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> curr_low 기준)
+    def _check_liquidation(self, mark_low, mark_high):
+        # Liquidation check using mark price approximation (not last price).
+        # Conservative proxy: longs tested against bar low, shorts against bar high.
+        # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> mark_low 기준)
         long_mask = self.pos_list == 2
         if long_mask.any():
             pos_price = self.price_list[long_mask]
             leverage = self.leverage_ratio[long_mask].float()
             enter_ratio = self.enter_ratio[long_mask]
 
-            pnl_percent = (curr_low - pos_price) / pos_price
+            pnl_percent = (mark_low - pos_price) / pos_price
             margin_balance = enter_ratio * (1 + pnl_percent * leverage)
             maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
             
@@ -100,8 +114,22 @@ class TradingEnvironment:
             if liquidation_mask_local.any():
                 long_indices = torch.where(long_mask)[0]
                 liquidated_indices = long_indices[liquidation_mask_local]
-                
+                # Initial margin loss
                 self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
+                # Liquidation clearance fee: notional * rate ≈ (enter_ratio * leverage) * rate
+                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
+                liq_fee = notional * self.liq_clearance_fee_rate
+                self.profit[liquidated_indices] -= liq_fee
+                # Trade-based accounting: add realized loss then settle trade
+                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
+                # Settle trade
+                self.trade_total_count[liquidated_indices] += 1
+                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
+                if win_mask.any():
+                    idx_win = liquidated_indices[win_mask]
+                    self.trade_win_count[idx_win] += 1
+                self.trade_open[liquidated_indices] = False
+                self.trade_realized_pnl[liquidated_indices] = 0.0
                 self.pos_list[liquidated_indices] = 0
                 self.price_list[liquidated_indices] = -1.0
                 self.leverage_ratio[liquidated_indices] = -1
@@ -109,14 +137,14 @@ class TradingEnvironment:
                 self.additional_count[liquidated_indices] = 0
                 self.holding_period[liquidated_indices] = 0
 
-        # 2. 숏 포지션 청산 검사 (가격 상승 시 위험 -> curr_high 기준)
+        # 2. 숏 포지션 청산 검사 (가격 상승 시 위험 -> mark_high 기준)
         short_mask = self.pos_list == 1
         if short_mask.any():
             pos_price = self.price_list[short_mask]
             leverage = self.leverage_ratio[short_mask].float()
             enter_ratio = self.enter_ratio[short_mask]
             
-            pnl_percent = (pos_price - curr_high) / pos_price
+            pnl_percent = (pos_price - mark_high) / pos_price
             margin_balance = enter_ratio * (1 + pnl_percent * leverage)
             maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
 
@@ -124,8 +152,21 @@ class TradingEnvironment:
             if liquidation_mask_local.any():
                 short_indices = torch.where(short_mask)[0]
                 liquidated_indices = short_indices[liquidation_mask_local]
-
+                # Initial margin loss
                 self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
+                # Liquidation clearance fee
+                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
+                liq_fee = notional * self.liq_clearance_fee_rate
+                self.profit[liquidated_indices] -= liq_fee
+                # Trade-based accounting and settlement
+                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
+                self.trade_total_count[liquidated_indices] += 1
+                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
+                if win_mask.any():
+                    idx_win = liquidated_indices[win_mask]
+                    self.trade_win_count[idx_win] += 1
+                self.trade_open[liquidated_indices] = False
+                self.trade_realized_pnl[liquidated_indices] = 0.0
                 self.pos_list[liquidated_indices] = 0
                 self.price_list[liquidated_indices] = -1.0
                 self.leverage_ratio[liquidated_indices] = -1
@@ -154,6 +195,9 @@ class TradingEnvironment:
             self.leverage_ratio[action_mask] = leverage
             self.enter_ratio[action_mask] = enter_ratio
             self.additional_count[action_mask] = 0
+            # Trade-based: open new trade
+            self.trade_open[action_mask] = True
+            self.trade_realized_pnl[action_mask] = 0.0
 
     def _close_all_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_ALL) & (self.pos_list != 0)
@@ -165,14 +209,34 @@ class TradingEnvironment:
             leverage = self.leverage_ratio[long_close_mask].float()
             pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[long_close_mask]
             fee = self.enter_ratio[long_close_mask] * leverage * self.taker_fee_rate
-            self.profit[long_close_mask] += (pnl - fee)
+            realized = pnl - fee
+            self.profit[long_close_mask] += realized
+            # Trade-based: accumulate and settle
+            self.trade_realized_pnl[long_close_mask] += realized
+            self.trade_total_count[long_close_mask] += 1
+            win_mask = self.trade_realized_pnl[long_close_mask] > 0
+            if win_mask.any():
+                idx_win = torch.where(long_close_mask)[0][win_mask]
+                self.trade_win_count[idx_win] += 1
+            self.trade_open[long_close_mask] = False
+            self.trade_realized_pnl[long_close_mask] = 0.0
         short_close_mask = action_mask & currently_short
         if short_close_mask.any():
             entry_price = self.price_list[short_close_mask]
             leverage = self.leverage_ratio[short_close_mask].float()
             pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[short_close_mask]
             fee = self.enter_ratio[short_close_mask] * leverage * self.taker_fee_rate
-            self.profit[short_close_mask] += (pnl - fee)
+            realized = pnl - fee
+            self.profit[short_close_mask] += realized
+            # Trade-based: accumulate and settle
+            self.trade_realized_pnl[short_close_mask] += realized
+            self.trade_total_count[short_close_mask] += 1
+            win_mask = self.trade_realized_pnl[short_close_mask] > 0
+            if win_mask.any():
+                idx_win = torch.where(short_close_mask)[0][win_mask]
+                self.trade_win_count[idx_win] += 1
+            self.trade_open[short_close_mask] = False
+            self.trade_realized_pnl[short_close_mask] = 0.0
         self.pos_list[action_mask] = 0
         self.price_list[action_mask] = -1.0
         self.leverage_ratio[action_mask] = -1
@@ -202,7 +266,16 @@ class TradingEnvironment:
                 er = self.enter_ratio[cidx]
                 pnl = ((sell_exec_price - eprice) / eprice) * lev * er
                 fee = er * lev * self.taker_fee_rate
-                self.profit[cidx] += (pnl - fee)
+                realized = pnl - fee
+                self.profit[cidx] += realized
+                # Trade-based: accumulate and settle
+                self.trade_realized_pnl[cidx] += realized
+                self.trade_total_count[cidx] += 1
+                win_mask = self.trade_realized_pnl[cidx] > 0
+                if win_mask.any():
+                    self.trade_win_count[cidx[win_mask]] += 1
+                self.trade_open[cidx] = False
+                self.trade_realized_pnl[cidx] = 0.0
                 self.pos_list[cidx] = 0
                 self.price_list[cidx] = -1.0
                 self.leverage_ratio[cidx] = -1
@@ -218,7 +291,10 @@ class TradingEnvironment:
                 closed_margin = self.enter_ratio[pidx] * pratio
                 pnl = ((sell_exec_price - eprice) / eprice) * lev * closed_margin
                 fee = closed_margin * lev * self.taker_fee_rate
-                self.profit[pidx] += (pnl - fee)
+                realized = pnl - fee
+                self.profit[pidx] += realized
+                # Trade-based: partial close accumulates only
+                self.trade_realized_pnl[pidx] += realized
                 self.enter_ratio[pidx] -= closed_margin
         short_p_close_mask = action_mask & currently_short
         if short_p_close_mask.any():
@@ -239,7 +315,16 @@ class TradingEnvironment:
                 er = self.enter_ratio[cidx]
                 pnl = ((eprice - buy_exec_price) / eprice) * lev * er
                 fee = er * lev * self.taker_fee_rate
-                self.profit[cidx] += (pnl - fee)
+                realized = pnl - fee
+                self.profit[cidx] += realized
+                # Trade-based: accumulate and settle
+                self.trade_realized_pnl[cidx] += realized
+                self.trade_total_count[cidx] += 1
+                win_mask = self.trade_realized_pnl[cidx] > 0
+                if win_mask.any():
+                    self.trade_win_count[cidx[win_mask]] += 1
+                self.trade_open[cidx] = False
+                self.trade_realized_pnl[cidx] = 0.0
                 self.pos_list[cidx] = 0
                 self.price_list[cidx] = -1.0
                 self.leverage_ratio[cidx] = -1
@@ -255,7 +340,10 @@ class TradingEnvironment:
                 closed_margin = self.enter_ratio[pidx] * pratio
                 pnl = ((eprice - buy_exec_price) / eprice) * lev * closed_margin
                 fee = closed_margin * lev * self.taker_fee_rate
-                self.profit[pidx] += (pnl - fee)
+                realized = pnl - fee
+                self.profit[pidx] += realized
+                # Trade-based: partial close accumulates only
+                self.trade_realized_pnl[pidx] += realized
                 self.enter_ratio[pidx] -= closed_margin
 
     def _add_to_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
@@ -312,7 +400,17 @@ class TradingEnvironment:
             leverage = self.leverage_ratio[flip_to_short_mask].float()
             pnl = ((sell_exec_price - entry_price) / entry_price) * leverage * self.enter_ratio[flip_to_short_mask]
             fee_close = self.enter_ratio[flip_to_short_mask] * leverage * self.taker_fee_rate
-            self.profit[flip_to_short_mask] += (pnl - fee_close)
+            realized_close = pnl - fee_close
+            self.profit[flip_to_short_mask] += realized_close
+            # Trade-based: close current trade and settle
+            self.trade_realized_pnl[flip_to_short_mask] += realized_close
+            self.trade_total_count[flip_to_short_mask] += 1
+            win_mask = self.trade_realized_pnl[flip_to_short_mask] > 0
+            if win_mask.any():
+                idx_win = torch.where(flip_to_short_mask)[0][win_mask]
+                self.trade_win_count[idx_win] += 1
+            self.trade_open[flip_to_short_mask] = False
+            self.trade_realized_pnl[flip_to_short_mask] = 0.0
             fee_open = ratio * lev.float() * self.taker_fee_rate
             self.profit[flip_to_short_mask] -= fee_open
             self.pos_list[flip_to_short_mask] = 1
@@ -320,6 +418,9 @@ class TradingEnvironment:
             self.enter_ratio[flip_to_short_mask] = ratio
             self.leverage_ratio[flip_to_short_mask] = lev
             self.additional_count[flip_to_short_mask] = 0
+            # Trade-based: open new trade for flipped position
+            self.trade_open[flip_to_short_mask] = True
+            self.trade_realized_pnl[flip_to_short_mask] = 0.0
         flip_to_long_mask = action_mask & currently_short
         if flip_to_long_mask.any():
             ratio = actions_tensor[flip_to_long_mask, 1]
@@ -329,7 +430,17 @@ class TradingEnvironment:
             leverage = self.leverage_ratio[flip_to_long_mask].float()
             pnl = ((entry_price - buy_exec_price) / entry_price) * leverage * self.enter_ratio[flip_to_long_mask]
             fee_close = self.enter_ratio[flip_to_long_mask] * leverage * self.taker_fee_rate
-            self.profit[flip_to_long_mask] += (pnl - fee_close)
+            realized_close = pnl - fee_close
+            self.profit[flip_to_long_mask] += realized_close
+            # Trade-based: close and settle
+            self.trade_realized_pnl[flip_to_long_mask] += realized_close
+            self.trade_total_count[flip_to_long_mask] += 1
+            win_mask = self.trade_realized_pnl[flip_to_long_mask] > 0
+            if win_mask.any():
+                idx_win = torch.where(flip_to_long_mask)[0][win_mask]
+                self.trade_win_count[idx_win] += 1
+            self.trade_open[flip_to_long_mask] = False
+            self.trade_realized_pnl[flip_to_long_mask] = 0.0
             fee_open = ratio * lev.float() * self.taker_fee_rate
             self.profit[flip_to_long_mask] -= fee_open
             self.pos_list[flip_to_long_mask] = 2
@@ -337,6 +448,9 @@ class TradingEnvironment:
             self.enter_ratio[flip_to_long_mask] = ratio
             self.leverage_ratio[flip_to_long_mask] = lev
             self.additional_count[flip_to_long_mask] = 0
+            # Trade-based: open new trade for flipped position
+            self.trade_open[flip_to_long_mask] = True
+            self.trade_realized_pnl[flip_to_long_mask] = 0.0
 
     def _execute_actions(self, actions_tensor, exec_base_price, curr_high, curr_low):
         buy_exec_price = exec_base_price * (1 + self.fixed_slippage_rate)
@@ -356,12 +470,17 @@ class TradingEnvironment:
     # [수정 시작] 보고서 1번 항목: step 함수 시그니처 변경
     def step(self, market_data, next_open_price, predicted_actions):
         current_timestamp = market_data.name
-        # curr_close는 더 이상 체결 가격으로 사용되지 않음
+        # Conservative mark-price proxy using OHLC; if real mark price is provided,
+        # users can extend data ingestion to pass separate series.
         curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
         curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
+        curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
         funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
+        # Typical price as mark proxy for MtM
+        mark_t = (curr_high + curr_low + curr_close) / 3.0
         
         self._apply_funding_fees(current_timestamp, funding_rate)
+        # Use mark proxy bounds for liquidation touch logic
         self._check_liquidation(curr_low, curr_high)
         
         # 체결 기준 가격으로 next_open_price 전달
@@ -371,7 +490,11 @@ class TradingEnvironment:
         self.holding_period[self.pos_list != 0] += 1
         self.holding_period[self.pos_list == 0] = 0
         non_zero_mask = self.profit != 0
+        # 1) step 실현손익 누적
         if non_zero_mask.any():
+            realized_delta = self.profit.clone()
+            self.realized_cum += realized_delta
+            # 이벤트 기반 집계(현행 유지)
             self.sum_returns[non_zero_mask] += self.profit[non_zero_mask]
             self.count_returns[non_zero_mask] += 1
             self.sum_sq_returns[non_zero_mask] += self.profit[non_zero_mask] ** 2
@@ -383,11 +506,31 @@ class TradingEnvironment:
             self.total_profit_agg[pos_mask] += self.profit[pos_mask]
             self.total_loss_agg[neg_mask] += -self.profit[neg_mask]
             self.count_wins[pos_mask] += 1
-            self.cum_sum += self.profit
-            self.running_max = torch.maximum(self.running_max, self.cum_sum)
-            current_drawdown = self.running_max - self.cum_sum
-            self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
+            # 복리 값은 실현손익 기반으로 유지
             self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask])
+        else:
+            realized_delta = torch.zeros_like(self.profit)
+        
+        # 2) 미실현 MtM 계산 (mark proxy)
+        open_mask = self.pos_list != 0
+        if open_mask.any():
+            side = torch.where(self.pos_list == 2, 1.0, -1.0)  # long=+1, short=-1
+            entry = self.price_list
+            lev = self.leverage_ratio.float()
+            er = self.enter_ratio
+            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
+            unreal_vec = pnl_pct * lev * er
+            total_unreal = torch.zeros_like(self.sum_returns)
+            total_unreal[open_mask] = unreal_vec[open_mask]
+        else:
+            total_unreal = torch.zeros_like(self.sum_returns)
+
+        # 3) 에쿼티(실현 누적 + 미실현) 기반 드로다운 및 누적 수익
+        equity = self.realized_cum + total_unreal
+        self.cum_sum = equity
+        self.running_max = torch.maximum(self.running_max, self.cum_sum)
+        current_drawdown = self.running_max - self.cum_sum
+        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
         self.profit.zero_()
         self.last_timestamp = current_timestamp
 
@@ -405,13 +548,17 @@ class TradingEnvironment:
         # [수정 종료]
 
         win_rates = torch.where(count_returns_f > 0, self.count_wins.float() / count_returns_f, torch.full_like(count_returns_f, -1e9))
+        # Trade-based win rate (per open->final close)
+        trade_counts_f = self.trade_total_count.float()
+        trade_win_rates = torch.where(trade_counts_f > 0, self.trade_win_count.float() / trade_counts_f, torch.full_like(trade_counts_f, -1e9))
         invalid_mask = self.count_returns < minimum_date
         mean_returns[invalid_mask] = -1e9
         profit_factors[invalid_mask] = -1e9
         win_rates[invalid_mask] = -1e9
         self.max_drawdown[invalid_mask] = 1e9
         self.compound_value[invalid_mask] = -1e9
-        metrics = torch.stack([mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value], dim=1)
+        # Append trade-based win rate as an extra column for reporting
+        metrics = torch.stack([mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value, trade_win_rates], dim=1)
         return metrics.cpu().numpy()
 
 # ##############################################################################
@@ -443,6 +590,7 @@ def calculate_fitness(metrics, weights):
     normalized_metrics[:, 2] = normalize_metric(metrics[:, 2], higher_is_better=True)
     normalized_metrics[:, 3] = normalize_metric(metrics[:, 3], higher_is_better=False)
     normalized_metrics[:, 4] = normalize_metric(metrics[:, 4], higher_is_better=True)
+    normalized_metrics[:, 5] = normalize_metric(metrics[:, 5], higher_is_better=True)
     
     fitness_values = np.sum(normalized_metrics * np.array(weights), axis=1)
     invalid_trade_mask = metrics[:, 0] == -1e9

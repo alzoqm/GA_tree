@@ -46,6 +46,14 @@ setup(
                 'csrc/make_population.cu',
             ],
         ),
+        # Selection operations (PPTS)
+        CUDAExtension(
+            name='gatree_selection',
+            sources=[
+                'csrc/ppts_selection_bindings.cpp',
+                'csrc/ppts_selection.cu',
+            ],
+        ),
     ],
     cmdclass={
         'build_ext': BuildExtension

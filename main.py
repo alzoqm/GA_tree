@@ -10,14 +10,14 @@ import numpy as np
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
-from evolution import Evolution
-from evolution.Selection import TournamentSelection, RouletteSelection
+from evolution.multi_objective_evolution import MultiObjectiveEvolution
+from evolution.Selection import TournamentSelection, RouletteSelection, PPTSSelection
 from evolution.Crossover import ChainCrossover, SubtreeCrossover, NodeCrossover, RootBranchCrossover
 from evolution.Mutation import (
     ChainMutation, AddNodeMutation, DeleteNodeMutation, NodeParamMutation,
     ReinitializeNodeMutation, AddSubtreeMutation, DeleteSubtreeMutation
 )
-from training.trading_env import generation_valid, generation_test, calculate_fitness
+from training.trading_env_ppts import ppts_generation_valid, ppts_generation_test
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -172,6 +172,10 @@ def main():
         selection_op = TournamentSelection(k=op_cfg['selection']['tournament_k_size'])
     elif op_cfg['selection']['type'] == 'RouletteSelection':
         selection_op = RouletteSelection()
+    elif op_cfg['selection']['type'] == 'PPTSSelection':
+        chunk_size = op_cfg['selection'].get('chunk_size', 8192)
+        selection_op = PPTSSelection(chunk_size=chunk_size)
+        logging.info(f"Using PPTS (Multi-Objective) Selection with chunk_size={chunk_size}")
     else:
         raise ValueError(f"Unknown selection type: {op_cfg['selection']['type']}")
 
@@ -206,8 +210,8 @@ def main():
     ]
     mutation_op = ChainMutation(mutations=mutation_ops)
 
-    # 4. 진화 엔진
-    evolution_engine = Evolution(
+    # 4. 진화 엔진 (Multi-Objective 전용)
+    evolution_engine = MultiObjectiveEvolution(
         population=population,
         selection=selection_op,
         crossover=crossover_op,
@@ -230,12 +234,14 @@ def main():
     logging.info(f"Total data points: {total_data_len}")
     logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
 
-    best_chromosomes, best_profit = generation_valid(
+    # PPTS 멀티 오브젝트 기반으로만 학습 수행
+    logging.info("Using PPTS Multi-Objective Training Mode")
+    best_chromosomes, best_objectives = ppts_generation_valid(
         data_1m=final_df,
         evolution=evolution_engine,
         skip_data_cnt=skip_data_cnt,
         valid_skip_data_cnt=valid_skip_data_cnt,
-        chromosomes_size=100,  # Match the reduced population size
+        chromosomes_size=ga_cfg['population']['size'],  # Match the reduced population size
         gen_loop=ga_cfg['evolution_loop']['generations'],
         best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
         elite_size=ga_cfg['evolution_loop']['elite_size'],  # Match the reduced elite size
@@ -244,6 +250,7 @@ def main():
         evaluation_config=eval_cfg,
         output_dir=env_cfg['output_dir']
     )
+    best_metrics = best_objectives  # For PPTS, these are objective vectors
 
     logging.info("Training loop finished.")
 
@@ -278,7 +285,8 @@ def main():
 
         logging.info(f"Test period: index {test_start_cnt} to {test_end_cnt}")
 
-        test_metrics = generation_test(
+        # Multi-objective test
+        test_objectives = ppts_generation_test(
             data_1m=final_df,
             population=best_population,
             start_data_cnt=test_start_cnt,
@@ -287,23 +295,20 @@ def main():
             evaluation_config=eval_cfg
         )
 
-        test_fitness = calculate_fitness(test_metrics, weights=eval_cfg['fitness_function']['weights'])
-
-        logging.info("\n========== FINAL TEST RESULTS ==========")
-        logging.info(f"Evaluated on {len(best_population.population_tensor)} best individuals.")
-        for i in range(len(test_metrics)):
-            metrics = test_metrics[i]
-            fitness = test_fitness[i]
-            logging.info(
-                f"Individual {i:02d} | "
-                f"Fitness: {fitness:.4f} | "
-                f"Mean Return: {metrics[0]:.4f} | "
-                f"Profit Factor: {metrics[1]:.2f} | "
-                f"Win Rate: {metrics[2]:.2f} | "
-                f"Max DD: {metrics[3]:.4f} | "
-                f"Compound Value: {metrics[4]:.2f}"
-            )
-        logging.info("========================================")
+        logging.info("\n========== FINAL PPTS TEST RESULTS (Multi-Objective) ==========")
+        logging.info(f"Evaluated on {len(best_population.population_tensor)} individuals.")
+        
+        # Get objective names from evaluation config
+        objectives_config = eval_cfg.get('multi_objectives', {})
+        objective_names = objectives_config.get('objectives', ['obj1', 'obj2', 'obj3', 'obj4'])
+        
+        for i in range(len(test_objectives)):
+            objectives = test_objectives[i]
+            logging.info(f"Individual {i:02d} | ", end="")
+            for j, (obj_name, obj_val) in enumerate(zip(objective_names, objectives)):
+                logging.info(f"{obj_name}: {obj_val:.4f} | ", end="")
+            logging.info("")  # New line
+        logging.info("===============================================================")
 
     logging.info("Main script finished.")
 
