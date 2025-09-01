@@ -189,6 +189,8 @@ class AddNodeMutation(BaseMutation):
         bfs_queue_buffer       = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
         result_indices_buffer  = torch.empty((B, 2 * self.max_nodes), dtype=torch.int32, device=device)
         old_to_new_map_buffer  = torch.empty((B, self.max_nodes),   dtype=torch.int32, device=device)
+        candidate_indices_buffer = torch.empty((B, self.max_nodes), dtype=torch.int32, device=device)
+        candidate_weights_buffer = torch.empty((B, self.max_nodes), dtype=torch.float32, device=device)
 
         new_node_indices = torch.full((B, self.max_add_nodes), -1, dtype=torch.int32, device=device)
 
@@ -199,7 +201,8 @@ class AddNodeMutation(BaseMutation):
             int(self.max_nodes),
             int(self.max_add_nodes),
             new_node_indices,
-            bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer
+            bfs_queue_buffer, result_indices_buffer, old_to_new_map_buffer,
+            candidate_indices_buffer, candidate_weights_buffer
         )
 
         # Vectorized param fill for DECISION nodes

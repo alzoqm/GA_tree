@@ -194,7 +194,9 @@ __global__ void k_add_decision_nodes_batch(
     int* __restrict__ out_new_node_indices,
     int* __restrict__ bfs_queue_buffer,
     int* __restrict__ result_indices_buffer,
-    int* __restrict__ old_to_new_map_buffer // reserved; not used in this implementation
+    int* __restrict__ old_to_new_map_buffer, // reserved; not used in this implementation
+    int* __restrict__ candidate_indices_buffer, // (B, max_nodes)
+    float* __restrict__ candidate_weights_buffer // (B, max_nodes)
 ){
     int b = blockIdx.x;
     if (b >= B) return;
@@ -212,15 +214,15 @@ __global__ void k_add_decision_nodes_batch(
     curand_init(blockIdx.x * blockDim.x + threadIdx.x, 0, 0, &rand_state);
 
     int inserted = 0;
-    const int MAX_CANDIDATES = 64; // Reasonable limit for stack allocation
-    int candidates[MAX_CANDIDATES];
-    float weights[MAX_CANDIDATES];
+    // Use per-batch slices provided by Python (capacity = max_nodes)
+    int* candidates = candidate_indices_buffer + b * max_nodes;
+    float* weights = candidate_weights_buffer + b * max_nodes;
 
     // Try up to max_nodes attempts to find valid candidates
     for (int attempt = 0; attempt < tv.max_nodes && inserted < K; ++attempt) {
         // Collect weighted candidates
         int candidate_count = collect_weighted_candidates(
-            tv, candidates, weights, MAX_CANDIDATES, q, res, 2*max_nodes
+            tv, candidates, weights, max_nodes, q, res, 2*max_nodes
         );
         
         if (candidate_count == 0) break; // No valid candidates
@@ -285,11 +287,14 @@ void add_decision_nodes_batch_cuda(
     torch::Tensor out_new_node_indices,
     torch::Tensor bfs_queue_buffer,
     torch::Tensor result_indices_buffer,
-    torch::Tensor old_to_new_map_buffer
+    torch::Tensor old_to_new_map_buffer,
+    torch::Tensor candidate_indices_buffer,
+    torch::Tensor candidate_weights_buffer
 ){
     TORCH_CHECK(trees.is_cuda() && num_to_add.is_cuda(), "CUDA expected");
     TORCH_CHECK(out_new_node_indices.is_cuda(), "out_new_node_indices must be CUDA");
     TORCH_CHECK(bfs_queue_buffer.is_cuda() && result_indices_buffer.is_cuda() && old_to_new_map_buffer.is_cuda(), "CUDA buffers expected");
+    TORCH_CHECK(candidate_indices_buffer.is_cuda() && candidate_weights_buffer.is_cuda(), "candidate buffers must be CUDA");
 
     TORCH_CHECK(trees.scalar_type() == torch::kFloat32, "trees must be float32");
     TORCH_CHECK(num_to_add.scalar_type() == torch::kInt32, "num_to_add must be int32");
@@ -297,6 +302,8 @@ void add_decision_nodes_batch_cuda(
     TORCH_CHECK(bfs_queue_buffer.scalar_type() == torch::kInt32, "bfs_queue_buffer must be int32");
     TORCH_CHECK(result_indices_buffer.scalar_type() == torch::kInt32, "result_indices_buffer must be int32");
     TORCH_CHECK(old_to_new_map_buffer.scalar_type() == torch::kInt32, "old_to_new_map_buffer must be int32");
+    TORCH_CHECK(candidate_indices_buffer.scalar_type() == torch::kInt32, "candidate_indices_buffer must be int32");
+    TORCH_CHECK(candidate_weights_buffer.scalar_type() == torch::kFloat32, "candidate_weights_buffer must be float32");
 
     TORCH_CHECK(trees.dim() == 3, "trees must be (B,max_nodes,node_dim)");
     TORCH_CHECK(trees.is_contiguous(), "trees must be contiguous");
@@ -307,6 +314,8 @@ void add_decision_nodes_batch_cuda(
     
     TORCH_CHECK(out_new_node_indices.size(0) == B, "out_new_node_indices batch size mismatch");
     TORCH_CHECK(out_new_node_indices.size(1) == max_add_nodes, "out_new_node_indices max_add_nodes mismatch");
+    TORCH_CHECK(candidate_indices_buffer.size(0) == B && candidate_indices_buffer.size(1) == max_nodes, "candidate_indices_buffer shape must be (B, max_nodes)");
+    TORCH_CHECK(candidate_weights_buffer.size(0) == B && candidate_weights_buffer.size(1) == max_nodes, "candidate_weights_buffer shape must be (B, max_nodes)");
 
     // Initialize outputs with -1
     out_new_node_indices.fill_(-1);
@@ -318,7 +327,9 @@ void add_decision_nodes_batch_cuda(
         out_new_node_indices.data_ptr<int>(),
         bfs_queue_buffer.data_ptr<int>(),
         result_indices_buffer.data_ptr<int>(),
-        old_to_new_map_buffer.data_ptr<int>());
+        old_to_new_map_buffer.data_ptr<int>(),
+        candidate_indices_buffer.data_ptr<int>(),
+        candidate_weights_buffer.data_ptr<float>());
 
     CUDA_CHECK_ERRORS();
 }

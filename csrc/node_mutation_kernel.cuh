@@ -10,7 +10,9 @@ void add_decision_nodes_batch_cuda(
     torch::Tensor out_new_node_indices,  // (B, max_add_nodes) int32, -1 on fail
     torch::Tensor bfs_queue_buffer,      // (B, 2*max_nodes) int32
     torch::Tensor result_indices_buffer, // (B, 2*max_nodes) int32
-    torch::Tensor old_to_new_map_buffer  // (B, max_nodes) int32
+    torch::Tensor old_to_new_map_buffer, // (B, max_nodes) int32
+    torch::Tensor candidate_indices_buffer, // (B, max_nodes) int32
+    torch::Tensor candidate_weights_buffer  // (B, max_nodes) float32
 );
 
 void delete_nodes_batch_cuda(

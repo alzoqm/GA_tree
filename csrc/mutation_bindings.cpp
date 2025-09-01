@@ -53,7 +53,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("out_new_node_indices"),
         py::arg("bfs_queue_buffer"),
         py::arg("result_indices_buffer"),
-        py::arg("old_to_new_map_buffer"));
+        py::arg("old_to_new_map_buffer"),
+        py::arg("candidate_indices_buffer"),
+        py::arg("candidate_weights_buffer"));
 
     m.def("delete_nodes_batch", &delete_nodes_batch_cuda,
         "Batch delete-node mutation with invariant guards.",
