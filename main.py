@@ -241,7 +241,7 @@ def main():
         evolution=evolution_engine,
         skip_data_cnt=skip_data_cnt,
         valid_skip_data_cnt=valid_skip_data_cnt,
-        chromosomes_size=100,  # Match the reduced population size
+        chromosomes_size=ga_cfg['population']['size'],  # Match the reduced population size
         gen_loop=ga_cfg['evolution_loop']['generations'],
         best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
         elite_size=ga_cfg['evolution_loop']['elite_size'],  # Match the reduced elite size

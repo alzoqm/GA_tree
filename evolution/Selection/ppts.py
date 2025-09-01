@@ -3,6 +3,13 @@ import torch
 import math
 from .base import BaseSelection
 
+# Import CUDA acceleration if available
+try:
+    import gatree_cuda_compat as gatree_cuda
+    CUDA_AVAILABLE = gatree_cuda.ppts_select_elites is not None
+except ImportError:
+    CUDA_AVAILABLE = False
+
 class PPTSSelection(BaseSelection):
     """
     Parameterless Batched Pareto Tournament Selection (PPTS) with ε-lexicase tiebreaking.
@@ -17,16 +24,21 @@ class PPTSSelection(BaseSelection):
     4. Entire pipeline runs as large batched tensor ops on GPU
     """
     
-    def __init__(self, chunk_size: int = 8192, generator: torch.Generator = None):
+    def __init__(self, chunk_size: int = 8192, generator: torch.Generator = None, use_cuda: bool = True):
         """
         Initialize PPTS selection.
         
         Args:
             chunk_size (int): Maximum number of tournaments to process in parallel (memory control)
             generator (torch.Generator): Random number generator for reproducibility
+            use_cuda (bool): Whether to use CUDA acceleration if available (default: True)
         """
         self.chunk_size = chunk_size
         self.generator = generator
+        self.use_cuda = use_cuda and CUDA_AVAILABLE
+        
+        if use_cuda and not CUDA_AVAILABLE:
+            print("Warning: CUDA acceleration requested but not available, falling back to Python implementation")
 
     def _get_device_generator(self, device: torch.device | str | None):
         """Return a torch.Generator compatible with the given device.
@@ -316,6 +328,29 @@ class PPTSSelection(BaseSelection):
         if num_elites >= N:
             return torch.arange(N, device=objectives.device)
         
+        # Use CUDA acceleration if available and objectives are on GPU
+        if self.use_cuda and objectives.is_cuda:
+            try:
+                # Get seed from generator if available
+                rng_seed = 0
+                if self.generator is not None:
+                    try:
+                        rng_seed = self.generator.initial_seed()
+                    except:
+                        rng_seed = 0
+                
+                # Call CUDA implementation directly
+                return gatree_cuda.ppts_select_elites(
+                    objectives=objectives,
+                    num_elites=num_elites,
+                    chunk_size=self.chunk_size if self.chunk_size > 0 else -1,
+                    rng_seed=rng_seed
+                )
+            except Exception as e:
+                print(f"CUDA elite selection failed, falling back to Python: {e}")
+                # Fall through to Python implementation
+        
+        # Python fallback implementation
         # Use larger tournament size for elites to increase selection pressure
         k = min(self._auto_tournament_size(N) * 2, N)
         
@@ -365,6 +400,29 @@ class PPTSSelection(BaseSelection):
         """Internal multi-objective parent selection."""
         N, M = objectives.shape
         
+        # Use CUDA acceleration if available and objectives are on GPU
+        if self.use_cuda and objectives.is_cuda:
+            try:
+                # Get seed from generator if available
+                rng_seed = 0
+                if self.generator is not None:
+                    try:
+                        rng_seed = self.generator.initial_seed()
+                    except:
+                        rng_seed = 0
+                
+                # Call CUDA implementation directly
+                return gatree_cuda.ppts_pick_parents(
+                    objectives=objectives,
+                    num_parents=num_parents,
+                    chunk_size=self.chunk_size if self.chunk_size > 0 else -1,
+                    rng_seed=rng_seed
+                )
+            except Exception as e:
+                print(f"CUDA parent selection failed, falling back to Python: {e}")
+                # Fall through to Python implementation
+        
+        # Python fallback implementation
         # Standard tournament size for parent selection
         k = self._auto_tournament_size(N)
         

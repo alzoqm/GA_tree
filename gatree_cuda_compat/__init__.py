@@ -11,6 +11,7 @@ try:
     import gatree_mutation
     import gatree_crossover  
     import gatree_utils
+    import gatree_selection
     
     # Prediction functions (from gatree_predict)
     predict = gatree_predict.predict
@@ -45,6 +46,10 @@ try:
     validate_trees = gatree_utils.validate_trees
     init_population_cuda = gatree_utils.init_population_cuda
     reorganize_population_with_arrays = gatree_utils.reorganize_population_with_arrays
+    
+    # Selection functions (from gatree_selection)
+    ppts_select_elites = gatree_selection.ppts_select_elites
+    ppts_pick_parents = gatree_selection.ppts_pick_parents
     
 except ImportError as e:
     print("="*60)
@@ -82,3 +87,5 @@ except ImportError as e:
     validate_trees = None
     init_population_cuda = None
     reorganize_population_with_arrays = None
+    ppts_select_elites = None
+    ppts_pick_parents = None
