@@ -2,3 +2,4 @@
 from .base import BaseSelection
 from .tournament import TournamentSelection
 from .roulette import RouletteSelection
+from .ppts import PPTSSelection
