@@ -241,6 +241,51 @@ class MultiObjectiveFitnessEvaluator:
         ranks[~valid_mask] = len(fronts)
         
         return ranks, distances
+
+    def _find_pareto_front(self, objectives: np.ndarray) -> np.ndarray:
+        """
+        Return a boolean mask indicating Pareto-optimal (non-dominated) solutions.
+
+        Assumes objectives are in minimization form (lower is better). Invalid
+        rows marked with sentinel values (e.g., -1e9 or 1e9) are excluded.
+
+        Args:
+            objectives: [population_size, num_objectives] objective values
+
+        Returns:
+            mask: [population_size] boolean array, True for Pareto front members
+        """
+        if objectives.size == 0:
+            return np.zeros((0,), dtype=bool)
+
+        invalid_mask = np.any(np.isin(objectives, [-1e9, 1e9]), axis=1)
+        ranks, _ = self.pareto_rank(objectives)
+        return (ranks == 0) & (~invalid_mask)
+
+    def _calculate_crowding_distances(self, front_objectives: np.ndarray) -> np.ndarray:
+        """
+        Calculate crowding distances for a given front.
+
+        This wraps `_crowding_distance` while handling potential invalid rows.
+        Assumes the input set is intended to represent a single Pareto front.
+
+        Args:
+            front_objectives: [front_size, num_objectives] objective values
+
+        Returns:
+            distances: [front_size] crowding distances (invalid rows get -inf)
+        """
+        if front_objectives.size == 0:
+            return np.zeros((0,), dtype=float)
+
+        valid_mask = ~np.any(np.isin(front_objectives, [-1e9, 1e9]), axis=1)
+        distances = np.full(len(front_objectives), -float('inf'), dtype=float)
+
+        if np.any(valid_mask):
+            valid_distances = self._crowding_distance(front_objectives[valid_mask])
+            distances[valid_mask] = valid_distances
+
+        return distances
     
     def _dominates(self, obj1: np.ndarray, obj2: np.ndarray) -> bool:
         """
