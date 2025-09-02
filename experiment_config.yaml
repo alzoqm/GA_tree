@@ -113,6 +113,13 @@ evaluation:
     min_leverage: 2
     min_additional_enter_ratio: 0.05
     max_additional_entries: 5
+    # --- Action de-duplication (robust) ---
+    enable_action_dedup: true            # 동일 예측 반복 시 스킵 활성화
+    dedup_exclude_types: [4, 5]          # CLOSE_PARTIAL(4), ADD_POSITION(5)는 반복 허용
+    dedup_compare_cols: 3                # 비교할 파라미터 컬럼 수 (type + 2 params)
+    dedup_atol: 1.0e-6                   # 절대 허용 오차
+    dedup_rtol: 1.0e-4                   # 상대 허용 오차
+    dedup_require_applied: true          # 직전 스텝에서 실제 적용된 경우에만 스킵
   
   # === WFO 미사용시 기본 목표 설정 (호환성) ===
   objectives:
