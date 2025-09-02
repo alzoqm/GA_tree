@@ -285,9 +285,6 @@ __global__ void root_branch_sampling_crossover_kernel(
             // Sample random parent from pool
             branch_parents[branch] = (int)(curand_uniform(&state) * pool_size);
             
-            if (batch_idx == 0) {
-                // Selected parent for this branch
-            }
             
             // Get pointer to selected parent tree
             const float* parent_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
@@ -305,21 +302,12 @@ __global__ void root_branch_sampling_crossover_kernel(
                     total_estimated_size += subtree_size;
                     branch_child_count++;
                     
-                    if (batch_idx == 0) {
-                        // Found child node for this branch
-                    }
                 }
             }
             
-            if (batch_idx == 0) {
-                // Total children found for this branch
-            }
         }
 
         // Check if estimated size fits
-        if (batch_idx == 0) {
-            // Checking size constraint
-        }
         
         if (total_estimated_size > max_nodes) {
             size_ok = false;
@@ -333,9 +321,6 @@ __global__ void root_branch_sampling_crossover_kernel(
         if (size_ok) {
             bool copy_success = true;
             
-            if (batch_idx == 0) {
-                // Starting copy phase
-            }
             
             for (int branch = 0; branch < 3 && copy_success; ++branch) {
                 const float* donor_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
@@ -394,22 +379,14 @@ __global__ void root_branch_sampling_crossover_kernel(
             
             if (copy_success) {
                 success = true;
-                if (batch_idx == 0) {
-                    // Copy phase completed successfully
-                }
             } else {
-                if (batch_idx == 0) {
-                    // Copy phase failed during branch copying
-                }
+                // copy_failed: will retry or fallback below
             }
         }
     }
 
     // --- 4. Fallback: Create minimal valid tree if all retries failed ---
     if (!success) {
-        if (batch_idx == 0) {
-            // All retries failed, using fallback mechanism
-        }
         // Conservative fallback: one ACTION per root branch
         child_next_idx = 3;
         for (int branch = 0; branch < 3; ++branch) {
@@ -422,19 +399,10 @@ __global__ void root_branch_sampling_crossover_kernel(
                 // Zero other parameters
                 for (int c = 4; c < NODE_INFO_DIM; ++c) action_node[c] = 0.0f;
                 
-                if (batch_idx == 0) {
-                    // Created fallback ACTION node
-                }
                 child_next_idx++;
             } else {
-                if (batch_idx == 0) {
-                    // No space for ACTION node in fallback
-                }
+                // No space left for fallback action
             }
-        }
-        
-        if (batch_idx == 0) {
-            // Fallback completed
         }
     }
 }
