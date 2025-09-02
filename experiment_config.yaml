@@ -44,7 +44,7 @@ ga_core:
 # 4. GA 연산자 상세 설정
 operators:
   selection:
-    type: "PPTSSelection" # Multi-objective PPTS selection
+    type: "PPTSSelection" # 다중 목표 PPTS 선택자 (유일한 옵션)
     tournament_k_size: 5
     chunk_size: 8192
 
@@ -94,8 +94,8 @@ evaluation:
     min_leverage: 2
     min_additional_enter_ratio: 0.05
     max_additional_entries: 5
-  # 멀티 오브젝트 설정 (PPTS 전용)
-  multi_objectives:
+  # 다중 목표 설정 (기본 설정)
+  objectives:
     # 사용될 목표 목록 (예시)
     objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "win_rate"]
     # 각 목표에 대한 최소화 여부 (True면 최소화, False면 최대화)

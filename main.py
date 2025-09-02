@@ -10,14 +10,14 @@ import numpy as np
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
-from evolution.multi_objective_evolution import MultiObjectiveEvolution
-from evolution.Selection import TournamentSelection, RouletteSelection, PPTSSelection
+from evolution.evolution import Evolution
+from evolution.Selection import PPTSSelection
 from evolution.Crossover import ChainCrossover, SubtreeCrossover, NodeCrossover, RootBranchCrossover
 from evolution.Mutation import (
     ChainMutation, AddNodeMutation, DeleteNodeMutation, NodeParamMutation,
     ReinitializeNodeMutation, AddSubtreeMutation, DeleteSubtreeMutation
 )
-from training.trading_env_ppts import ppts_generation_valid, ppts_generation_test
+from training.trading_env import generation_training, generation_test
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -167,17 +167,17 @@ def main():
     # ==========================================================================
     logging.info("--- Phase 3: Evolution Engine Setup ---")
 
-    # 1. 선택 연산자
-    if op_cfg['selection']['type'] == 'TournamentSelection':
-        selection_op = TournamentSelection(k=op_cfg['selection']['tournament_k_size'])
-    elif op_cfg['selection']['type'] == 'RouletteSelection':
-        selection_op = RouletteSelection()
-    elif op_cfg['selection']['type'] == 'PPTSSelection':
+    # 1. 선택 연산자 (PPTS 전용)
+    if op_cfg['selection']['type'] == 'PPTSSelection':
         chunk_size = op_cfg['selection'].get('chunk_size', 8192)
         selection_op = PPTSSelection(chunk_size=chunk_size)
         logging.info(f"Using PPTS (Multi-Objective) Selection with chunk_size={chunk_size}")
     else:
-        raise ValueError(f"Unknown selection type: {op_cfg['selection']['type']}")
+        # Only PPTS is supported in the unified system
+        logging.warning(f"Unknown selection type: {op_cfg['selection']['type']}. Using PPTSSelection instead.")
+        chunk_size = 8192
+        selection_op = PPTSSelection(chunk_size=chunk_size)
+        logging.info(f"Using PPTS (Multi-Objective) Selection with chunk_size={chunk_size}")
 
     # 2. 교차 연산자
     crossover_ops = [
@@ -210,8 +210,8 @@ def main():
     ]
     mutation_op = ChainMutation(mutations=mutation_ops)
 
-    # 4. 진화 엔진 (Multi-Objective 전용)
-    evolution_engine = MultiObjectiveEvolution(
+    # 4. 진화 엔진 (통합 버전)
+    evolution_engine = Evolution(
         population=population,
         selection=selection_op,
         crossover=crossover_op,
@@ -234,9 +234,9 @@ def main():
     logging.info(f"Total data points: {total_data_len}")
     logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
 
-    # PPTS 멀티 오브젝트 기반으로만 학습 수행
-    logging.info("Using PPTS Multi-Objective Training Mode")
-    best_chromosomes, best_objectives = ppts_generation_valid(
+    # 통합 다중 목표 기반 학습 수행
+    logging.info("Using Unified Multi-Objective Training Mode")
+    best_chromosomes, best_objectives = generation_training(
         data_1m=final_df,
         evolution=evolution_engine,
         skip_data_cnt=skip_data_cnt,
@@ -285,8 +285,8 @@ def main():
 
         logging.info(f"Test period: index {test_start_cnt} to {test_end_cnt}")
 
-        # Multi-objective test
-        test_objectives = ppts_generation_test(
+        # 통합 다중 목표 테스트
+        test_objectives = generation_test(
             data_1m=final_df,
             population=best_population,
             start_data_cnt=test_start_cnt,
@@ -299,7 +299,7 @@ def main():
         logging.info(f"Evaluated on {len(best_population.population_tensor)} individuals.")
         
         # Get objective names from evaluation config
-        objectives_config = eval_cfg.get('multi_objectives', {})
+        objectives_config = eval_cfg.get('objectives', eval_cfg.get('multi_objectives', {}))
         objective_names = objectives_config.get('objectives', ['obj1', 'obj2', 'obj3', 'obj4'])
         
         for i in range(len(test_objectives)):
