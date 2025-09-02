@@ -1,5 +1,4 @@
 # evolution/Selection/__init__.py
+# Unified multi-objective selection - only PPTS is supported
 from .base import BaseSelection
-from .tournament import TournamentSelection
-from .roulette import RouletteSelection
 from .ppts import PPTSSelection

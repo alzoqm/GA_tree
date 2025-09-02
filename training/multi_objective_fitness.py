@@ -4,7 +4,8 @@ import numpy as np
 import torch
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
-from .multi_objective_trading_env import MultiObjectiveTradingEnvironment, multi_objective_fitness_fn
+# Note: Now using unified trading_env which includes all multi-objective functionality
+# from .trading_env import TradingEnvironment, fitness_fn
 
 
 class MultiObjectiveFitnessEvaluator:
@@ -59,7 +60,8 @@ class MultiObjectiveFitnessEvaluator:
         Returns:
             objectives: [population_size, num_objectives] array of objective values
         """
-        return multi_objective_fitness_fn(
+        from .trading_env import fitness_fn
+        return fitness_fn(
             population=population,
             data=data,
             all_feature_names=all_feature_names,

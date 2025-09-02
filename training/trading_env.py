@@ -1,4 +1,5 @@
-# /training/trading_env.py
+# training/trading_env.py
+# Unified TradingEnvironment with complete original logic + multi-objective capabilities
 
 import os
 import torch
@@ -6,6 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from copy import deepcopy
+from typing import List, Dict, Tuple, Optional
 
 from models.model import GATreePop
 from models.constants import (
@@ -15,7 +17,7 @@ from models.constants import (
 from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 
 # ##############################################################################
-#           거래 환경 및 시뮬레이션 핵심 로직 (수정됨)
+#           통합 거래 환경 및 시뮬레이션 (원본 로직 완전 보존 + 다중 목표 기능)
 # ##############################################################################
 
 # 포지션 정수 -> 문자열 변환 맵
@@ -28,12 +30,26 @@ INT_TO_POSITION_MAP = {
 
 class TradingEnvironment:
     """
-    거래 환경 설정을 생성자에서 받아 초기화하는 거래 시뮬레이션 환경 클래스.
+    통합 거래 시뮬레이션 환경 클래스 - 원본의 모든 거래 로직 보존 + 다중 목표 최적화 지원
+    
+    이 클래스는 기존의 모든 거래 규칙, 청산 로직, 액션 실행, 수수료 계산, 
+    포지션 관리 등을 그대로 유지하면서 다중 목표 메트릭 계산 기능을 추가합니다.
     """
-    def __init__(self, chromosomes_size, env_config, device='cpu'):
+    def __init__(self, chromosomes_size: int, env_config: dict, 
+                 objectives_config: Optional[dict] = None, device='cpu'):
+        """
+        거래 환경 초기화
+        
+        Args:
+            chromosomes_size: 개체 수
+            env_config: 거래 환경 설정
+            objectives_config: 다중 목표 설정 (선택적)
+            device: 계산 디바이스
+        """
         self.device = device
         self.chromosomes_size = chromosomes_size
         
+        # === 원본 거래 환경 설정 완전 보존 ===
         self.taker_fee_rate = env_config['taker_fee_rate']
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
         self.fixed_slippage_rate = env_config['fixed_slippage_rate']
@@ -49,6 +65,7 @@ class TradingEnvironment:
         self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.05)
         self.max_additional_entries = env_config.get('max_additional_entries', 1e9)
 
+        # === 원본 상태 변수 완전 보존 ===
         self.pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
         self.leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.long, device=device)
@@ -78,7 +95,37 @@ class TradingEnvironment:
         self.trade_win_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
         self.trade_total_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
 
+        # === 다중 목표 최적화 추가 기능 ===
+        if objectives_config is None:
+            objectives_config = {
+                'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
+                'minimize': [False, True, False, False],
+                'risk_free_rate': 0.0,
+                'volatility_lookback': 30
+            }
+        
+        self.objectives_config = objectives_config
+        self.objective_names = objectives_config.get('objectives', [
+            'mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'
+        ])
+        self.minimize_objectives = objectives_config.get('minimize', [
+            False, True, False, False  # minimize drawdown, maximize others
+        ])
+        
+        if len(self.minimize_objectives) != len(self.objective_names):
+            raise ValueError("minimize list must match objectives list length")
+        
+        # 다중 목표 메트릭 계산용 추가 추적 변수
+        self.risk_free_rate = objectives_config.get('risk_free_rate', 0.0)
+        self.lookback_period = objectives_config.get('lookback_period', 252)  # for annualization
+        self.volatility_lookback = objectives_config.get('volatility_lookback', 30)
+        
+        # 고급 메트릭 계산용 히스토리 (메모리 효율적으로 관리)
+        self.returns_history = []  # Store return history for rolling calculations
+        self.equity_history = []   # Store equity history for advanced metrics
+
     def _apply_funding_fees(self, current_timestamp, funding_rate):
+        """원본 펀딩비 로직 완전 보존"""
         if self.last_timestamp is None:
             return
         for hour in self.funding_fee_hours:
@@ -97,6 +144,7 @@ class TradingEnvironment:
                     break
 
     def _check_liquidation(self, mark_low, mark_high):
+        """원본 청산 로직 완전 보존"""
         # Liquidation check using mark price approximation (not last price).
         # Conservative proxy: longs tested against bar low, shorts against bar high.
         # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> mark_low 기준)
@@ -174,8 +222,9 @@ class TradingEnvironment:
                 self.additional_count[liquidated_indices] = 0
                 self.holding_period[liquidated_indices] = 0
     
-    # [수정 시작] _execute_actions 함수 전체가 수정되었습니다.
+    # === 원본 액션 실행 로직 완전 보존 ===
     def _open_new_positions(self, actions_tensor, currently_hold, buy_exec_price, sell_exec_price):
+        """원본 신규 포지션 로직 완전 보존"""
         for action_type, target_pos, exec_price in [
             (ACTION_NEW_LONG, 2, buy_exec_price),
             (ACTION_NEW_SHORT, 1, sell_exec_price),
@@ -200,6 +249,7 @@ class TradingEnvironment:
             self.trade_realized_pnl[action_mask] = 0.0
 
     def _close_all_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
+        """원본 전량 청산 로직 완전 보존"""
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_ALL) & (self.pos_list != 0)
         if not action_mask.any():
             return
@@ -244,6 +294,7 @@ class TradingEnvironment:
         self.additional_count[action_mask] = 0
 
     def _close_partial_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
+        """원본 부분 청산 로직 완전 보존"""
         action_mask = (actions_tensor[:, 0] == ACTION_CLOSE_PARTIAL) & (self.pos_list != 0)
         if not action_mask.any():
             return
@@ -347,6 +398,7 @@ class TradingEnvironment:
                 self.enter_ratio[pidx] -= closed_margin
 
     def _add_to_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
+        """원본 포지션 추가 로직 완전 보존"""
         action_mask = (actions_tensor[:, 0] == ACTION_ADD_POSITION) & (self.pos_list != 0)
         if not action_mask.any():
             return
@@ -386,6 +438,7 @@ class TradingEnvironment:
             self.additional_count[final_add_mask] += 1
 
     def _flip_positions(self, actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price):
+        """원본 포지션 전환 로직 완전 보존"""
         action_mask = (actions_tensor[:, 0] == ACTION_FLIP_POSITION) & (self.pos_list != 0)
         if not action_mask.any():
             return
@@ -453,6 +506,7 @@ class TradingEnvironment:
             self.trade_realized_pnl[flip_to_long_mask] = 0.0
 
     def _execute_actions(self, actions_tensor, exec_base_price, curr_high, curr_low):
+        """원본 액션 실행 마스터 함수 완전 보존"""
         buy_exec_price = exec_base_price * (1 + self.fixed_slippage_rate)
         sell_exec_price = exec_base_price * (1 - self.fixed_slippage_rate)
 
@@ -465,10 +519,38 @@ class TradingEnvironment:
         self._close_partial_positions(actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price)
         self._add_to_positions(actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price)
         self._flip_positions(actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price)
-    # [수정 종료]
 
-    # [수정 시작] 보고서 1번 항목: step 함수 시그니처 변경
+    def _calculate_current_equity(self, market_data) -> torch.Tensor:
+        """현재 에쿼티 계산 (미실현 손익 포함)"""
+        curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
+        curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
+        curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
+        mark_t = (curr_high + curr_low + curr_close) / 3.0
+        
+        # Calculate unrealized P&L for open positions
+        open_mask = self.pos_list != 0
+        unrealized_pnl = torch.zeros_like(self.realized_cum)
+        
+        if open_mask.any():
+            side = torch.where(self.pos_list == 2, 1.0, -1.0)  # long=+1, short=-1
+            entry = self.price_list
+            lev = self.leverage_ratio.float()
+            er = self.enter_ratio
+            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
+            unrealized_pnl[open_mask] = (pnl_pct * lev * er)[open_mask]
+        
+        # Total equity = realized + unrealized, starting from 1.0
+        equity = 1.0 + self.realized_cum + unrealized_pnl
+        return equity
+
     def step(self, market_data, next_open_price, predicted_actions):
+        """
+        원본 step 함수 완전 보존 + 다중 목표용 히스토리 추가 추적
+        """
+        # Store equity before step for return calculation (다중 목표용)
+        pre_equity = self._calculate_current_equity(market_data)
+        
+        # === 원본 step 로직 완전 보존 ===
         current_timestamp = market_data.name
         # Conservative mark-price proxy using OHLC; if real mark price is provided,
         # users can extend data ingestion to pass separate series.
@@ -485,7 +567,6 @@ class TradingEnvironment:
         
         # 체결 기준 가격으로 next_open_price 전달
         self._execute_actions(predicted_actions, next_open_price, curr_high, curr_low)
-    # [수정 종료]
         
         self.holding_period[self.pos_list != 0] += 1
         self.holding_period[self.pos_list == 0] = 0
@@ -534,18 +615,32 @@ class TradingEnvironment:
         self.profit.zero_()
         self.last_timestamp = current_timestamp
 
+        # === 다중 목표 최적화용 추가 히스토리 추적 ===
+        # Store equity after step for return calculation
+        post_equity = self._calculate_current_equity(market_data)
+        
+        # Calculate and store period returns
+        returns = (post_equity - pre_equity) / (pre_equity + 1e-9)
+        self.returns_history.append(returns)
+        self.equity_history.append(post_equity)
+        
+        # Keep only recent history for memory efficiency
+        max_history = max(self.volatility_lookback, self.lookback_period)
+        if len(self.returns_history) > max_history:
+            self.returns_history.pop(0)
+            self.equity_history.pop(0)
+
     def get_final_metrics(self, minimum_date=40):
+        """원본 메트릭 계산 완전 보존"""
         count_returns_f = self.count_returns.float()
         mean_returns = torch.where(count_returns_f > 0, self.sum_returns / count_returns_f, torch.full_like(self.sum_returns, -1e9))
         
-        # [수정 시작] 보고서 3번 항목: Profit Factor 지표 왜곡 방지
-        # 손실이 0일 경우를 대비해 PF의 최대값을 100.0으로 설정하고, 계산된 값에도 상한을 적용
+        # Profit Factor 지표 왜곡 방지
         profit_factors = torch.full_like(self.total_profit_agg, 100.0)
         has_loss_mask = self.total_loss_agg > 0
         if has_loss_mask.any():
             calculated_pf = self.total_profit_agg[has_loss_mask] / (self.total_loss_agg[has_loss_mask] + 1e-9)
             profit_factors[has_loss_mask] = torch.clamp(calculated_pf, max=100.0)
-        # [수정 종료]
 
         win_rates = torch.where(count_returns_f > 0, self.count_wins.float() / count_returns_f, torch.full_like(count_returns_f, -1e9))
         # Trade-based win rate (per open->final close)
@@ -561,42 +656,175 @@ class TradingEnvironment:
         metrics = torch.stack([mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value, trade_win_rates], dim=1)
         return metrics.cpu().numpy()
 
+    # === 다중 목표 최적화 추가 메서드들 ===
+    def _calculate_sharpe_ratio(self, returns: List[torch.Tensor]) -> torch.Tensor:
+        """샤프 비율 계산"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        
+        returns_tensor = torch.stack(returns)  # [time_steps, chromosomes_size]
+        
+        # Calculate excess returns (assuming risk-free rate is annualized)
+        period_rf_rate = self.risk_free_rate / self.lookback_period
+        excess_returns = returns_tensor - period_rf_rate
+        
+        # Calculate mean and std of excess returns
+        mean_excess = excess_returns.mean(dim=0)  # [chromosomes_size]
+        std_excess = excess_returns.std(dim=0, unbiased=True)  # [chromosomes_size]
+        
+        # Sharpe ratio with numerical stability
+        sharpe_ratios = torch.where(
+            std_excess > 1e-8,
+            mean_excess / std_excess * np.sqrt(self.lookback_period),  # Annualized
+            torch.zeros_like(mean_excess)
+        )
+        
+        return sharpe_ratios
+    
+    def _calculate_volatility(self, returns: List[torch.Tensor]) -> torch.Tensor:
+        """변동성 계산"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        
+        returns_tensor = torch.stack(returns)  # [time_steps, chromosomes_size]
+        volatilities = returns_tensor.std(dim=0, unbiased=True) * np.sqrt(self.lookback_period)
+        
+        return volatilities
+    
+    def _calculate_calmar_ratio(self, returns: List[torch.Tensor]) -> torch.Tensor:
+        """칼마 비율 계산 (연간 수익률 / 최대 드로다운)"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        
+        returns_tensor = torch.stack(returns)  # [time_steps, chromosomes_size]
+        
+        # Annualized return
+        total_return = (1 + returns_tensor).prod(dim=0) - 1
+        annualized_return = (1 + total_return) ** (self.lookback_period / len(returns)) - 1
+        
+        # Max drawdown (from current max_drawdown tracking)
+        max_dd = torch.clamp(self.max_drawdown, min=1e-8)  # Avoid division by zero
+        
+        calmar_ratios = annualized_return / max_dd
+        
+        return calmar_ratios
+    
+    def _calculate_sortino_ratio(self, returns: List[torch.Tensor]) -> torch.Tensor:
+        """소르티노 비율 계산 (하방 편차 사용)"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        
+        returns_tensor = torch.stack(returns)  # [time_steps, chromosomes_size]
+        
+        # Calculate excess returns
+        period_rf_rate = self.risk_free_rate / self.lookback_period
+        excess_returns = returns_tensor - period_rf_rate
+        
+        # Downside deviation (only negative returns)
+        negative_returns = torch.where(excess_returns < 0, excess_returns, torch.zeros_like(excess_returns))
+        downside_std = torch.sqrt(torch.mean(negative_returns ** 2, dim=0))
+        
+        # Mean excess return
+        mean_excess = excess_returns.mean(dim=0)
+        
+        # Sortino ratio with numerical stability
+        sortino_ratios = torch.where(
+            downside_std > 1e-8,
+            mean_excess / downside_std * np.sqrt(self.lookback_period),  # Annualized
+            torch.zeros_like(mean_excess)
+        )
+        
+        return sortino_ratios
+
+    def get_multi_objective_metrics(self, minimum_date: int = 40) -> np.ndarray:
+        """
+        다중 목표 메트릭 계산 (원본 메트릭 + 고급 메트릭)
+        """
+        # Get base metrics from original method
+        base_metrics = self.get_final_metrics(minimum_date)
+        
+        # base_metrics columns: [mean_returns, profit_factors, win_rates, max_drawdown, compound_value, trade_win_rates]
+        mean_returns = torch.tensor(base_metrics[:, 0], device=self.device)
+        profit_factors = torch.tensor(base_metrics[:, 1], device=self.device)
+        win_rates = torch.tensor(base_metrics[:, 2], device=self.device)
+        max_drawdown = torch.tensor(base_metrics[:, 3], device=self.device)
+        compound_value = torch.tensor(base_metrics[:, 4], device=self.device)
+        trade_win_rates = torch.tensor(base_metrics[:, 5], device=self.device)
+        
+        # Calculate additional advanced metrics if we have return history
+        if len(self.returns_history) >= 2:
+            sharpe_ratios = self._calculate_sharpe_ratio(self.returns_history)
+            volatilities = self._calculate_volatility(self.returns_history)
+            calmar_ratios = self._calculate_calmar_ratio(self.returns_history)
+            sortino_ratios = self._calculate_sortino_ratio(self.returns_history)
+        else:
+            # Fallback for insufficient data
+            sharpe_ratios = torch.zeros_like(mean_returns)
+            volatilities = torch.zeros_like(mean_returns)
+            calmar_ratios = torch.zeros_like(mean_returns)
+            sortino_ratios = torch.zeros_like(mean_returns)
+        
+        # Build objective dictionary
+        available_objectives = {
+            'mean_return': mean_returns,
+            'max_drawdown': max_drawdown,
+            'sharpe_ratio': sharpe_ratios,
+            'win_rate': win_rates,
+            'profit_factor': profit_factors,
+            'compound_value': compound_value,
+            'trade_win_rate': trade_win_rates,
+            'volatility': volatilities,
+            'calmar_ratio': calmar_ratios,
+            'sortino_ratio': sortino_ratios
+        }
+        
+        # Select and arrange objectives according to configuration
+        objectives_list = []
+        for i, obj_name in enumerate(self.objective_names):
+            if obj_name not in available_objectives:
+                raise ValueError(f"Unknown objective: {obj_name}. Available: {list(available_objectives.keys())}")
+            
+            objective_values = available_objectives[obj_name]
+            
+            # Apply minimization/maximization transformation
+            if self.minimize_objectives[i]:
+                # For minimization objectives, use as-is (assuming lower is better)
+                objectives_list.append(objective_values)
+            else:
+                # For maximization objectives, negate for minimization framework
+                objectives_list.append(-objective_values)
+        
+        # Stack objectives
+        objectives_tensor = torch.stack(objectives_list, dim=1)  # [chromosomes_size, num_objectives]
+        
+        # Handle invalid individuals (same logic as base class)
+        invalid_mask = torch.tensor(base_metrics[:, 0] == -1e9, device=self.device)
+        
+        # Set invalid individuals to worst possible values for each objective
+        for i in range(len(self.objective_names)):
+            if self.minimize_objectives[i]:
+                # For minimization: set to large positive value
+                objectives_tensor[invalid_mask, i] = 1e9
+            else:
+                # For maximization (negated): set to large positive value (worst for negated)
+                objectives_tensor[invalid_mask, i] = 1e9
+        
+        return objectives_tensor.cpu().numpy()
+
+    def get_objective_names(self) -> List[str]:
+        """설정된 목표 이름들 반환"""
+        return self.objective_names.copy()
+    
+    def get_minimization_flags(self) -> List[bool]:
+        """각 목표의 최소화 플래그 반환"""
+        return self.minimize_objectives.copy()
+
+
 # ##############################################################################
-#           유틸리티 및 피트니스 계산 래퍼 함수 (수정 없음)
+#           통합 피트니스 함수 (다중 목표 지원)
 # ##############################################################################
 
 torch.set_grad_enabled(False)
-
-def calculate_fitness(metrics, weights):
-    chromosomes_size = len(metrics)
-    def normalize_metric(metric, higher_is_better=True):
-        valid_mask = ~np.isin(metric, [-1e9, 1e9]) & ~np.isnan(metric)
-        if not np.any(valid_mask):
-            return np.zeros_like(metric)
-        valid_metric = metric[valid_mask]
-        min_val, max_val = np.min(valid_metric), np.max(valid_metric)
-        if min_val == max_val:
-            normalized = np.ones_like(metric) * 0.5
-        else:
-            if higher_is_better:
-                normalized = (metric - min_val) / (max_val - min_val + 1e-9)
-            else:
-                normalized = (max_val - metric) / (max_val - min_val + 1e-9)
-        normalized[~valid_mask] = 0.0
-        return normalized
-    normalized_metrics = np.zeros_like(metrics)
-    normalized_metrics[:, 0] = normalize_metric(metrics[:, 0], higher_is_better=True)
-    normalized_metrics[:, 1] = normalize_metric(metrics[:, 1], higher_is_better=True)
-    normalized_metrics[:, 2] = normalize_metric(metrics[:, 2], higher_is_better=True)
-    normalized_metrics[:, 3] = normalize_metric(metrics[:, 3], higher_is_better=False)
-    normalized_metrics[:, 4] = normalize_metric(metrics[:, 4], higher_is_better=True)
-    normalized_metrics[:, 5] = normalize_metric(metrics[:, 5], higher_is_better=True)
-    
-    fitness_values = np.sum(normalized_metrics * np.array(weights), axis=1)
-    invalid_trade_mask = metrics[:, 0] == -1e9
-    fitness_values[invalid_trade_mask] = -1.0
-    return fitness_values
-
 
 def fitness_fn(
     population: GATreePop,
@@ -608,31 +836,36 @@ def fitness_fn(
     stop_data_cnt: int,
     device: str,
     evaluation_config: dict
-):
+) -> np.ndarray:
     """
-    [수정 없음]
+    통합 피트니스 함수 - 다중 목표 벡터 반환
+    
+    기존의 모든 거래 로직을 보존하면서 다중 목표 메트릭을 반환합니다.
     """
     env_config = evaluation_config['simulation_env']
-    fitness_cfg = evaluation_config['fitness_function']
-
+    objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {
+        'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
+        'minimize': [False, True, False, False],
+        'risk_free_rate': 0.0,
+        'volatility_lookback': 30
+    }))
+    
+    # Create unified trading environment
     environment = TradingEnvironment(
-        chromosomes_size=population.pop_size, 
-        env_config=env_config, 
+        chromosomes_size=population.pop_size,
+        env_config=env_config,
+        objectives_config=objectives_config,
         device=device
     )
     
-    # [수정 시작] 보고서 1번 항목: 다음 캔들 Open가로 거래하기 위해 루프 범위 수정
-    pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Fitness Simulation (Time-driven)")
-    # [수정 종료]
-    
+    # 원본 시뮬레이션 루프 완전 보존
+    pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Multi-Objective Fitness Simulation")
     feature_data = data[all_feature_names]
 
     for entry_index in pbar:
-        # [수정 시작] 보고서 1번 항목: 다음 캔들 Open 가격 조회 및 전달
         market_data_row = data.iloc[entry_index]
         next_open_price = torch.tensor(data['Open'].iloc[entry_index + 1], dtype=torch.float32, device=device)
         feature_values_series = feature_data.iloc[entry_index]
-        # [수정 종료]
         
         current_positions_str = [INT_TO_POSITION_MAP[pos.item()] for pos in environment.pos_list]
         
@@ -648,20 +881,22 @@ def fitness_fn(
         if predicted_actions is None:
             raise RuntimeError("CUDA prediction failed. Check if gatree_cuda module is compiled and available.")
             
-        # [수정 시작] 보고서 1번 항목: step 함수에 next_open_price 전달
         environment.step(market_data_row, next_open_price, predicted_actions)
-        # [수정 종료]
 
     pbar.close()
     
-    final_metrics = environment.get_final_metrics(minimum_date=fitness_cfg['minimum_trades'])
-    return final_metrics
+    # Return multi-objective metrics
+    minimum_trades = evaluation_config.get('fitness_function', {}).get('minimum_trades', 40)
+    objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
+    
+    return objectives
+
 
 # ##############################################################################
-#           메인 학습/테스트 루프 (수정 없음)
+#           호환성 함수들 (훈련 루프 지원)
 # ##############################################################################
 
-def generation_valid(
+def generation_training(
     data_1m: pd.DataFrame,
     evolution,
     skip_data_cnt: int,
@@ -674,32 +909,49 @@ def generation_valid(
     warming_step: int,
     evaluation_config: dict,
     output_dir: str,
-    best_profit=None,
-    best_chromosomes=None,
+    objectives_config: Optional[dict] = None,
+    best_archive=None,
     start_gen: int = 0
-):
-    """[수정 없음]"""
+) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+    """
+    통합 세대별 훈련 함수 (다중 목표)
+    """
+    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
     
-    best_profit = best_profit
-    best_chromosomes = best_chromosomes
+    # Setup directories
     checkpoint_dir = os.path.join(output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
     
+    # Initialize fitness evaluator
+    if objectives_config is None:
+        objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
+    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
+    
+    # Initialize archive
+    if best_archive is None:
+        best_chromosomes = None
+        best_objectives = None
+    else:
+        best_chromosomes, best_objectives = best_archive
+    
+    # Setup data
     if not isinstance(data_1m.index, pd.DatetimeIndex):
         data_1m.index = pd.to_datetime(data_1m.index)
-
+    
     population = evolution.population
     all_feature_names = population.all_features
-    fitness_weights = evaluation_config['fitness_function']['weights']
-
+    
+    # Generation loop
     for gen_idx in range(start_gen, gen_loop):
-        print(f'generation {gen_idx}: ')
+        print(f'Generation {gen_idx}:')
         
+        # Build adjacency list for CUDA operations
         adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
         if adj_offsets is None:
             raise RuntimeError("Failed to build adjacency list on GPU.")
-
-        train_metrics = fitness_fn(
+        
+        # Evaluate population using multi-objective fitness
+        train_objectives = fitness_fn(
             population=population,
             data=data_1m,
             all_feature_names=all_feature_names,
@@ -711,44 +963,83 @@ def generation_valid(
             evaluation_config=evaluation_config
         )
         
-        if warming_step <= gen_idx:
-            valid_metrics_np = train_metrics[:elite_size]
-            valid_index = np.where((valid_metrics_np[:, 4] > 6.0) & (valid_metrics_np[:, 3] < 0.6))[0]
-            
-            if len(valid_index) > 0:
-                new_best_metrics = torch.from_numpy(valid_metrics_np[valid_index])
-                new_best_chromosomes = population.population_tensor[valid_index].clone()
-
-                if best_chromosomes is None:
-                    best_profit = new_best_metrics
-                    best_chromosomes = new_best_chromosomes
-                else:
-                    best_profit = torch.cat([best_profit, new_best_metrics])
-                    best_chromosomes = torch.cat([best_chromosomes, new_best_chromosomes])
-
-                if len(best_chromosomes) > best_size:
-                    print('check_discard')
-                    best_fitness_scores = calculate_fitness(best_profit.numpy(), weights=fitness_weights)
-                    top_indices = torch.topk(torch.from_numpy(best_fitness_scores), k=best_size).indices
-                    best_profit = best_profit[top_indices]
-                    best_chromosomes = best_chromosomes[top_indices]
+        # Convert to torch tensor for evolution
+        train_objectives_tensor = torch.from_numpy(train_objectives).to(device)
         
-        gen_data = {
+        # Archive management after warming period
+        if gen_idx >= warming_step:
+            # Find valid individuals
+            valid_mask = ~np.any(np.isin(train_objectives, [-1e9, 1e9]), axis=1)
+            
+            if np.any(valid_mask):
+                valid_objectives = train_objectives[valid_mask]
+                valid_chromosomes = population.population_tensor[valid_mask].clone()
+                
+                # Find Pareto front
+                pareto_front_mask = evaluator._find_pareto_front(valid_objectives)
+                if np.any(pareto_front_mask):
+                    pareto_objectives = valid_objectives[pareto_front_mask]
+                    pareto_chromosomes = valid_chromosomes[pareto_front_mask]
+                    
+                    print(f"  Found {len(pareto_objectives)} Pareto optimal solutions")
+                    
+                    # Update archive
+                    if best_chromosomes is None:
+                        best_objectives = pareto_objectives.copy()
+                        best_chromosomes = pareto_chromosomes.clone()
+                    else:
+                        # Combine with existing archive
+                        combined_objectives = np.vstack([best_objectives, pareto_objectives])
+                        combined_chromosomes = torch.cat([best_chromosomes, pareto_chromosomes])
+                        
+                        # Find non-dominated solutions in combined set
+                        combined_pareto_mask = evaluator._find_pareto_front(combined_objectives)
+                        best_objectives = combined_objectives[combined_pareto_mask]
+                        best_chromosomes = combined_chromosomes[combined_pareto_mask]
+                        
+                        # Limit archive size
+                        if len(best_objectives) > best_size:
+                            # Use diversity-based selection to reduce archive
+                            distances = evaluator._calculate_crowding_distances(best_objectives)
+                            selected_indices = np.argsort(distances)[-best_size:]
+                            best_objectives = best_objectives[selected_indices]
+                            best_chromosomes = best_chromosomes[selected_indices]
+                    
+                    print(f"  Archive size: {len(best_objectives)}")
+        
+        # Generation statistics
+        generation_summary = evaluator.get_objective_summary(train_objectives)
+        print(f"  Valid individuals: {generation_summary['statistics'].get('mean_return', {}).get('valid_count', 0)}")
+        
+        # Print objective statistics
+        for obj_name, stats in generation_summary['statistics'].items():
+            if stats['valid_count'] > 0:
+                direction = "↓" if stats['minimize'] else "↑"
+                print(f"    {obj_name}: {stats['mean']:.4f}±{stats['std']:.4f} "
+                      f"[{stats['min']:.4f}, {stats['max']:.4f}] {direction}")
+        
+        # Save checkpoint
+        checkpoint_data = {
             "generation": gen_idx,
-            "population_state_dict": population.population_tensor,
-            "best_profit": best_profit,
-            "best_chromosomes": best_chromosomes,
+            "population_state_dict": population.population_tensor.cpu(),
+            "best_objectives": best_objectives,
+            "best_chromosomes": best_chromosomes.cpu() if best_chromosomes is not None else None,
+            "generation_stats": generation_summary,
+            "objectives_config": objectives_config,
+            "evolution_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {}
         }
         
-        train_fitness = calculate_fitness(train_metrics, weights=fitness_weights)
-        torch.save(gen_data, os.path.join(checkpoint_dir, f'chrom_generation_{gen_idx}.pt'))
-        evolution.population.save(os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt'))
+        checkpoint_path = os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt')
+        torch.save(checkpoint_data, checkpoint_path)
         
-        evolution.evolve(torch.from_numpy(train_fitness).to(device))
+        # Evolve population
+        evolution.evolve(train_objectives_tensor)
         population.population_tensor = population.population_tensor.to(device)
         population.reorganize_nodes()
         
-    return best_chromosomes, best_profit
+        print()  # Empty line for readability
+    
+    return best_chromosomes, best_objectives
 
 
 def generation_test(
@@ -758,19 +1049,24 @@ def generation_test(
     end_data_cnt: int,
     device: str,
     evaluation_config: dict
-):
-    """[수정 없음]"""
-
+) -> Tuple[np.ndarray, Dict]:
+    """
+    통합 테스트 함수 (다중 목표)
+    """
+    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+    
     if not isinstance(data_1m.index, pd.DatetimeIndex):
         data_1m.index = pd.to_datetime(data_1m.index)
-
+    
     all_feature_names = population.all_features
     
+    # Build adjacency list
     adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
     if adj_offsets is None:
         raise RuntimeError("Failed to build adjacency list on GPU for test.")
-        
-    test_metrics = fitness_fn(
+    
+    # Evaluate on test data
+    test_objectives = fitness_fn(
         population=population,
         data=data_1m,
         all_feature_names=all_feature_names,
@@ -781,5 +1077,10 @@ def generation_test(
         device=device,
         evaluation_config=evaluation_config
     )
-        
-    return test_metrics
+    
+    # Generate summary
+    objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
+    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
+    test_summary = evaluator.get_objective_summary(test_objectives)
+    
+    return test_objectives, test_summary
