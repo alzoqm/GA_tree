@@ -78,7 +78,26 @@ operators:
     add_subtree_mutation:
       node_count_range: [2, 5]
 
-# 5. 평가 및 시뮬레이션 설정
+# 5. Walk-Forward Optimization 설정
+walk_forward:
+  # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
+  enabled: true
+  # 윈도우 크기 설정
+  train_bars: 1000          # 인샘플(IS) 윈도우 크기 (훈련 데이터 길이)
+  oos_bars: 250             # 아웃오브샘플(OOS) 윈도우 크기 (테스트 데이터 길이)
+  step_bars: 125            # 윈도우 이동 단위 (다음 윈도우로 이동할 데이터 포인트 수)
+  # 윈도우 생성 방식
+  scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
+  # 데이터 품질 및 누수 방지
+  warmup_bars: 50           # 각 윈도우 시작에서 지표 예열을 위해 무시할 바 수
+  embargo_bars: 0           # IS 끝과 OOS 시작 사이의 누수 방지 갭 (선택적)
+  # 윈도우별 품질 제어
+  min_trades_per_window: 20 # 윈도우별 최소 거래 수 (유효성 검증)
+  # 집단 관리 설정
+  reset_population_each_window: false  # 각 윈도우에서 집단 재설정 여부 (false시 엘리트 계승)
+  adjacency_cache: false    # 인접성 캐시 사용 여부 (기본적으로 윈도우마다 재구축)
+
+# 6. 평가 및 시뮬레이션 설정
 evaluation:
   simulation_env:
     taker_fee_rate: 0.0004
@@ -94,20 +113,46 @@ evaluation:
     min_leverage: 2
     min_additional_enter_ratio: 0.05
     max_additional_entries: 5
-  # 다중 목표 설정 (기본 설정)
+  
+  # === WFO 미사용시 기본 목표 설정 (호환성) ===
   objectives:
-    # 사용될 목표 목록 (예시)
     objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "win_rate"]
-    # 각 목표에 대한 최소화 여부 (True면 최소화, False면 최대화)
     minimize: [false, true, false, false]
-    # 선택적 파라미터들
     risk_free_rate: 0.0
     volatility_lookback: 30
+    
+  # === WFO 사용시 목표 설정 ===
+  # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
+  is_objectives:
+    objectives: ["mean_return", "max_drawdown"]
+    minimize: [false, true]
+    normalization: "minmax"
+    
+  # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
+  oos_objectives:
+    objectives: ["mean_return", "max_drawdown", "sharpe_ratio"]
+    minimize: [false, true, false]
+    risk_free_rate: 0.0
+    volatility_lookback: 30
+    
+  # 집계된 OOS 목표 (최종 모델 선택용)
+  oos_aggregate:
+    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_sharpe", "oos_consistency", "oos_return_std"]
+    minimize: [false, true, false, false, true]
+    methods: ["mean", "max", "mean", "hit_rate", "std"]
+    # 일관성(hit_rate) 임계값
+    thresholds:
+      min_return: 0.0       # 최소 수익률 임계값
+      max_dd: 0.3           # 최대 드로다운 임계값
+    # 선택적 가중치 및 정규화
+    weights: null           # null시 파레토 프론트 사용
+    normalization: "minmax"
+    
   fitness_function:
     # 최소 거래 수 등 유틸 파라미터 (일부 로직에서 활용)
     minimum_trades: 40
 
-# 6. 피처 분류 및 모델 입력 설정 (수정됨)
+# 7. 피처 분류 및 모델 입력 설정 (수정됨)
 feature_classification:
   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위

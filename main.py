@@ -7,6 +7,7 @@ import pandas as pd
 import logging
 import random
 import numpy as np
+import json
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
@@ -222,48 +223,292 @@ def main():
     logging.info("Evolution engine configured.")
 
     # ==========================================================================
-    #             Phase 4: 학습 루프 실행
+    #             Phase 4: Walk-Forward Optimization (WFO) 학습 루프 실행
     # ==========================================================================
-    logging.info("--- Phase 4: Training Loop Execution ---")
+    logging.info("--- Phase 4: Walk-Forward Optimization Training Loop ---")
 
     total_data_len = len(final_df)
-    skip_data_cnt = 0
-    valid_skip_data_cnt = int(total_data_len * data_cfg['train_ratio'])
-    valid_skip_data_cnt = 3
+    
+    # Check if WFO is enabled
+    wfo_cfg = config.get('walk_forward', {'enabled': False})
+    
+    if wfo_cfg.get('enabled', False):
+        # === Walk-Forward Optimization Mode ===
+        logging.info("=== Walk-Forward Optimization Mode Enabled ===")
+        
+        # Import WFO utilities
+        from training.multi_objective_fitness import WalkForwardOptimizer
+        
+        # Initialize WFO coordinator
+        wfo_optimizer = WalkForwardOptimizer(wfo_cfg, eval_cfg)
+        
+        # Generate WFO windows
+        windows = wfo_optimizer.generate_windows(total_data_len)
+        logging.info(f"Generated {len(windows)} WFO windows from {total_data_len} data points")
+        
+        if len(windows) == 0:
+            logging.error("No valid WFO windows could be generated. Check your configuration.")
+            logging.error(f"Data length: {total_data_len}, train_bars: {wfo_cfg['train_bars']}, oos_bars: {wfo_cfg['oos_bars']}")
+            return
+        
+        # Track elite population across windows if enabled
+        elite_population = None
+        if not wfo_cfg.get('reset_population_each_window', False):
+            elite_population = population  # Start with initial population
+        
+        # WFO window loop
+        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(windows):
+            logging.info(f"\n=== WFO Window {window_idx + 1}/{len(windows)} ===")
+            logging.info(f"IS period: index {train_start} to {train_end} ({train_end - train_start} bars)")
+            logging.info(f"OOS period: index {oos_start} to {oos_end} ({oos_end - oos_start} bars)")
+            
+            # Create window-specific checkpoint directory
+            window_checkpoint_dir = os.path.join(env_cfg['output_dir'], 'checkpoints', f'wf_window_{window_idx}')
+            os.makedirs(window_checkpoint_dir, exist_ok=True)
+            
+            # Reset or initialize population for this window
+            if wfo_cfg.get('reset_population_each_window', False) or window_idx == 0:
+                if window_idx > 0:
+                    # Reinitialize population
+                    population.make_population(device=env_cfg['device'])
+                    logging.info("Population reset for new window")
+            else:
+                # Use elite population from previous window
+                if elite_population is not None:
+                    population = elite_population
+                    logging.info("Using elite population from previous window")
+            
+            # === In-Sample Training ===
+            logging.info(f"Starting IS training for window {window_idx + 1}...")
+            
+            # Get IS evaluator and objectives config
+            is_evaluator = wfo_optimizer.get_is_evaluator()
+            is_objectives_config = eval_cfg.get('is_objectives', eval_cfg.get('objectives'))
+            
+            # Prepare window-specific evaluation config
+            window_eval_config = {**eval_cfg, 'objectives': is_objectives_config}
+            if 'min_trades_per_window' in wfo_cfg:
+                window_eval_config['min_trades_per_window'] = wfo_cfg['min_trades_per_window']
+            
+            window_best_chromosomes, window_best_objectives = generation_training(
+                data_1m=final_df,
+                evolution=evolution_engine,
+                skip_data_cnt=train_start,
+                valid_skip_data_cnt=train_end,
+                chromosomes_size=ga_cfg['population']['size'],
+                gen_loop=ga_cfg['evolution_loop']['generations'],
+                best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
+                elite_size=ga_cfg['evolution_loop']['elite_size'],
+                device=env_cfg['device'],
+                warming_step=ga_cfg['evolution_loop']['warming_steps'],
+                evaluation_config=window_eval_config,
+                output_dir=window_checkpoint_dir
+            )
+            
+            if window_best_chromosomes is None or len(window_best_chromosomes) == 0:
+                logging.warning(f"No valid chromosomes found in window {window_idx + 1}. Skipping OOS evaluation.")
+                continue
+            
+            logging.info(f"IS training completed. Found {len(window_best_chromosomes)} candidate solutions.")
+            
+            # === Out-of-Sample Evaluation ===
+            logging.info(f"Starting OOS evaluation for window {window_idx + 1}...")
+            
+            # Create population with best candidates for OOS evaluation
+            oos_population = GATreePop(
+                pop_size=len(window_best_chromosomes),
+                max_nodes=ga_cfg['population']['max_nodes'],
+                max_depth=ga_cfg['population']['max_depth'],
+                max_children=ga_cfg['population']['max_children'],
+                **model_config
+            )
+            oos_population.population_tensor.copy_(window_best_chromosomes)
+            oos_population.set_next_idx()
+            oos_population.initialized = True
+            
+            # Get OOS evaluator and objectives config
+            oos_evaluator = wfo_optimizer.get_oos_evaluator()
+            oos_objectives_config = eval_cfg.get('oos_objectives', eval_cfg.get('objectives'))
+            
+            # Prepare OOS-specific evaluation config
+            oos_eval_config = {**eval_cfg, 'objectives': oos_objectives_config}
+            if 'min_trades_per_window' in wfo_cfg:
+                oos_eval_config['min_trades_per_window'] = wfo_cfg['min_trades_per_window']
+            
+            # Evaluate candidates on OOS data
+            oos_objectives, oos_summary = generation_test(
+                data_1m=final_df,
+                population=oos_population,
+                start_data_cnt=oos_start,
+                end_data_cnt=oos_end,
+                device=env_cfg['device'],
+                evaluation_config=oos_eval_config
+            )
+            
+            logging.info(f"OOS evaluation completed for {len(oos_objectives)} candidates.")
+            
+            # Store OOS results for each candidate
+            for candidate_idx, oos_obj in enumerate(oos_objectives):
+                candidate_id = f"w{window_idx}_c{candidate_idx}"  # Unique candidate ID
+                wfo_optimizer.record_window_result(window_idx, candidate_id, oos_obj)
+            
+            # Log window summary
+            logging.info("=== Window OOS Summary ===")
+            for obj_name, stats in oos_summary.get('statistics', {}).items():
+                if stats['valid_count'] > 0:
+                    direction = "↓" if stats['minimize'] else "↑"
+                    logging.info(f"  {obj_name}: {stats['mean']:.4f}±{stats['std']:.4f} "
+                               f"[{stats['min']:.4f}, {stats['max']:.4f}] {direction}")
+            
+            # Update elite population for next window (if not resetting)
+            if not wfo_cfg.get('reset_population_each_window', False):
+                # Select top performers as elite for next window
+                elite_size = min(ga_cfg['evolution_loop']['elite_size'], len(window_best_chromosomes))
+                elite_population = GATreePop(
+                    pop_size=ga_cfg['population']['size'],  # Keep original population size
+                    max_nodes=ga_cfg['population']['max_nodes'],
+                    max_depth=ga_cfg['population']['max_depth'],
+                    max_children=ga_cfg['population']['max_children'],
+                    **model_config
+                )
+                
+                # Copy elite individuals and fill rest with random individuals
+                elite_population.population_tensor[:elite_size].copy_(window_best_chromosomes[:elite_size])
+                if elite_size < ga_cfg['population']['size']:
+                    # Generate random individuals for the rest
+                    remaining_pop = GATreePop(
+                        pop_size=ga_cfg['population']['size'] - elite_size,
+                        max_nodes=ga_cfg['population']['max_nodes'],
+                        max_depth=ga_cfg['population']['max_depth'],
+                        max_children=ga_cfg['population']['max_children'],
+                        **model_config
+                    )
+                    remaining_pop.make_population(device=env_cfg['device'])
+                    elite_population.population_tensor[elite_size:].copy_(remaining_pop.population_tensor)
+                
+                elite_population.set_next_idx()
+                elite_population.initialized = True
+        
+        # === Final Aggregation and Ranking ===
+        logging.info("\n=== Final WFO Aggregation and Ranking ===")
+        
+        if not wfo_optimizer.candidate_archives:
+            logging.error("No candidate results available for final ranking.")
+            best_chromosomes, best_metrics = None, None
+        else:
+            # Get final rankings based on aggregated OOS objectives
+            ranked_candidate_ids, aggregated_objectives = wfo_optimizer.get_final_rankings()
+            
+            logging.info(f"Ranked {len(ranked_candidate_ids)} candidates based on aggregated OOS performance.")
+            
+            # Log aggregated results
+            agg_obj_names = eval_cfg.get('oos_aggregate', {}).get('objectives', [])
+            agg_minimize = eval_cfg.get('oos_aggregate', {}).get('minimize', [])
+            
+            logging.info("=== Aggregated OOS Objective Rankings ===")
+            for i, candidate_id in enumerate(ranked_candidate_ids[:10]):  # Show top 10
+                objectives = aggregated_objectives[i]
+                logging.info(f"Rank {i+1:2d} | {candidate_id} | ", end="")
+                for j, (obj_name, obj_val, minimize) in enumerate(zip(agg_obj_names, objectives, agg_minimize)):
+                    direction = "↓" if minimize else "↑"
+                    logging.info(f"{obj_name}: {obj_val:.4f} {direction} | ", end="")
+                logging.info("")
+            
+            # Prepare final best chromosomes (from top-ranked candidates)
+            # Note: This is a simplified approach - in practice, you'd want to 
+            # reconstruct the actual chromosome tensors from the candidate IDs
+            best_chromosomes = None  # Placeholder - would need chromosome reconstruction
+            best_metrics = aggregated_objectives[:min(len(aggregated_objectives), 
+                                                   ga_cfg['evolution_loop']['best_chromosome_pool_size'])]
+            
+        logging.info("Walk-Forward Optimization completed.")
+        
+    else:
+        # === Traditional Single-Split Mode (Backward Compatibility) ===
+        logging.info("=== Traditional Single-Split Mode ===")
+        
+        skip_data_cnt = 0
+        valid_skip_data_cnt = int(total_data_len * data_cfg['train_ratio'])
+        
+        logging.info(f"Total data points: {total_data_len}")
+        logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
 
-    logging.info(f"Total data points: {total_data_len}")
-    logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
-
-    # 통합 다중 목표 기반 학습 수행
-    logging.info("Using Unified Multi-Objective Training Mode")
-    best_chromosomes, best_objectives = generation_training(
-        data_1m=final_df,
-        evolution=evolution_engine,
-        skip_data_cnt=skip_data_cnt,
-        valid_skip_data_cnt=valid_skip_data_cnt,
-        chromosomes_size=ga_cfg['population']['size'],  # Match the reduced population size
-        gen_loop=ga_cfg['evolution_loop']['generations'],
-        best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
-        elite_size=ga_cfg['evolution_loop']['elite_size'],  # Match the reduced elite size
-        device=env_cfg['device'],
-        warming_step=ga_cfg['evolution_loop']['warming_steps'],
-        evaluation_config=eval_cfg,
-        output_dir=env_cfg['output_dir']
-    )
-    best_metrics = best_objectives  # For PPTS, these are objective vectors
+        # 통합 다중 목표 기반 학습 수행
+        logging.info("Using Unified Multi-Objective Training Mode")
+        best_chromosomes, best_objectives = generation_training(
+            data_1m=final_df,
+            evolution=evolution_engine,
+            skip_data_cnt=skip_data_cnt,
+            valid_skip_data_cnt=valid_skip_data_cnt,
+            chromosomes_size=ga_cfg['population']['size'],
+            gen_loop=ga_cfg['evolution_loop']['generations'],
+            best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
+            elite_size=ga_cfg['evolution_loop']['elite_size'],
+            device=env_cfg['device'],
+            warming_step=ga_cfg['evolution_loop']['warming_steps'],
+            evaluation_config=eval_cfg,
+            output_dir=env_cfg['output_dir']
+        )
+        best_metrics = best_objectives  # For PPTS, these are objective vectors
 
     logging.info("Training loop finished.")
 
     # ==========================================================================
-    #             Phase 5: 결과 저장 및 테스트
+    #             Phase 5: 결과 저장 및 최종 평가
     # ==========================================================================
     logging.info("--- Phase 5: Saving Best Population and Final Evaluation ---")
 
     best_population_path = os.path.join(env_cfg['output_dir'], "best_population.pth")
 
-    if best_chromosomes is None or len(best_chromosomes) == 0:
+    if best_chromosomes is None or (hasattr(best_chromosomes, '__len__') and len(best_chromosomes) == 0):
         logging.warning("No best chromosomes were found during training. Skipping final save and test.")
+    elif wfo_cfg.get('enabled', False):
+        # === WFO Mode: Save aggregated results ===
+        logging.info("=== WFO Mode: Saving aggregated results ===")
+        
+        # Save WFO results summary
+        wfo_results_path = os.path.join(env_cfg['output_dir'], "wfo_results.json")
+        wfo_results = {
+            'num_windows': len(windows) if 'windows' in locals() else 0,
+            'num_candidates': len(wfo_optimizer.candidate_archives) if 'wfo_optimizer' in locals() else 0,
+            'aggregated_objectives': best_metrics.tolist() if isinstance(best_metrics, np.ndarray) else best_metrics,
+            'objective_names': eval_cfg.get('oos_aggregate', {}).get('objectives', []),
+            'minimize_directions': eval_cfg.get('oos_aggregate', {}).get('minimize', []),
+            'wfo_config': wfo_cfg
+        }
+        
+        with open(wfo_results_path, 'w') as f:
+            json.dump(wfo_results, f, indent=2)
+        
+        logging.info(f"WFO results saved to '{wfo_results_path}'")
+        logging.info("Note: Individual chromosome reconstruction not implemented in this version.")
+        logging.info("The WFO results contain aggregated performance metrics across all windows.")
+        
+        # Display final summary
+        if 'wfo_optimizer' in locals() and wfo_optimizer.candidate_archives:
+            logging.info("\n========== WFO FINAL SUMMARY ==========")
+            logging.info(f"Total windows processed: {len(windows)}")
+            logging.info(f"Total candidates evaluated: {len(wfo_optimizer.candidate_archives)}")
+            
+            if isinstance(best_metrics, np.ndarray) and len(best_metrics) > 0:
+                agg_obj_names = eval_cfg.get('oos_aggregate', {}).get('objectives', [])
+                agg_minimize = eval_cfg.get('oos_aggregate', {}).get('minimize', [])
+                
+                logging.info("Top 5 candidates by aggregated OOS performance:")
+                for i in range(min(5, len(best_metrics))):
+                    objectives = best_metrics[i]
+                    logging.info(f"Candidate {i+1:2d} | ", end="")
+                    for obj_name, obj_val, minimize in zip(agg_obj_names, objectives, agg_minimize):
+                        direction = "↓" if minimize else "↑"
+                        logging.info(f"{obj_name}: {obj_val:.4f} {direction} | ", end="")
+                    logging.info("")
+        
+        logging.info("============================================")
+        
     else:
+        # === Traditional Mode: Save and test as before ===
+        logging.info("=== Traditional Mode: Saving best population ===")
+        
         logging.info(f"Saving the best {len(best_chromosomes)} chromosomes to '{best_population_path}'")
 
         best_population = GATreePop(
@@ -286,7 +531,7 @@ def main():
         logging.info(f"Test period: index {test_start_cnt} to {test_end_cnt}")
 
         # 통합 다중 목표 테스트
-        test_objectives = generation_test(
+        test_objectives, test_summary = generation_test(
             data_1m=final_df,
             population=best_population,
             start_data_cnt=test_start_cnt,
