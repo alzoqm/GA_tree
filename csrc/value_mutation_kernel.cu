@@ -56,12 +56,12 @@ __global__ void value_mutation_kernel(
         // --- Decision Node 변이 ---
         int comp_type = (int)node_data[COL_PARAM_3];
 
-        if (is_reinitialize) { // Reinitialize Mutation
-            // 새로운 비교 타입 랜덤 선택
-            int new_comp_type_choice = curand_uniform(&state) * 3;
-            if (new_comp_type_choice == 0 && num_feat_num > 0) comp_type = COMP_TYPE_FEAT_NUM;
-            else if (new_comp_type_choice == 1 && num_feat_comp > 0) comp_type = COMP_TYPE_FEAT_FEAT;
-            else if (new_comp_type_choice == 2 && num_feat_bool > 0) comp_type = COMP_TYPE_FEAT_BOOL;
+        if (is_reinitialize) { // Reinitialize Mutation (fully on GPU)
+            // Select new comparison type among available groups
+            int choice = (int)(curand_uniform(&state) * 3.0f);
+            if (choice == 0 && num_feat_num > 0) comp_type = COMP_TYPE_FEAT_NUM;
+            else if (choice == 1 && num_feat_comp > 0) comp_type = COMP_TYPE_FEAT_FEAT;
+            else if (choice == 2 && num_feat_bool > 0) comp_type = COMP_TYPE_FEAT_BOOL;
             node_data[COL_PARAM_3] = (float)comp_type;
         }
 
@@ -89,10 +89,13 @@ __global__ void value_mutation_kernel(
 
         } else if (comp_type == COMP_TYPE_FEAT_FEAT) {
             if (is_reinitialize && num_feat_comp > 0) {
-                 // 이 부분은 복잡하여 CPU에서 처리하는 것이 더 안정적일 수 있으나,
-                 // 여기서는 간단히 랜덤 인덱스만 교체합니다.
-                node_data[COL_PARAM_1] = (float)feature_comparison_indices_ptr[(int)(curand_uniform(&state) * num_feat_comp)];
-                node_data[COL_PARAM_4] = (float)feature_comparison_indices_ptr[(int)(curand_uniform(&state) * num_feat_comp)];
+                // Pick two feature indices from the comparison set (GPU-side)
+                int idx1 = (int)(curand_uniform(&state) * num_feat_comp);
+                int idx2 = (int)(curand_uniform(&state) * num_feat_comp);
+                if (idx1 < 0) idx1 = 0; if (idx1 >= num_feat_comp) idx1 = num_feat_comp - 1;
+                if (idx2 < 0) idx2 = 0; if (idx2 >= num_feat_comp) idx2 = num_feat_comp - 1;
+                node_data[COL_PARAM_1] = (float)feature_comparison_indices_ptr[idx1];
+                node_data[COL_PARAM_4] = (float)feature_comparison_indices_ptr[idx2];
             }
             node_data[COL_PARAM_2] = (curand_uniform(&state) < 0.5f) ? (float)OP_GTE : (float)OP_LTE;
 
@@ -104,31 +107,87 @@ __global__ void value_mutation_kernel(
         }
 
     } else if (node_type == NODE_TYPE_ACTION) {
-        // --- Action Node 변이 ---
+        // --- Action Node mutation/reinitialize ---
         int action_type = (int)node_data[COL_PARAM_1];
         if (is_reinitialize) {
-            // 재초기화는 CPU 로직이 복잡하므로 여기서는 단순 값 변경만 수행
-            // (이 부분은 필요 시 Python의 `_create_random_action_params` 로직을 CUDA로 포팅해야 함)
-            action_type = 1 + (int)(curand_uniform(&state) * 6);
+            // Fully ported _create_random_action_params logic
+            // Derive tree-local indices
+            // gid = global node index over entire population
+            // Compute tree and local node index to access parents within the same tree
+            const int tree_idx = gid / max_nodes;
+            const int local_idx = gid % max_nodes;
+            float* tree_base = population_ptr + (size_t)tree_idx * max_nodes * NODE_INFO_DIM;
+
+            // Find root branch type by climbing from the parent of this node
+            int parent_idx = (int)node_data[COL_PARENT_IDX];
+            int cur = parent_idx;
+            int safety = 0;
+            int root_branch_type = -1;
+            while (cur >= 0 && cur < max_nodes && safety < max_nodes) {
+                const float* nb = tree_base + (size_t)cur * NODE_INFO_DIM;
+                int p = (int)nb[COL_PARENT_IDX];
+                if (p == -1) {
+                    root_branch_type = (int)nb[COL_PARAM_1];
+                    break;
+                }
+                cur = p;
+                ++safety;
+            }
+
+            // Choose possible actions based on root branch type
+            // HOLD: NEW_LONG, NEW_SHORT
+            // LONG/SHORT: CLOSE_ALL, CLOSE_PARTIAL, ADD_POSITION, FLIP_POSITION
+            int candidates[4];
+            int cand_n = 0;
+            if (root_branch_type == 1 /*ROOT_BRANCH_HOLD*/ || root_branch_type == ROOT_BRANCH_HOLD) {
+                candidates[cand_n++] = ACTION_NEW_LONG;
+                candidates[cand_n++] = ACTION_NEW_SHORT;
+            } else if (root_branch_type == 0 /*ROOT_BRANCH_LONG*/ || root_branch_type == ROOT_BRANCH_LONG ||
+                       root_branch_type == 2 /*ROOT_BRANCH_SHORT*/ || root_branch_type == ROOT_BRANCH_SHORT) {
+                candidates[cand_n++] = ACTION_CLOSE_ALL;
+                candidates[cand_n++] = ACTION_CLOSE_PARTIAL;
+                candidates[cand_n++] = ACTION_ADD_POSITION;
+                candidates[cand_n++] = ACTION_FLIP_POSITION;
+            }
+            if (cand_n == 0) {
+                // Fallback: ensure valid action exists
+                candidates[cand_n++] = ACTION_CLOSE_ALL;
+            }
+            int pick = (int)(curand_uniform(&state) * cand_n);
+            if (pick < 0) pick = 0; if (pick >= cand_n) pick = cand_n - 1;
+            action_type = candidates[pick];
             node_data[COL_PARAM_1] = (float)action_type;
+
+            // Zero out unused params by default
+            // Keep COL_PARAM_2 and COL_PARAM_3 updated below as needed
+            // COL_PARAM_4 not used for actions here
+            // Initialize to 0 safely
+            // Note: NODE_INFO_DIM >= 7 by constants
+            node_data[COL_PARAM_2] = 0.0f;
+            node_data[COL_PARAM_3] = 0.0f;
+            node_data[COL_PARAM_4] = 0.0f;
         }
 
         if (action_type == ACTION_NEW_LONG || action_type == ACTION_NEW_SHORT || action_type == ACTION_FLIP_POSITION) {
             // Param2: 진입/플립 비율 (0.0 ~ 1.0)
             float old_ratio = node_data[COL_PARAM_2];
             float noise_ratio_val = noise_ratio * (curand_uniform(&state) * 2.0f - 1.0f);
-            node_data[COL_PARAM_2] = clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
+            node_data[COL_PARAM_2] = is_reinitialize ? curand_uniform(&state) : clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
             
             // Param3: 레버리지 (1 ~ 100)
             int old_lev = (int)node_data[COL_PARAM_3];
             int lev_change = (int)(curand_uniform(&state) * (2 * leverage_change + 1)) - leverage_change;
-            node_data[COL_PARAM_3] = (float)clamp(old_lev + lev_change, 1, 100);
+            if (is_reinitialize) {
+                node_data[COL_PARAM_3] = (float)(1 + (int)(curand_uniform(&state) * 100.0f));
+            } else {
+                node_data[COL_PARAM_3] = (float)clamp(old_lev + lev_change, 1, 100);
+            }
 
         } else if (action_type == ACTION_CLOSE_PARTIAL || action_type == ACTION_ADD_POSITION) {
             // Param2: 청산/추가 비율 (0.0 ~ 1.0)
             float old_ratio = node_data[COL_PARAM_2];
             float noise_ratio_val = noise_ratio * (curand_uniform(&state) * 2.0f - 1.0f);
-            node_data[COL_PARAM_2] = clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
+            node_data[COL_PARAM_2] = is_reinitialize ? curand_uniform(&state) : clamp(old_ratio + noise_ratio_val, 0.0f, 1.0f);
         }
     }
 }
