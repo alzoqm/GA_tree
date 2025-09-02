@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional
 
 from models.model import GATreePop
 from models.constants import (
+    ACTION_NOT_FOUND,
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
@@ -123,6 +124,26 @@ class TradingEnvironment:
         # 고급 메트릭 계산용 히스토리 (메모리 효율적으로 관리)
         self.returns_history = []  # Store return history for rolling calculations
         self.equity_history = []   # Store equity history for advanced metrics
+
+        # === 액션 중복 방지(De-duplication) 설정 및 버퍼 ===
+        self.enable_action_dedup = bool(env_config.get('enable_action_dedup', False))
+        # 기본적으로 부분청산/추가진입은 반복적용이 전략적으로 허용되므로 제외
+        self.dedup_exclude_types = set(env_config.get('dedup_exclude_types', [
+            ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION
+        ]))
+        # 앞에서부터 몇 컬럼을 비교할지 (action_type 포함). predictor는 (B,4) 반환.
+        self.dedup_compare_cols = int(env_config.get('dedup_compare_cols', 3))
+        self.dedup_atol = float(env_config.get('dedup_atol', 1e-6))
+        self.dedup_rtol = float(env_config.get('dedup_rtol', 1e-4))
+        # 직전 스텝의 액션이 실제 적용된 경우에만 중복 스킵
+        self.dedup_require_applied = bool(env_config.get('dedup_require_applied', True))
+
+        # 이전 스텝의 원본 예측 액션 저장 (B,4)
+        self.prev_actions_raw = torch.full(
+            (chromosomes_size, 4), float('nan'), dtype=torch.float32, device=device
+        )
+        # 직전 스텝에서 실제 적용된 개체 마스크
+        self.prev_applied_mask = torch.zeros(chromosomes_size, dtype=torch.bool, device=device)
 
     def _apply_funding_fees(self, current_timestamp, funding_rate):
         """원본 펀딩비 로직 완전 보존"""
@@ -549,7 +570,7 @@ class TradingEnvironment:
         """
         # Store equity before step for return calculation (다중 목표용)
         pre_equity = self._calculate_current_equity(market_data)
-        
+
         # === 원본 step 로직 완전 보존 ===
         current_timestamp = market_data.name
         # Conservative mark-price proxy using OHLC; if real mark price is provided,
@@ -565,7 +586,53 @@ class TradingEnvironment:
         # Use mark proxy bounds for liquidation touch logic
         self._check_liquidation(curr_low, curr_high)
         
-        # 체결 기준 가격으로 next_open_price 전달
+        # 예측 액션 텐서를 디바이스 정렬 및 보존 사본 생성
+        predicted_actions = predicted_actions.to(self.device)
+        raw_pred_actions = predicted_actions.clone()  # 견고형: 원본 예측 저장
+
+        # 액션 중복 방지: 직전 '실제 적용' 액션과 동일하면 스킵
+        if self.enable_action_dedup:
+            # 비교할 컬럼 수 한정 (최소 1: action_type)
+            cols = max(1, min(self.dedup_compare_cols, predicted_actions.shape[1], self.prev_actions_raw.shape[1]))
+
+            # 타입 비교 (정수 일치)
+            curr_type = predicted_actions[:, 0].long()
+            prev_type = self.prev_actions_raw[:, 0].long()
+            type_equal = curr_type == prev_type
+
+            # 연속형 파라미터 비교 (isclose, 공차 적용) - 벡터화
+            if cols > 1:
+                same_params = torch.isclose(
+                    predicted_actions[:, 1:cols],
+                    self.prev_actions_raw[:, 1:cols],
+                    rtol=self.dedup_rtol,
+                    atol=self.dedup_atol,
+                    equal_nan=False
+                ).all(dim=1)
+            else:
+                same_params = torch.ones_like(type_equal, dtype=torch.bool)
+
+            # 제외 타입 (예: 부분청산/추가진입)은 de-dup 적용하지 않음 - 벡터화
+            if len(self.dedup_exclude_types) > 0:
+                exclude_tensor = torch.tensor(list(self.dedup_exclude_types), dtype=torch.long, device=self.device)
+                excluded_mask = torch.isin(curr_type, exclude_tensor)
+            else:
+                excluded_mask = torch.zeros_like(type_equal, dtype=torch.bool)
+
+            duplicate_mask = type_equal & same_params & (~excluded_mask)
+            if self.dedup_require_applied:
+                duplicate_mask &= self.prev_applied_mask
+
+            # 중복된 액션은 NOT_FOUND로 무력화
+            if duplicate_mask.any():
+                predicted_actions[duplicate_mask, :] = 0.0  # 모든 파라미터 0
+                predicted_actions[duplicate_mask, 0] = float(ACTION_NOT_FOUND)
+
+        # 실행 전 상태 스냅샷 (적용 여부 판정용)
+        pos_before = self.pos_list.clone()
+        er_before = self.enter_ratio.clone()
+
+        # 체결 기준 가격으로 next_open_price 전달 (중복 필터 적용된 액션 사용)
         self._execute_actions(predicted_actions, next_open_price, curr_high, curr_low)
         
         self.holding_period[self.pos_list != 0] += 1
@@ -614,6 +681,35 @@ class TradingEnvironment:
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
         self.profit.zero_()
         self.last_timestamp = current_timestamp
+
+        # === 견고형 de-dup: 실제 적용 여부 계산 및 버퍼 갱신 ===
+        if self.enable_action_dedup:
+            pos_after = self.pos_list
+            er_after = self.enter_ratio
+            atype_eff = predicted_actions[:, 0].long()
+
+            eps = 1e-8
+            applied_new_long = (atype_eff == ACTION_NEW_LONG) & (pos_before == 0) & (pos_after == 2)
+            applied_new_short = (atype_eff == ACTION_NEW_SHORT) & (pos_before == 0) & (pos_after == 1)
+            applied_close_all = (atype_eff == ACTION_CLOSE_ALL) & (pos_before != 0) & (pos_after == 0)
+            applied_flip = (atype_eff == ACTION_FLIP_POSITION) & (
+                ((pos_before == 2) & (pos_after == 1)) | ((pos_before == 1) & (pos_after == 2))
+            )
+            applied_close_partial = (atype_eff == ACTION_CLOSE_PARTIAL) & (pos_before != 0) & (er_after < er_before - eps)
+            applied_add = (atype_eff == ACTION_ADD_POSITION) & (pos_before != 0) & (er_after > er_before + eps)
+
+            applied_mask = (
+                applied_new_long | applied_new_short | applied_close_all |
+                applied_flip | applied_close_partial | applied_add
+            )
+
+            # 직전 적용 마스크 및 원본 예측 갱신
+            self.prev_applied_mask = applied_mask
+            # 원본 예측 저장 (다음 스텝 비교 기준)
+            # shape 맞춤: predictor는 (B,4) 반환 가정
+            # prev_actions_raw의 디바이스/형태 유지
+            cols_copy = min(self.prev_actions_raw.shape[1], raw_pred_actions.shape[1])
+            self.prev_actions_raw[:, :cols_copy] = raw_pred_actions[:, :cols_copy]
 
         # === 다중 목표 최적화용 추가 히스토리 추적 ===
         # Store equity after step for return calculation
