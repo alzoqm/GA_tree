@@ -886,7 +886,12 @@ def fitness_fn(
     pbar.close()
     
     # Return multi-objective metrics
+    # Support per-window minimum_trades override for WFO
     minimum_trades = evaluation_config.get('fitness_function', {}).get('minimum_trades', 40)
+    wfo_min_trades = evaluation_config.get('min_trades_per_window', None)
+    if wfo_min_trades is not None:
+        minimum_trades = wfo_min_trades
+        
     objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
     
     return objectives

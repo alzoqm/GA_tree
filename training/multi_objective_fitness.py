@@ -90,7 +90,7 @@ class MultiObjectiveFitnessEvaluator:
         
         for i in range(self.num_objectives):
             obj_values = objectives[:, i]
-            valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values)
+            valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values) & ~np.isinf(obj_values)
             
             if not np.any(valid_mask):
                 # No valid values - keep as is
@@ -241,6 +241,51 @@ class MultiObjectiveFitnessEvaluator:
         ranks[~valid_mask] = len(fronts)
         
         return ranks, distances
+
+    def _find_pareto_front(self, objectives: np.ndarray) -> np.ndarray:
+        """
+        Return a boolean mask indicating Pareto-optimal (non-dominated) solutions.
+
+        Assumes objectives are in minimization form (lower is better). Invalid
+        rows marked with sentinel values (e.g., -1e9 or 1e9) are excluded.
+
+        Args:
+            objectives: [population_size, num_objectives] objective values
+
+        Returns:
+            mask: [population_size] boolean array, True for Pareto front members
+        """
+        if objectives.size == 0:
+            return np.zeros((0,), dtype=bool)
+
+        invalid_mask = np.any(np.isin(objectives, [-1e9, 1e9]), axis=1)
+        ranks, _ = self.pareto_rank(objectives)
+        return (ranks == 0) & (~invalid_mask)
+
+    def _calculate_crowding_distances(self, front_objectives: np.ndarray) -> np.ndarray:
+        """
+        Calculate crowding distances for a given front.
+
+        This wraps `_crowding_distance` while handling potential invalid rows.
+        Assumes the input set is intended to represent a single Pareto front.
+
+        Args:
+            front_objectives: [front_size, num_objectives] objective values
+
+        Returns:
+            distances: [front_size] crowding distances (invalid rows get -inf)
+        """
+        if front_objectives.size == 0:
+            return np.zeros((0,), dtype=float)
+
+        valid_mask = ~np.any(np.isin(front_objectives, [-1e9, 1e9]), axis=1)
+        distances = np.full(len(front_objectives), -float('inf'), dtype=float)
+
+        if np.any(valid_mask):
+            valid_distances = self._crowding_distance(front_objectives[valid_mask])
+            distances[valid_mask] = valid_distances
+
+        return distances
     
     def _dominates(self, obj1: np.ndarray, obj2: np.ndarray) -> bool:
         """
@@ -324,7 +369,7 @@ class MultiObjectiveFitnessEvaluator:
         
         for i, obj_name in enumerate(self.objective_names):
             obj_values = objectives[:, i]
-            valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values)
+            valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values) & ~np.isinf(obj_values)
             
             if np.any(valid_mask):
                 valid_values = obj_values[valid_mask]
@@ -406,3 +451,321 @@ def get_preset_objectives(preset_name: str) -> dict:
         raise ValueError(f"Unknown preset: {preset_name}. Available: {list(PRESET_OBJECTIVES.keys())}")
     
     return PRESET_OBJECTIVES[preset_name].copy()
+
+
+# ##############################################################################
+#           Walk-Forward Optimization (WFO) Utilities
+# ##############################################################################
+
+class WalkForwardOptimizer:
+    """
+    Walk-Forward Optimization coordinator that manages rolling window training
+    and out-of-sample evaluation with cross-window objective aggregation.
+    """
+    
+    def __init__(self, wfo_config: dict, evaluation_config: dict):
+        """
+        Initialize the WFO optimizer.
+        
+        Args:
+            wfo_config: WFO configuration from experiment_config.yaml
+            evaluation_config: Evaluation configuration including IS/OOS objectives
+        """
+        self.wfo_config = wfo_config
+        self.evaluation_config = evaluation_config
+        
+        # Validate configuration
+        self._validate_config()
+        
+        # Initialize evaluators for different objective contexts
+        self.is_evaluator = None
+        self.oos_evaluator = None
+        self.aggregate_config = evaluation_config.get('oos_aggregate', {})
+        
+        # WFO tracking
+        self.window_results = []  # Per-window results storage
+        self.candidate_archives = {}  # Per-candidate cross-window results
+        
+    def _validate_config(self):
+        """Validate WFO configuration parameters."""
+        required_keys = ['train_bars', 'oos_bars', 'step_bars']
+        for key in required_keys:
+            if key not in self.wfo_config:
+                raise ValueError(f"Missing required WFO config key: {key}")
+        
+        if self.wfo_config['train_bars'] <= 0:
+            raise ValueError("train_bars must be positive")
+        if self.wfo_config['oos_bars'] <= 0:
+            raise ValueError("oos_bars must be positive")
+        if self.wfo_config['step_bars'] <= 0:
+            raise ValueError("step_bars must be positive")
+            
+    def get_is_evaluator(self) -> MultiObjectiveFitnessEvaluator:
+        """Get the in-sample evaluator."""
+        if self.is_evaluator is None:
+            is_config = self.evaluation_config.get('is_objectives', 
+                                                  self.evaluation_config.get('objectives'))
+            self.is_evaluator = MultiObjectiveFitnessEvaluator(is_config)
+        return self.is_evaluator
+    
+    def get_oos_evaluator(self) -> MultiObjectiveFitnessEvaluator:
+        """Get the out-of-sample evaluator."""
+        if self.oos_evaluator is None:
+            oos_config = self.evaluation_config.get('oos_objectives',
+                                                   self.evaluation_config.get('objectives'))
+            self.oos_evaluator = MultiObjectiveFitnessEvaluator(oos_config)
+        return self.oos_evaluator
+        
+    def generate_windows(self, total_length: int) -> List[Tuple[int, int, int, int]]:
+        """
+        Generate WFO window indices.
+        
+        Args:
+            total_length: Total data length
+            
+        Returns:
+            windows: List of (train_start, train_end, oos_start, oos_end) tuples
+        """
+        windows = []
+        train_bars = self.wfo_config['train_bars']
+        oos_bars = self.wfo_config['oos_bars']
+        step_bars = self.wfo_config['step_bars']
+        warmup_bars = self.wfo_config.get('warmup_bars', 0)
+        embargo_bars = self.wfo_config.get('embargo_bars', 0)
+        scheme = self.wfo_config.get('scheme', 'sliding')
+        
+        start_pos = warmup_bars
+        
+        while True:
+            # Calculate window boundaries
+            if scheme == 'expanding':
+                train_start = warmup_bars
+            else:  # sliding
+                train_start = start_pos
+                
+            train_end = start_pos + train_bars
+            oos_start = train_end + embargo_bars
+            oos_end = oos_start + oos_bars
+            
+            # Check if we have enough data
+            if oos_end > total_length:
+                break
+                
+            windows.append((train_start, train_end, oos_start, oos_end))
+            
+            # Move to next window
+            start_pos += step_bars
+            
+        return windows
+    
+    def record_window_result(self, window_idx: int, candidate_id: int, 
+                           oos_objectives: np.ndarray):
+        """
+        Record OOS results for a candidate in a specific window.
+        
+        Args:
+            window_idx: Window index
+            candidate_id: Candidate identifier 
+            oos_objectives: OOS objective vector for this candidate
+        """
+        if candidate_id not in self.candidate_archives:
+            self.candidate_archives[candidate_id] = {}
+            
+        self.candidate_archives[candidate_id][window_idx] = oos_objectives.copy()
+    
+    def aggregate_candidate_objectives(self, candidate_id: int) -> np.ndarray:
+        """
+        Aggregate OOS objectives across all windows for a specific candidate.
+        
+        Args:
+            candidate_id: Candidate identifier
+            
+        Returns:
+            aggregated_objectives: Aggregated objective vector
+        """
+        if candidate_id not in self.candidate_archives:
+            raise ValueError(f"No results found for candidate {candidate_id}")
+        
+        window_results = self.candidate_archives[candidate_id]
+        window_objectives = np.array(list(window_results.values()))
+        
+        return aggregate_oos_objectives(
+            window_objectives, 
+            self.aggregate_config
+        )
+    
+    def get_final_rankings(self) -> Tuple[List[int], np.ndarray]:
+        """
+        Get final candidate rankings based on aggregated OOS objectives.
+        
+        Returns:
+            candidate_ids: Ranked list of candidate IDs (best first)
+            aggregated_objectives: Aggregated objective matrix
+        """
+        if not self.candidate_archives:
+            return [], np.array([])
+        
+        candidate_ids = list(self.candidate_archives.keys())
+        aggregated_matrix = []
+        
+        for candidate_id in candidate_ids:
+            agg_obj = self.aggregate_candidate_objectives(candidate_id)
+            aggregated_matrix.append(agg_obj)
+        
+        aggregated_matrix = np.array(aggregated_matrix)
+        
+        # Create temporary evaluator for ranking
+        agg_evaluator = MultiObjectiveFitnessEvaluator(self.aggregate_config)
+        ranks, distances = agg_evaluator.pareto_rank(aggregated_matrix)
+        
+        # Sort by rank (ascending) and distance (descending)
+        sort_indices = np.lexsort((-distances, ranks))
+        ranked_candidates = [candidate_ids[i] for i in sort_indices]
+        
+        return ranked_candidates, aggregated_matrix[sort_indices]
+
+
+def aggregate_oos_objectives(objectives_per_window: np.ndarray, 
+                           aggregate_config: dict) -> np.ndarray:
+    """
+    Aggregate per-window OOS objective matrices using specified methods.
+    
+    Args:
+        objectives_per_window: [num_windows, num_base_objectives] matrix of per-window OOS objectives
+        aggregate_config: Configuration specifying aggregation methods
+        
+    Returns:
+        aggregated_objectives: [num_aggregate_objectives] aggregated objective vector
+    """
+    if objectives_per_window.size == 0:
+        return np.array([])
+    
+    methods = aggregate_config.get('methods', ['mean'] * objectives_per_window.shape[1])
+    thresholds = aggregate_config.get('thresholds', {})
+    base_minimize = aggregate_config.get('base_minimize', [False] * objectives_per_window.shape[1])
+    
+    aggregated = []
+    
+    for i, method in enumerate(methods):
+        if i < objectives_per_window.shape[1]:
+            # Standard aggregation on base objectives
+            obj_values = objectives_per_window[:, i]
+            valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values) & ~np.isinf(obj_values)
+            
+            if not np.any(valid_mask):
+                aggregated.append(1e9 if base_minimize[i] else -1e9)
+                continue
+                
+            valid_values = obj_values[valid_mask]
+            
+            if method == 'mean':
+                result = np.mean(valid_values)
+            elif method == 'median':
+                result = np.median(valid_values)
+            elif method == 'min':
+                result = np.min(valid_values)
+            elif method == 'max':
+                result = np.max(valid_values)
+            elif method == 'std':
+                result = np.std(valid_values)
+            elif method.startswith('p'):
+                # Percentile (e.g., 'p95', 'p05')
+                percentile = float(method[1:])
+                result = np.percentile(valid_values, percentile)
+            else:
+                result = np.mean(valid_values)  # Default fallback
+                
+            aggregated.append(result)
+        else:
+            # Special aggregation methods (beyond base objectives)
+            if method == 'hit_rate':
+                # Consistency objective: fraction of windows meeting criteria
+                result = calculate_consistency_rate(objectives_per_window, thresholds)
+                aggregated.append(result)
+            else:
+                # Unknown method - use base minimize flag if available
+                if i < len(base_minimize):
+                    aggregated.append(1e9 if base_minimize[i] else -1e9)
+                else:
+                    aggregated.append(0.0)
+    
+    return np.array(aggregated)
+
+
+def calculate_consistency_rate(objectives_per_window: np.ndarray, 
+                             thresholds: dict) -> float:
+    """
+    Calculate consistency rate (hit rate) across windows.
+    
+    Args:
+        objectives_per_window: [num_windows, num_objectives] per-window objectives
+        thresholds: Threshold configuration (e.g., min_return, max_dd)
+        
+    Returns:
+        consistency_rate: Fraction of windows meeting all criteria [0, 1]
+    """
+    if objectives_per_window.size == 0:
+        return 0.0
+    
+    num_windows = objectives_per_window.shape[0]
+    meets_criteria = np.ones(num_windows, dtype=bool)
+    
+    # Apply return threshold (typically mean_return > min_return)
+    min_return = thresholds.get('min_return', 0.0)
+    if objectives_per_window.shape[1] > 0:  # Assume first column is mean_return
+        return_values = objectives_per_window[:, 0]
+        valid_mask = ~np.isin(return_values, [-1e9, 1e9]) & ~np.isnan(return_values)
+        meets_criteria &= (return_values >= min_return) & valid_mask
+    
+    # Apply drawdown threshold (typically max_drawdown < max_dd)  
+    max_dd = thresholds.get('max_dd', 0.3)
+    if objectives_per_window.shape[1] > 1:  # Assume second column is max_drawdown
+        dd_values = objectives_per_window[:, 1]
+        valid_mask = ~np.isin(dd_values, [-1e9, 1e9]) & ~np.isnan(dd_values)
+        meets_criteria &= (dd_values <= max_dd) & valid_mask
+    
+    return np.mean(meets_criteria)
+
+
+def generate_wfo_windows(total_length: int, train_bars: int, oos_bars: int, 
+                        step_bars: int, warmup_bars: int = 0, 
+                        embargo_bars: int = 0, scheme: str = 'sliding') -> List[Tuple[int, int, int, int]]:
+    """
+    Generate Walk-Forward Optimization windows.
+    
+    Args:
+        total_length: Total data length
+        train_bars: In-sample window size
+        oos_bars: Out-of-sample window size  
+        step_bars: Step size between windows
+        warmup_bars: Warmup period at start of data
+        embargo_bars: Gap between IS and OOS to prevent leakage
+        scheme: 'sliding' or 'expanding' window scheme
+        
+    Returns:
+        windows: List of (train_start, train_end, oos_start, oos_end) tuples
+    """
+    windows = []
+    start_pos = warmup_bars
+    
+    while True:
+        # Calculate window boundaries
+        if scheme == 'expanding':
+            train_start = warmup_bars
+        else:  # sliding
+            train_start = start_pos
+            
+        train_end = start_pos + train_bars
+        oos_start = train_end + embargo_bars
+        oos_end = oos_start + oos_bars
+        
+        # Check if we have enough data
+        if oos_end > total_length:
+            break
+            
+        windows.append((train_start, train_end, oos_start, oos_end))
+        
+        # Move to next window
+        start_pos += step_bars
+        
+    return windows
