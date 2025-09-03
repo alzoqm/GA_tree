@@ -1028,132 +1028,15 @@ def generation_training(
     start_gen: int = 0
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """
-    통합 세대별 훈련 함수 (다중 목표)
+    DEPRECATED: Use training.runner.generation_training instead.
+
+    This legacy function remains only to provide a clear error message if
+    accidentally imported. It intentionally raises to prevent stale usage.
     """
-    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
-    
-    # Setup directories
-    checkpoint_dir = os.path.join(output_dir, 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    # Initialize fitness evaluator
-    if objectives_config is None:
-        objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
-    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
-    
-    # Initialize archive
-    if best_archive is None:
-        best_chromosomes = None
-        best_objectives = None
-    else:
-        best_chromosomes, best_objectives = best_archive
-    
-    # Setup data
-    if not isinstance(data_1m.index, pd.DatetimeIndex):
-        data_1m.index = pd.to_datetime(data_1m.index)
-    
-    population = evolution.population
-    all_feature_names = population.all_features
-    
-    # Generation loop
-    for gen_idx in range(start_gen, gen_loop):
-        print(f'Generation {gen_idx}:')
-        
-        # Build adjacency list for CUDA operations
-        adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
-        if adj_offsets is None:
-            raise RuntimeError("Failed to build adjacency list on GPU.")
-        
-        # Evaluate population using multi-objective fitness
-        train_objectives = fitness_fn(
-            population=population,
-            data=data_1m,
-            all_feature_names=all_feature_names,
-            adj_offsets=adj_offsets,
-            adj_indices=adj_indices,
-            start_data_cnt=skip_data_cnt,
-            stop_data_cnt=valid_skip_data_cnt,
-            device=device,
-            evaluation_config=evaluation_config
-        )
-        
-        # Convert to torch tensor for evolution
-        train_objectives_tensor = torch.from_numpy(train_objectives).to(device)
-        
-        # Archive management after warming period
-        if gen_idx >= warming_step:
-            # Find valid individuals
-            valid_mask = ~np.any(np.isin(train_objectives, [-1e9, 1e9]), axis=1)
-            
-            if np.any(valid_mask):
-                valid_objectives = train_objectives[valid_mask]
-                valid_chromosomes = population.population_tensor[valid_mask].clone()
-                
-                # Find Pareto front
-                pareto_front_mask = evaluator._find_pareto_front(valid_objectives)
-                if np.any(pareto_front_mask):
-                    pareto_objectives = valid_objectives[pareto_front_mask]
-                    pareto_chromosomes = valid_chromosomes[pareto_front_mask]
-                    
-                    print(f"  Found {len(pareto_objectives)} Pareto optimal solutions")
-                    
-                    # Update archive
-                    if best_chromosomes is None:
-                        best_objectives = pareto_objectives.copy()
-                        best_chromosomes = pareto_chromosomes.clone()
-                    else:
-                        # Combine with existing archive
-                        combined_objectives = np.vstack([best_objectives, pareto_objectives])
-                        combined_chromosomes = torch.cat([best_chromosomes, pareto_chromosomes])
-                        
-                        # Find non-dominated solutions in combined set
-                        combined_pareto_mask = evaluator._find_pareto_front(combined_objectives)
-                        best_objectives = combined_objectives[combined_pareto_mask]
-                        best_chromosomes = combined_chromosomes[combined_pareto_mask]
-                        
-                        # Limit archive size
-                        if len(best_objectives) > best_size:
-                            # Use diversity-based selection to reduce archive
-                            distances = evaluator._calculate_crowding_distances(best_objectives)
-                            selected_indices = np.argsort(distances)[-best_size:]
-                            best_objectives = best_objectives[selected_indices]
-                            best_chromosomes = best_chromosomes[selected_indices]
-                    
-                    print(f"  Archive size: {len(best_objectives)}")
-        
-        # Generation statistics
-        generation_summary = evaluator.get_objective_summary(train_objectives)
-        print(f"  Valid individuals: {generation_summary['statistics'].get('mean_return', {}).get('valid_count', 0)}")
-        
-        # Print objective statistics
-        for obj_name, stats in generation_summary['statistics'].items():
-            if stats['valid_count'] > 0:
-                direction = "↓" if stats['minimize'] else "↑"
-                print(f"    {obj_name}: {stats['mean']:.4f}±{stats['std']:.4f} "
-                      f"[{stats['min']:.4f}, {stats['max']:.4f}] {direction}")
-        
-        # Save checkpoint
-        checkpoint_data = {
-            "generation": gen_idx,
-            "population_state_dict": population.population_tensor.cpu(),
-            "best_objectives": best_objectives,
-            "best_chromosomes": best_chromosomes.cpu() if best_chromosomes is not None else None,
-            "generation_stats": generation_summary,
-            "objectives_config": objectives_config,
-            "evolution_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {}
-        }
-        
-        checkpoint_path = os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt')
-        torch.save(checkpoint_data, checkpoint_path)
-        
-        # Evolve population
-        evolution.evolve(train_objectives_tensor)
-        population.population_tensor = population.population_tensor.to(device)
-        population.reorganize_nodes()
-        
-        print()  # Empty line for readability
-    
-    return best_chromosomes, best_objectives
+    raise RuntimeError(
+        "Deprecated API: training.trading_env.generation_training is removed. "
+        "Import and use training.runner.generation_training instead."
+    )
 
 
 def generation_test(
@@ -1165,36 +1048,12 @@ def generation_test(
     evaluation_config: dict
 ) -> Tuple[np.ndarray, Dict]:
     """
-    통합 테스트 함수 (다중 목표)
+    DEPRECATED: Use training.runner.generation_test instead.
+
+    This legacy function remains only to provide a clear error message if
+    accidentally imported. It intentionally raises to prevent stale usage.
     """
-    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
-    
-    if not isinstance(data_1m.index, pd.DatetimeIndex):
-        data_1m.index = pd.to_datetime(data_1m.index)
-    
-    all_feature_names = population.all_features
-    
-    # Build adjacency list
-    adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
-    if adj_offsets is None:
-        raise RuntimeError("Failed to build adjacency list on GPU for test.")
-    
-    # Evaluate on test data
-    test_objectives = fitness_fn(
-        population=population,
-        data=data_1m,
-        all_feature_names=all_feature_names,
-        adj_offsets=adj_offsets,
-        adj_indices=adj_indices,
-        start_data_cnt=start_data_cnt,
-        stop_data_cnt=end_data_cnt,
-        device=device,
-        evaluation_config=evaluation_config
+    raise RuntimeError(
+        "Deprecated API: training.trading_env.generation_test is removed. "
+        "Import and use training.runner.generation_test instead."
     )
-    
-    # Generate summary
-    objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
-    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
-    test_summary = evaluator.get_objective_summary(test_objectives)
-    
-    return test_objectives, test_summary
