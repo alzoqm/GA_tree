@@ -124,8 +124,12 @@ class Evolution:
         # === 원본 엘리트 선택 로직 보존 (다중 목표 대응) ===
         # PPTS나 다중 목표 지원 선택자를 사용하여 엘리트 선택
         elite_indices = self.selection.select_elites(objectives, self.num_elites)
-        # CPU에 있는 population_tensor에서 엘리트를 선택한 후, GPU로 이동
-        elite_chromosomes_gpu = self.population.population_tensor[elite_indices.to('cpu')].clone().to(device)
+        # 인덱스를 population 텐서의 디바이스로 맞춰 불필요한 CPU 왕복 제거
+        pop_tensor = self.population.population_tensor
+        elite_indices_on_pop = elite_indices.to(pop_tensor.device)
+        elite_chromosomes_gpu = pop_tensor.index_select(0, elite_indices_on_pop).clone()
+        if elite_chromosomes_gpu.device != device:
+            elite_chromosomes_gpu = elite_chromosomes_gpu.to(device)
         
         # === 원본 자식(offspring) 생성 로직 완전 보존 ===
         num_offspring = pop_size - self.num_elites
@@ -138,8 +142,11 @@ class Evolution:
             relative_parent_indices = self.selection.pick_parents(mating_pool_objectives, num_offspring * 2)
             absolute_parent_indices = mating_pool_indices[relative_parent_indices]
             
-            # CPU의 population_tensor에서 부모를 선택하고, 즉시 GPU로 이동
-            parents_gpu = self.population.population_tensor[absolute_parent_indices.to('cpu')].to(device)
+            # 부모 인덱스를 population 텐서 디바이스로 정렬 후 슬라이스
+            abs_parent_idx_on_pop = absolute_parent_indices.to(pop_tensor.device)
+            parents_gpu = pop_tensor.index_select(0, abs_parent_idx_on_pop)
+            if parents_gpu.device != device:
+                parents_gpu = parents_gpu.to(device)
 
             # 2c. 교차 (Crossover) - GPU In, GPU Out (원본 로직 보존)
             offspring_chromosomes_gpu = self.crossover(parents_gpu)
@@ -159,7 +166,7 @@ class Evolution:
         new_population_tensor_gpu = torch.cat([elite_chromosomes_gpu, mutated_offspring_gpu], dim=0)
         
         # === 원본 집단 업데이트 로직 완전 보존 ===
-        # GPU -> CPU로 최종 데이터 복사
+        # 새로운 세대를 population 텐서로 복사 (디바이스 간 복사 없이 가능하면 동일 디바이스에서 수행)
         self.population.population_tensor.copy_(new_population_tensor_gpu)
 
         # Store statistics

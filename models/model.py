@@ -885,6 +885,37 @@ class GATreePop:
 
         return [tree.return_next_idx() for tree in self.population]
 
+    def move_to(self, device: str):
+        """
+        population_tensor를 지정한 디바이스로 이동시키고, 모든 GATree 객체의 텐서 뷰를
+        새 텐서로 재바인딩합니다. 디바이스 전환 시 뷰 무효화 문제를 해결합니다.
+
+        Args:
+            device: 'cuda:0' 또는 'cpu' 등 이동할 디바이스 문자열
+        """
+        # 이미 동일 디바이스면 작업 불필요
+        if str(self.population_tensor.device) == str(device):
+            return
+
+        # 텐서를 새 디바이스로 이동 (새 텐서가 생성됨에 유의)
+        self.population_tensor = self.population_tensor.to(device)
+
+        # 각 트리의 data 뷰를 새 텐서 슬라이스로 재바인딩
+        new_population = []
+        for i in range(self.pop_size):
+            tree_data_view = self.population_tensor[i]
+            tree = GATree(
+                self.max_nodes, self.max_depth, self.max_children,
+                self.feature_num, self.feature_comparison_map, self.feature_bool,
+                self.all_features, data_tensor=tree_data_view
+            )
+            tree.initialized = True
+            tree.set_next_idx()
+            new_population.append(tree)
+
+        self.population = new_population
+        self.initialized = True
+
     def build_adjacency_dicts_cuda(self):
         """
         CUDA 병렬 처리를 사용하여 모든 트리의 인접 리스트를 재생성합니다.
