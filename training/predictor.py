@@ -61,7 +61,21 @@ def build_adjacency_list_cuda(population: GATreePop,
     # Step 2: Fill the flat child indices array
     indices = torch.empty(int(total_children), dtype=torch.int32, device=trees.device)
     if indices.numel() > 0:
-        gatree_cuda.fill_child_indices(trees, flat_offsets, indices, 512, sort_children)
+        # Choose a safe max_children for the fill kernel:
+        # - If strict_overflow is False, allow arbitrarily large branching by using the
+        #   observed maximum per-parent degree so sorting buffers are sized safely.
+        # - Otherwise, keep the conservative 512 default.
+        if not strict_overflow:
+            # Compute max degree across all parents from the CSR offsets
+            degs = flat_offsets[1:] - flat_offsets[:-1]
+            max_deg = int(degs.max().item()) if degs.numel() > 0 else 0
+            max_children_for_fill = max(1, max_deg)
+        else:
+            max_children_for_fill = 512
+
+        gatree_cuda.fill_child_indices(
+            trees, flat_offsets, indices, max_children_for_fill, sort_children
+        )
 
     # Sanity: flat arrays must agree in total length
     if int(flat_offsets[-1].item()) != int(indices.numel()):

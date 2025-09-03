@@ -1,12 +1,9 @@
 # training/trading_env.py
 # Unified TradingEnvironment with complete original logic + multi-objective capabilities
 
-import os
 import torch
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from copy import deepcopy
 from typing import List, Dict, Tuple, Optional
 
 from models.model import GATreePop
@@ -15,18 +12,10 @@ from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
-from training.predictor import build_adjacency_list_cuda, predict_population_cuda
-
+ 
 # ##############################################################################
 #           통합 거래 환경 및 시뮬레이션 (원본 로직 완전 보존 + 다중 목표 기능)
 # ##############################################################################
-
-# 포지션 정수 -> 문자열 변환 맵
-INT_TO_POSITION_MAP = {
-    0: 'HOLD',
-    1: 'SHORT',
-    2: 'LONG'
-}
 
 
 class TradingEnvironment:
@@ -927,133 +916,3 @@ class TradingEnvironment:
     def get_minimization_flags(self) -> List[bool]:
         """각 목표의 최소화 플래그 반환"""
         return self.minimize_objectives.copy()
-
-
-# ##############################################################################
-#           통합 피트니스 함수 (다중 목표 지원)
-# ##############################################################################
-
-torch.set_grad_enabled(False)
-
-def fitness_fn(
-    population: GATreePop,
-    data: pd.DataFrame,
-    all_feature_names: list,
-    adj_offsets: torch.Tensor,
-    adj_indices: torch.Tensor,
-    start_data_cnt: int,
-    stop_data_cnt: int,
-    device: str,
-    evaluation_config: dict
-) -> np.ndarray:
-    """
-    통합 피트니스 함수 - 다중 목표 벡터 반환
-    
-    기존의 모든 거래 로직을 보존하면서 다중 목표 메트릭을 반환합니다.
-    """
-    env_config = evaluation_config['simulation_env']
-    objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {
-        'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
-        'minimize': [False, True, False, False],
-        'risk_free_rate': 0.0,
-        'volatility_lookback': 30
-    }))
-    
-    # Create unified trading environment
-    environment = TradingEnvironment(
-        chromosomes_size=population.pop_size,
-        env_config=env_config,
-        objectives_config=objectives_config,
-        device=device
-    )
-    
-    # 원본 시뮬레이션 루프 완전 보존
-    pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Multi-Objective Fitness Simulation")
-    feature_data = data[all_feature_names]
-
-    for entry_index in pbar:
-        market_data_row = data.iloc[entry_index]
-        next_open_price = torch.tensor(data['Open'].iloc[entry_index + 1], dtype=torch.float32, device=device)
-        feature_values_series = feature_data.iloc[entry_index]
-        
-        current_positions_str = [INT_TO_POSITION_MAP[pos.item()] for pos in environment.pos_list]
-        
-        predicted_actions = predict_population_cuda(
-            population=population,
-            feature_values=feature_values_series,
-            current_positions=current_positions_str,
-            adj_offsets=adj_offsets,
-            adj_indices=adj_indices,
-            device=device
-        )
-        
-        if predicted_actions is None:
-            raise RuntimeError("CUDA prediction failed. Check if gatree_cuda module is compiled and available.")
-            
-        environment.step(market_data_row, next_open_price, predicted_actions)
-
-    pbar.close()
-    
-    # Return multi-objective metrics
-    # Support per-window minimum_trades override for WFO
-    minimum_trades = evaluation_config.get('fitness_function', {}).get('minimum_trades', 40)
-    wfo_min_trades = evaluation_config.get('min_trades_per_window', None)
-    if wfo_min_trades is not None:
-        minimum_trades = wfo_min_trades
-        
-    objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
-    
-    return objectives
-
-
-# ##############################################################################
-#           호환성 함수들 (훈련 루프 지원)
-# ##############################################################################
-
-def generation_training(
-    data_1m: pd.DataFrame,
-    evolution,
-    skip_data_cnt: int,
-    valid_skip_data_cnt: int,
-    chromosomes_size: int,
-    gen_loop: int,
-    best_size: int,
-    elite_size: int,
-    device: str,
-    warming_step: int,
-    evaluation_config: dict,
-    output_dir: str,
-    objectives_config: Optional[dict] = None,
-    best_archive=None,
-    start_gen: int = 0
-) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
-    """
-    DEPRECATED: Use training.runner.generation_training instead.
-
-    This legacy function remains only to provide a clear error message if
-    accidentally imported. It intentionally raises to prevent stale usage.
-    """
-    raise RuntimeError(
-        "Deprecated API: training.trading_env.generation_training is removed. "
-        "Import and use training.runner.generation_training instead."
-    )
-
-
-def generation_test(
-    data_1m: pd.DataFrame,
-    population: GATreePop,
-    start_data_cnt: int,
-    end_data_cnt: int,
-    device: str,
-    evaluation_config: dict
-) -> Tuple[np.ndarray, Dict]:
-    """
-    DEPRECATED: Use training.runner.generation_test instead.
-
-    This legacy function remains only to provide a clear error message if
-    accidentally imported. It intentionally raises to prevent stale usage.
-    """
-    raise RuntimeError(
-        "Deprecated API: training.trading_env.generation_test is removed. "
-        "Import and use training.runner.generation_test instead."
-    )

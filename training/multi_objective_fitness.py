@@ -60,13 +60,13 @@ class MultiObjectiveFitnessEvaluator:
         Returns:
             objectives: [population_size, num_objectives] array of objective values
         """
-        from .trading_env import fitness_fn
+        # Use the simulator's wrapper to avoid legacy dependency on trading_env.fitness_fn
+        from fitness.simulator import fitness_fn
         return fitness_fn(
             population=population,
             data=data,
             all_feature_names=all_feature_names,
-            adj_offsets=adj_offsets,
-            adj_indices=adj_indices,
+            # Simulator builds adjacency internally; passed adj_* are unused in wrapper
             start_data_cnt=start_data_cnt,
             stop_data_cnt=stop_data_cnt,
             device=device,
