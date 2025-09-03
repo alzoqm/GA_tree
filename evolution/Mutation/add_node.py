@@ -1,6 +1,7 @@
 # evolution/Mutation/add_node.py
 # CUDA-accelerated batch AddNodeMutation implementation
 import torch
+import logging
 from typing import Dict, Any
 
 from .base import BaseMutation
@@ -218,7 +219,6 @@ class AddNodeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
-                print('complete add node mutation')
         except Exception as e:
             import traceback
             

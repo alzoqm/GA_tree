@@ -1,6 +1,7 @@
 # evolution/Mutation/delete_node.py
 # CUDA-accelerated batch DeleteNodeMutation implementation (one-shot)
 import torch
+import logging
 from typing import Dict, Any
 from .base import BaseMutation
 
@@ -92,7 +93,6 @@ class DeleteNodeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
-                print('complete delete node mutation')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after delete_node mutation.\n{traceback.format_exc()}")

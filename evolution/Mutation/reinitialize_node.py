@@ -2,6 +2,7 @@
 
 # evolution/Mutation/reinitialize_node.py (수정된 최종본)
 import torch
+import logging
 from .base import BaseMutation
 from .utils import _create_random_action_params, _create_random_decision_params
 from typing import Dict, Any
@@ -64,7 +65,6 @@ class ReinitializeNodeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and chromosomes.is_cuda:
                 gatree_cuda.validate_trees(chromosomes.contiguous())
-                print('complete reinit mutation')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after reinit mutation.\n{traceback.format_exc()}")

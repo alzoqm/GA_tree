@@ -484,7 +484,8 @@ class WalkForwardOptimizer:
         
         # WFO tracking
         self.window_results = []  # Per-window results storage
-        self.candidate_archives = {}  # Per-candidate cross-window results
+        self.candidate_archives = {}  # Per-candidate cross-window results (objectives by window)
+        self.candidate_chromosomes = {}  # candidate_id -> torch.Tensor (chromosome)
         
     def _validate_config(self):
         """Validate WFO configuration parameters."""
@@ -558,8 +559,9 @@ class WalkForwardOptimizer:
             
         return windows
     
-    def record_window_result(self, window_idx: int, candidate_id: int, 
-                           oos_objectives: np.ndarray):
+    def record_window_result(self, window_idx: int, candidate_id: int,
+                             oos_objectives: np.ndarray,
+                             chromosome: Optional[torch.Tensor] = None):
         """
         Record OOS results for a candidate in a specific window.
         
@@ -567,11 +569,25 @@ class WalkForwardOptimizer:
             window_idx: Window index
             candidate_id: Candidate identifier 
             oos_objectives: OOS objective vector for this candidate
+            chromosome: Optional chromosome tensor to store for reconstruction
         """
         if candidate_id not in self.candidate_archives:
             self.candidate_archives[candidate_id] = {}
             
         self.candidate_archives[candidate_id][window_idx] = oos_objectives.copy()
+
+        # Store chromosome once (CPU copy) for later reconstruction
+        if chromosome is not None and candidate_id not in self.candidate_chromosomes:
+            try:
+                # Store on CPU to avoid GPU memory growth
+                self.candidate_chromosomes[candidate_id] = chromosome.detach().to('cpu').clone()
+            except Exception:
+                # Best-effort; ignore if tensor-like not provided
+                pass
+
+    def get_candidate_chromosome(self, candidate_id: int) -> Optional[torch.Tensor]:
+        """Return stored chromosome tensor for a candidate if available."""
+        return self.candidate_chromosomes.get(candidate_id, None)
     
     def aggregate_candidate_objectives(self, candidate_id: int) -> np.ndarray:
         """

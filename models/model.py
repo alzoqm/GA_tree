@@ -1,6 +1,7 @@
 # --- START OF FILE models/model.py ---
 
 import torch
+import logging
 import random
 import os
 import webbrowser
@@ -854,7 +855,7 @@ class GATreePop:
         # Validate population after reorganization
         try:
             gatree_cuda.validate_trees(self.population_tensor.contiguous())
-            print('complete reoranize nodes')
+            logging.debug('reorganize_population completed')
         except Exception as e:
             raise RuntimeError(f"validate_trees failed after reorganize_population: {e}")
         

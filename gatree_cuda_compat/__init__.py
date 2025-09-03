@@ -18,6 +18,15 @@ try:
     count_and_create_offsets = gatree_predict.count_and_create_offsets
     fill_child_indices = gatree_predict.fill_child_indices
     validate_adjacency = gatree_predict.validate_adjacency
+    # [추가] 인접리스트 빌더 노출
+    if hasattr(gatree_predict, 'build_adjacency_dicts'):
+        build_adjacency_dicts = gatree_predict.build_adjacency_dicts
+    else:
+        build_adjacency_dicts = None
+    if hasattr(gatree_predict, 'build_adjacency_dicts_optimized'):
+        build_adjacency_dicts_optimized = gatree_predict.build_adjacency_dicts_optimized
+    else:
+        build_adjacency_dicts_optimized = None
     
     # Mutation functions (from gatree_mutation)
     node_param_mutate = gatree_mutation.node_param_mutate
@@ -46,6 +55,11 @@ try:
     validate_trees = gatree_utils.validate_trees
     init_population_cuda = gatree_utils.init_population_cuda
     reorganize_population_with_arrays = gatree_utils.reorganize_population_with_arrays
+    # [추가] 단순 재배열 함수 노출
+    if hasattr(gatree_utils, 'reorganize_population'):
+        reorganize_population = gatree_utils.reorganize_population
+    else:
+        reorganize_population = None
     
     # Selection functions (from gatree_selection)
     ppts_select_elites = gatree_selection.ppts_select_elites
@@ -65,6 +79,8 @@ except ImportError as e:
     count_and_create_offsets = None
     fill_child_indices = None
     validate_adjacency = None
+    build_adjacency_dicts = None
+    build_adjacency_dicts_optimized = None
     node_param_mutate = None
     add_subtrees_batch = None
     delete_subtrees_batch = None
@@ -87,5 +103,6 @@ except ImportError as e:
     validate_trees = None
     init_population_cuda = None
     reorganize_population_with_arrays = None
+    reorganize_population = None
     ppts_select_elites = None
     ppts_pick_parents = None

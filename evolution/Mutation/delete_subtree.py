@@ -1,5 +1,6 @@
 # evolution/Mutation/delete_subtree.py
 import torch
+import logging
 from typing import Dict, Any
 from .base import BaseMutation
 from models.constants import (
@@ -109,7 +110,6 @@ class DeleteSubtreeMutation(BaseMutation):
         try:
             if gatree_cuda is not None and trees.is_cuda:
                 gatree_cuda.validate_trees(trees.contiguous())
-                print('complete delete subtree mutation')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after delete_subtree mutation.\n{traceback.format_exc()}")
