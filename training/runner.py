@@ -132,7 +132,8 @@ def generation_training(
         torch.save(checkpoint_data, checkpoint_path)
 
         evolution.evolve(train_objectives_tensor)
-        population.population_tensor = population.population_tensor.to(device)
+        # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
+        population.move_to(device)
         population.reorganize_nodes()
         print()
 
