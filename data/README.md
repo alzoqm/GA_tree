@@ -25,6 +25,8 @@ GA Tree 학습/평가를 위한 데이터 수집과 피처 엔지니어링 유�
     - 원본 OHLCV(+옵션 `fundingRate`)를 기준 타임프레임으로 리샘플하고, 각 타임프레임의 피처를 계산하여 `merge_asof`로 정렬/병합.
   - `_generate_model_config_from_features(all_generated_cols, classification_config)`:
     - YAML 기반 분류 템플릿으로 생성된 피처명을 분류하여 `feature_num`(숫자 비교 범위), `feature_comparison_map`(피처-피처 비교), `feature_bool`(불리언 피처)로 구성된 설정을 반환.
+    - 분류 로직은 접두어 startswith가 아닌 경계 기반 정규식(`^키(?:_|$)`)을 사용하여 오분류를 방지하며, 타임프레임 접미사(`_5m`, `_1h`, `_4h`, `_1d`)는 매칭 시에만 제거됩니다.
+    - 카테고리 간 중복 정의 또는 다중 매칭이 발생하면 경고를 출력합니다(기본 동작은 계속 진행).
   - `run_feature_generation_from_yaml(df, timestamp_col, target_timeframes, yaml_config_path, classification_config)`:
     - 타임프레임별 피처 정의를 YAML에서 읽어 위의 생성기 호출 후, `(final_dataframe, model_config)`을 반환(모델 초기화에 바로 사용 가능).
 
