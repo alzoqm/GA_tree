@@ -79,7 +79,7 @@ __global__ void k_predict_batch(
 
     const float* tree = trees + (size_t)b * N * D;
     const int*   off  = offsets + (size_t)b * (N + 1);
-    const int*   col  = children;
+    const int*   col  = children + (size_t)b * Emax;
     float*       rout = results + (size_t)b * 4;
     int*         q    = bfs_q   + (size_t)b * N;
     int*         vis  = visited + (size_t)b * N;

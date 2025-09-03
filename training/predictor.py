@@ -45,8 +45,12 @@ def build_adjacency_list_cuda(population: GATreePop,
     # Step 1: Count children and produce a single flat CSR offsets array
     # Note: offsets are laid out as (B*N+1), with tree b occupying [b*N : (b+1)*N],
     # and its end sentinel at index (b+1)*N.
+    # Count children and build CSR offsets. When strict_overflow is False,
+    # pass a very large sentinel to avoid spurious overflow flags; we will
+    # size buffers from the observed max degree instead.
+    count_limit = 512 if strict_overflow else (1 << 29)
     total_children, flat_offsets, overflow_mask = gatree_cuda.count_and_create_offsets(
-        trees, 512
+        trees, int(count_limit)
     )
 
     if strict_overflow:
