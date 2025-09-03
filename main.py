@@ -2,6 +2,7 @@
 import os
 import sys
 import yaml  # YAML 로드를 위해 추가
+from tqdm import tqdm
 import torch
 import pandas as pd
 import logging
@@ -18,7 +19,7 @@ from evolution.Mutation import (
     ChainMutation, AddNodeMutation, DeleteNodeMutation, NodeParamMutation,
     ReinitializeNodeMutation, AddSubtreeMutation, DeleteSubtreeMutation
 )
-from training.trading_env import generation_training, generation_test
+from training.runner import generation_training, generation_test
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -237,7 +238,7 @@ def main():
         logging.info("=== Walk-Forward Optimization Mode Enabled ===")
         
         # Import WFO utilities
-        from training.multi_objective_fitness import WalkForwardOptimizer
+        from training.wfo import WalkForwardOptimizer
         
         # Initialize WFO coordinator
         wfo_optimizer = WalkForwardOptimizer(wfo_cfg, eval_cfg)
@@ -256,8 +257,8 @@ def main():
         if not wfo_cfg.get('reset_population_each_window', False):
             elite_population = population  # Start with initial population
         
-        # WFO window loop
-        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(windows):
+        # WFO window loop with progress
+        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows, desc="WFO Windows")):
             logging.info(f"\n=== WFO Window {window_idx + 1}/{len(windows)} ===")
             logging.info(f"IS period: index {train_start} to {train_end} ({train_end - train_start} bars)")
             logging.info(f"OOS period: index {oos_start} to {oos_end} ({oos_end - oos_start} bars)")
