@@ -372,9 +372,10 @@ void fill_child_indices_cuda(
     int max_ints = shm_budget_bytes / (int)sizeof(int);
     if (max_ints < 2) max_ints = 2;
 
-    int sort_buf = next_pow2_int(std::max(1, max_children));
+    // If sorting is disabled, reserve minimal shared memory for sort buffer.
+    int sort_buf = sort_children ? next_pow2_int(std::max(1, max_children)) : 1;
     int sort_buf_max = max_ints - 1;
-    if (sort_buf > sort_buf_max){
+    if (sort_children && sort_buf > sort_buf_max){
         // Not enough shared memory for sorting, so disable it.
         sort_children = false;
         sort_buf = 1;
@@ -629,14 +630,21 @@ std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
     // Use existing CSR building functions for consistency
     long total_children;
     torch::Tensor offsets_flat, overflow_mask;
-    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, 1000); // high max_children limit
+    // Use a very large limit to avoid spurious overflow when we only need CSR
+    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, (1 << 29));
     
     // Allocate children indices
     auto children = torch::empty({(long)total_children}, i32);
     
     if (total_children > 0) {
-        // Use existing fill function
-        fill_child_indices_cuda(trees, offsets_flat, children, 1000, false); // no sorting needed for dict building
+        // Compute observed max degree for safe fill sizing, with sorting disabled
+        using namespace torch::indexing;
+        auto off1 = offsets_flat.index({Slice(1, torch::indexing::None)});
+        auto off0 = offsets_flat.index({Slice(0, (long)offsets_flat.size(0) - 1)});
+        auto degs = off1 - off0;
+        int max_deg = degs.numel() ? degs.max().item<int>() : 1;
+        if (max_deg < 1) max_deg = 1;
+        fill_child_indices_cuda(trees, offsets_flat, children, max_deg, false);
     }
     
     return {offsets_flat, children};
@@ -737,12 +745,18 @@ py::list build_adjacency_dicts_optimized_cuda(
     // Use existing efficient functions for memory optimization
     long total_children;
     torch::Tensor offsets_flat, overflow_mask;
-    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, 1000);
+    std::tie(total_children, offsets_flat, overflow_mask) = count_and_create_offsets_cuda(trees, (1 << 29));
     
     auto children_flat = torch::empty({(long)total_children}, i32);
     
     if (total_children > 0) {
-        fill_child_indices_cuda(trees, offsets_flat, children_flat, 1000, false);
+        using namespace torch::indexing;
+        auto off1 = offsets_flat.index({Slice(1, torch::indexing::None)});
+        auto off0 = offsets_flat.index({Slice(0, (long)offsets_flat.size(0) - 1)});
+        auto degs = off1 - off0;
+        int max_deg = degs.numel() ? degs.max().item<int>() : 1;
+        if (max_deg < 1) max_deg = 1;
+        fill_child_indices_cuda(trees, offsets_flat, children_flat, max_deg, false);
     }
     
     // Convert tensors to CPU for processing
