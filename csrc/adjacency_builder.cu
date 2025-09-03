@@ -12,9 +12,9 @@
 #include <limits>
 
 // Macro for checking CUDA errors. This is a common utility for debugging CUDA code.
-#define CUDA_CHECK_ERRORS() 
-  do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { 
-    printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); 
+#define CUDA_CHECK_ERRORS() \
+  do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { \
+    printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
   }} while (0)
 
 // Utility device functions for type conversion and pointer arithmetic.

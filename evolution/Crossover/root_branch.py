@@ -1,5 +1,6 @@
 # evolution/Crossover/root_branch.py (수정된 최종 코드)
 import torch
+import logging
 from .base import BaseCrossover
 from typing import Tuple
 
@@ -163,7 +164,6 @@ class RootBranchCrossover(BaseCrossover):
         try:
             if gatree_cuda is not None and child_batch.is_cuda:
                 gatree_cuda.validate_trees(child_batch.contiguous())
-                print('complete root branch crossover')
         except Exception:
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after root_branch crossover.\n{traceback.format_exc()}")

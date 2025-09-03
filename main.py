@@ -347,10 +347,12 @@ def main():
             
             logging.info(f"OOS evaluation completed for {len(oos_objectives)} candidates.")
             
-            # Store OOS results for each candidate
+            # Store OOS results for each candidate (and the corresponding chromosome)
             for candidate_idx, oos_obj in enumerate(oos_objectives):
                 candidate_id = f"w{window_idx}_c{candidate_idx}"  # Unique candidate ID
-                wfo_optimizer.record_window_result(window_idx, candidate_id, oos_obj)
+                # Track chromosome tensor for later reconstruction of best individuals
+                candidate_chrom = window_best_chromosomes[candidate_idx]
+                wfo_optimizer.record_window_result(window_idx, candidate_id, oos_obj, chromosome=candidate_chrom)
             
             # Log window summary
             logging.info("=== Window OOS Summary ===")
@@ -414,12 +416,19 @@ def main():
                     logging.info(f"{obj_name}: {obj_val:.4f} {direction} | ", end="")
                 logging.info("")
             
-            # Prepare final best chromosomes (from top-ranked candidates)
-            # Note: This is a simplified approach - in practice, you'd want to 
-            # reconstruct the actual chromosome tensors from the candidate IDs
-            best_chromosomes = None  # Placeholder - would need chromosome reconstruction
-            best_metrics = aggregated_objectives[:min(len(aggregated_objectives), 
-                                                   ga_cfg['evolution_loop']['best_chromosome_pool_size'])]
+            # Prepare final best chromosomes (reconstruct from stored candidate tensors)
+            top_k = min(len(aggregated_objectives), ga_cfg['evolution_loop']['best_chromosome_pool_size'])
+            reconstructed = []
+            for rank_idx in range(top_k):
+                cid = ranked_candidate_ids[rank_idx]
+                chrom = wfo_optimizer.get_candidate_chromosome(cid)
+                if chrom is not None:
+                    reconstructed.append(chrom)
+            if reconstructed:
+                best_chromosomes = torch.stack(reconstructed, dim=0)
+            else:
+                best_chromosomes = None
+            best_metrics = aggregated_objectives[:top_k]
             
         logging.info("Walk-Forward Optimization completed.")
         
@@ -463,8 +472,8 @@ def main():
     if best_chromosomes is None or (hasattr(best_chromosomes, '__len__') and len(best_chromosomes) == 0):
         logging.warning("No best chromosomes were found during training. Skipping final save and test.")
     elif wfo_cfg.get('enabled', False):
-        # === WFO Mode: Save aggregated results ===
-        logging.info("=== WFO Mode: Saving aggregated results ===")
+        # === WFO Mode: Save aggregated results and best population ===
+        logging.info("=== WFO Mode: Saving aggregated results & best model ===")
         
         # Save WFO results summary
         wfo_results_path = os.path.join(env_cfg['output_dir'], "wfo_results.json")
@@ -481,8 +490,25 @@ def main():
             json.dump(wfo_results, f, indent=2)
         
         logging.info(f"WFO results saved to '{wfo_results_path}'")
-        logging.info("Note: Individual chromosome reconstruction not implemented in this version.")
-        logging.info("The WFO results contain aggregated performance metrics across all windows.")
+
+        # Save the top-1 best model if reconstructed
+        if best_chromosomes is not None and len(best_chromosomes) > 0:
+            top1 = best_chromosomes[:1]
+            logging.info(f"Saving top-1 WFO model to '{best_population_path}'")
+            best_population = GATreePop(
+                pop_size=1,
+                max_nodes=ga_cfg['population']['max_nodes'],
+                max_depth=ga_cfg['population']['max_depth'],
+                max_children=ga_cfg['population']['max_children'],
+                **model_config
+            )
+            best_population.population_tensor[:1].copy_(top1)
+            best_population.set_next_idx()
+            best_population.initialized = True
+            best_population.save(best_population_path)
+            logging.info("WFO best population saved successfully.")
+        else:
+            logging.warning("Could not reconstruct best chromosomes for saving in WFO mode.")
         
         # Display final summary
         if 'wfo_optimizer' in locals() and wfo_optimizer.candidate_archives:
