@@ -1,4 +1,7 @@
-// csrc/ppts_selection.cu - High-Performance PPTS Selection Implementation
+// csrc/ppts_selection.cu
+// This file contains the CUDA implementation of the Parameterless Pareto Tournament Selection (PPTS) algorithm.
+// It is designed for high-performance multi-objective selection on the GPU.
+
 #include "ppts_selection.cuh"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -7,28 +10,29 @@
 #include <cmath>
 #include <algorithm>
 
+// Macro for checking CUDA errors.
 #define CUDA_CHECK_ERRORS() \
   do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { \
     printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
   }} while (0)
 
-// Performance optimization constants
-#define MAX_TOURNAMENT_SIZE 64        // Compile-time upper bound for k
-#define MAX_OBJECTIVES 16            // Compile-time upper bound for M  
+// Compile-time constants for performance optimization.
+#define MAX_TOURNAMENT_SIZE 64        // Maximum tournament size
+#define MAX_OBJECTIVES 16            // Maximum number of objectives
 #define WARP_SIZE 32
 #define MAX_SHARED_MEMORY (48 * 1024) // 48KB shared memory budget
 
-// Utility functions matching existing codebase style
+// Utility functions for type conversion and index validation.
 __device__ __forceinline__ int   f2i(float x) { return __float2int_rn(x); }
 __device__ __forceinline__ float i2f(int x) { return static_cast<float>(x); }
 __device__ __forceinline__ bool  valid_idx(int idx, int N) { return idx >= 0 && idx < N; }
 
-// Fast integer ceil(log2(x)) for tournament size computation
+// Computes ceil(log2(x)) for tournament size calculation.
 __device__ __forceinline__ int ceil_log2(int x) {
     return x <= 1 ? 1 : 32 - __clz(x - 1);
 }
 
-// Warp-level reduction for computing minimum across warp
+// Reduces a value across a warp to find the minimum.
 __device__ __forceinline__ float warp_reduce_min(float val) {
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val = fminf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
@@ -36,15 +40,12 @@ __device__ __forceinline__ float warp_reduce_min(float val) {
     return val;
 }
 
-// Warp-level reduction for computing median (approximated via sorting network)
+// Approximates the median of a warp using a sorting network.
 __device__ __forceinline__ float warp_median_approx(float val, int valid_count) {
-    // Simple approximation: return value at median position
-    // For small k, this provides sufficient approximation for MAD computation
     float vals[MAX_TOURNAMENT_SIZE];
     vals[threadIdx.x] = val;
     __syncwarp();
     
-    // Bubble sort for small arrays (k << 64)
     for (int i = 0; i < valid_count - 1; i++) {
         for (int j = 0; j < valid_count - i - 1; j++) {
             if (vals[j] > vals[j + 1]) {
@@ -58,47 +59,35 @@ __device__ __forceinline__ float warp_median_approx(float val, int valid_count) 
 }
 
 /**
- * Fused high-performance PPTS tournament kernel
- * 
- * Each block processes one tournament with the following fused operations:
- * 1. Load tournament objectives to shared memory
- * 2. Compute Pareto dominance relationships  
- * 3. Apply ε-lexicase tie-breaking if needed
- * 4. Select final winner with random tie-breaking
- * 
- * Shared memory layout:
- * - objectives: [k, M] tournament objectives
- * - dominance_mask: [k] non-dominated flags
- * - survivors: [k] ε-lexicase survivors  
- * - temp_storage: temporary arrays for reductions
+ * @brief A fused CUDA kernel for performing PPTS tournaments.
+ *
+ * Each block of this kernel processes one tournament, performing the following steps:
+ * 1. Load tournament objectives into shared memory.
+ * 2. Compute Pareto dominance relationships.
+ * 3. Apply ε-lexicase tie-breaking if necessary.
+ * 4. Select the final winner, with random tie-breaking if needed.
  */
 __global__ void k_ppts_fused_tournaments(
     const float* __restrict__ objectives,     // [N, M] population objectives
     int64_t* __restrict__ winner_indices,    // [B] output winner indices  
     const int32_t* __restrict__ tournament_indices, // [B, k] tournament participants
-    int N,                                   // Population size
-    int M,                                   // Number of objectives  
-    int k,                                   // Tournament size
-    int64_t rng_seed                        // Random seed
+    int N, int M, int k, int64_t rng_seed
 ) {
-    const int b = blockIdx.x;               // Tournament index
-    const int tid = threadIdx.x;            // Thread within tournament
+    const int b = blockIdx.x;
+    const int tid = threadIdx.x;
     
-    // Shared memory allocation - maximize usage for performance
     extern __shared__ char shared_mem[];
-    float* s_objectives = (float*)shared_mem;                    // [k, M]
-    bool* s_dominance_mask = (bool*)(s_objectives + k * M);     // [k]
-    bool* s_survivors = (bool*)(s_dominance_mask + k);          // [k] 
-    float* s_temp = (float*)(s_survivors + k);                  // [M] temp space
+    float* s_objectives = (float*)shared_mem;
+    bool* s_dominance_mask = (bool*)(s_objectives + k * M);
+    bool* s_survivors = (bool*)(s_dominance_mask + k);
+    float* s_temp = (float*)(s_survivors + k);
     
-    // Initialize curand state for this tournament
     curandState rng_state;
     if (tid == 0) {
         curand_init(rng_seed + b, 0, 0, &rng_state);
     }
     __syncthreads();
     
-    // Load tournament objectives to shared memory (coalesced access)
     if (tid < k) {
         const int32_t participant = tournament_indices[b * k + tid];
         if (valid_idx(participant, N)) {
@@ -106,7 +95,6 @@ __global__ void k_ppts_fused_tournaments(
                 s_objectives[tid * M + m] = objectives[participant * M + m];
             }
         } else {
-            // Invalid participant - set to worst possible values
             for (int m = 0; m < M; m++) {
                 s_objectives[tid * M + m] = INFINITY;
             }
@@ -114,22 +102,15 @@ __global__ void k_ppts_fused_tournaments(
     }
     __syncthreads();
     
-    // Phase 1: Compute Pareto dominance relationships
     if (tid < k) {
-        s_dominance_mask[tid] = true; // Assume non-dominated initially
-        
-        // Check if this individual is dominated by any other
+        s_dominance_mask[tid] = true;
         for (int j = 0; j < k; j++) {
             if (j == tid) continue;
-            
             bool j_dominates_i = true;
             bool j_strictly_better = false;
-            
-            // Check dominance: j dominates i if j <= i in all objectives AND j < i in at least one
             for (int m = 0; m < M; m++) {
                 float i_val = s_objectives[tid * M + m];
                 float j_val = s_objectives[j * M + m];
-                
                 if (j_val > i_val) {
                     j_dominates_i = false;
                     break;
@@ -138,7 +119,6 @@ __global__ void k_ppts_fused_tournaments(
                     j_strictly_better = true;
                 }
             }
-            
             if (j_dominates_i && j_strictly_better) {
                 s_dominance_mask[tid] = false;
                 break;
@@ -147,7 +127,6 @@ __global__ void k_ppts_fused_tournaments(
     }
     __syncthreads();
     
-    // Count non-dominated individuals
     __shared__ int non_dominated_count;
     if (tid == 0) {
         non_dominated_count = 0;
@@ -157,9 +136,7 @@ __global__ void k_ppts_fused_tournaments(
     }
     __syncthreads();
     
-    // Handle simple cases
     if (non_dominated_count == 0) {
-        // No non-dominated individuals - random selection
         if (tid == 0) {
             int winner_pos = curand(&rng_state) % k;
             winner_indices[b] = tournament_indices[b * k + winner_pos];
@@ -168,7 +145,6 @@ __global__ void k_ppts_fused_tournaments(
     }
     
     if (non_dominated_count == 1) {
-        // Exactly one non-dominated individual
         if (tid == 0) {
             for (int i = 0; i < k; i++) {
                 if (s_dominance_mask[i]) {
@@ -180,20 +156,14 @@ __global__ void k_ppts_fused_tournaments(
         return;
     }
     
-    // Phase 2: ε-lexicase tie-breaking for multiple non-dominated individuals
-    
-    // Initialize survivors as non-dominated individuals
     if (tid < k) {
         s_survivors[tid] = s_dominance_mask[tid];
     }
     __syncthreads();
     
-    // Compute epsilon values using MAD (Median Absolute Deviation) per objective
     __shared__ float s_epsilon[MAX_OBJECTIVES];
-    
     for (int m = 0; m < M; m++) {
         if (tid == 0) {
-            // Collect non-dominated values for this objective
             float values[MAX_TOURNAMENT_SIZE];
             int count = 0;
             for (int i = 0; i < k; i++) {
@@ -201,11 +171,9 @@ __global__ void k_ppts_fused_tournaments(
                     values[count++] = s_objectives[i * M + m];
                 }
             }
-            
             if (count <= 1) {
                 s_epsilon[m] = 0.0f;
             } else {
-                // Compute median
                 for (int i = 0; i < count - 1; i++) {
                     for (int j = i + 1; j < count; j++) {
                         if (values[i] > values[j]) {
@@ -216,8 +184,6 @@ __global__ void k_ppts_fused_tournaments(
                     }
                 }
                 float median = values[count / 2];
-                
-                // Compute MAD
                 for (int i = 0; i < count; i++) {
                     values[i] = fabsf(values[i] - median);
                 }
@@ -230,20 +196,17 @@ __global__ void k_ppts_fused_tournaments(
                         }
                     }
                 }
-                s_epsilon[m] = values[count / 2]; // MAD as epsilon
+                s_epsilon[m] = values[count / 2];
             }
         }
     }
     __syncthreads();
     
-    // Random objective ordering for lexicase
     __shared__ int obj_order[MAX_OBJECTIVES];
     if (tid == 0) {
-        // Initialize objective order
         for (int m = 0; m < M; m++) {
             obj_order[m] = m;
         }
-        // Fisher-Yates shuffle
         for (int i = M - 1; i > 0; i--) {
             int j = curand(&rng_state) % (i + 1);
             int temp = obj_order[i];
@@ -253,14 +216,10 @@ __global__ void k_ppts_fused_tournaments(
     }
     __syncthreads();
     
-    // Apply ε-lexicase filtering
     for (int obj_idx = 0; obj_idx < M; obj_idx++) {
         __shared__ int survivor_count;
         __shared__ float min_obj_val;
-        
         int current_obj = obj_order[obj_idx];
-        
-        // Count current survivors and find minimum value
         if (tid == 0) {
             survivor_count = 0;
             min_obj_val = INFINITY;
@@ -272,10 +231,7 @@ __global__ void k_ppts_fused_tournaments(
             }
         }
         __syncthreads();
-        
-        if (survivor_count <= 1) break; // Done if one or fewer survivors
-        
-        // Filter survivors within epsilon threshold
+        if (survivor_count <= 1) break;
         float threshold = min_obj_val + s_epsilon[current_obj];
         if (tid < k && s_survivors[tid]) {
             if (s_objectives[tid * M + current_obj] > threshold) {
@@ -285,22 +241,18 @@ __global__ void k_ppts_fused_tournaments(
         __syncthreads();
     }
     
-    // Final random selection among remaining survivors
     if (tid == 0) {
         int survivor_indices[MAX_TOURNAMENT_SIZE];
         int survivor_count = 0;
-        
         for (int i = 0; i < k; i++) {
             if (s_survivors[i]) {
                 survivor_indices[survivor_count++] = i;
             }
         }
-        
         if (survivor_count > 0) {
             int chosen_idx = survivor_indices[curand(&rng_state) % survivor_count];
             winner_indices[b] = tournament_indices[b * k + chosen_idx];
         } else {
-            // Fallback: random among non-dominated
             int non_dom_indices[MAX_TOURNAMENT_SIZE];
             int non_dom_count = 0;
             for (int i = 0; i < k; i++) {
@@ -315,29 +267,22 @@ __global__ void k_ppts_fused_tournaments(
 }
 
 /**
- * Tournament index sampling kernel for pre-generating tournament participants
+ * @brief A kernel for pre-generating tournament participants.
  */
 __global__ void k_sample_tournament_indices(
-    int32_t* __restrict__ tournament_indices,  // [B, k] output indices
-    int N,                                     // Population size
-    int k,                                     // Tournament size  
-    int num_tournaments,                       // Number of tournaments
-    int64_t rng_seed                          // Random seed
+    int32_t* __restrict__ tournament_indices, int N, int k, int num_tournaments, int64_t rng_seed
 ) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= num_tournaments) return;
-    
     curandState rng_state;
     curand_init(rng_seed, b, 0, &rng_state);
-    
-    // Sample k participants for this tournament
     for (int i = 0; i < k; i++) {
         tournament_indices[b * k + i] = curand(&rng_state) % N;
     }
 }
 
 /**
- * Host launcher for fused PPTS tournaments
+ * @brief The host launcher for the fused PPTS tournament kernel.
  */
 void launch_ppts_tournaments_kernel(
     const float* objectives,
@@ -347,14 +292,10 @@ void launch_ppts_tournaments_kernel(
     int64_t rng_seed,
     cudaStream_t stream
 ) {
-    // Validate kernel parameters
     if (k > MAX_TOURNAMENT_SIZE || M > MAX_OBJECTIVES) {
-        printf("PPTS kernel error: k=%d > MAX_TOURNAMENT_SIZE=%d or M=%d > MAX_OBJECTIVES=%d\n", 
-               k, MAX_TOURNAMENT_SIZE, M, MAX_OBJECTIVES);
+        printf("PPTS kernel error: k=%d > MAX_TOURNAMENT_SIZE=%d or M=%d > MAX_OBJECTIVES=%d\n", k, MAX_TOURNAMENT_SIZE, M, MAX_OBJECTIVES);
         return;
     }
-    
-    // Calculate shared memory requirements
     size_t shared_mem_size = 
         k * M * sizeof(float) +      // s_objectives
         k * sizeof(bool) +           // s_dominance_mask  
@@ -367,7 +308,6 @@ void launch_ppts_tournaments_kernel(
         return;
     }
     
-    // Launch configuration: one block per tournament
     dim3 grid(num_tournaments);
     dim3 block(std::min(k, 256)); // Use up to 256 threads per block
     
@@ -379,31 +319,27 @@ void launch_ppts_tournaments_kernel(
 }
 
 /**
- * Compute optimal chunk size based on available GPU memory
+ * @brief Computes the optimal chunk size based on available GPU memory.
  */
 int compute_optimal_chunk_size(int N, int M, int k, int num_tournaments) {
-    // Query available GPU memory
     size_t free_bytes, total_bytes;
     cudaMemGetInfo(&free_bytes, &total_bytes);
     
-    // Estimate memory usage per tournament
     size_t mem_per_tournament = 
         k * M * sizeof(float) +           // objectives in shared mem
         k * sizeof(int32_t) +            // tournament indices
         sizeof(int64_t);                 // winner index
         
-    // Use 80% of available memory to leave headroom
     size_t usable_memory = (free_bytes * 4) / 5;
     int max_chunk_size = static_cast<int>(usable_memory / mem_per_tournament);
     
-    // Clamp to reasonable bounds
     max_chunk_size = std::max(1024, std::min(max_chunk_size, 65536));
     
     return std::min(max_chunk_size, num_tournaments);
 }
 
 /**
- * Elite selection implementation with memory optimization
+ * @brief The CUDA implementation for elite selection.
  */
 torch::Tensor ppts_select_elites_cuda(
     const torch::Tensor& objectives,
@@ -411,7 +347,6 @@ torch::Tensor ppts_select_elites_cuda(
     int64_t chunk_size,
     int64_t rng_seed
 ) {
-    // Input validation
     TORCH_CHECK(objectives.is_cuda() && objectives.dtype() == torch::kFloat32,
                 "objectives must be float32 CUDA tensor");
     TORCH_CHECK(objectives.dim() == 2, "objectives must be [N, M] tensor");
@@ -427,13 +362,10 @@ torch::Tensor ppts_select_elites_cuda(
         return torch::arange(N, torch::TensorOptions().device(objectives.device()).dtype(torch::kInt64));
     }
     
-    // Tournament size: larger for elites (higher selection pressure)
     const int k = std::min(static_cast<int>(std::max(2, static_cast<int>(std::ceil(std::log2(N))) * 2)), N);
     
-    // Oversample to ensure uniqueness after deduplication
     const int num_tournaments = num_elites * 3;
     
-    // Compute chunk size if not specified
     if (chunk_size <= 0) {
         chunk_size = compute_optimal_chunk_size(N, M, k, num_tournaments);
     }
@@ -442,17 +374,14 @@ torch::Tensor ppts_select_elites_cuda(
     auto int64_opts = torch::TensorOptions().device(device).dtype(torch::kInt64);
     auto int32_opts = torch::TensorOptions().device(device).dtype(torch::kInt32);
     
-    // Pre-allocate output tensors
     auto all_winners = torch::empty({num_tournaments}, int64_opts);
     
-    // Process tournaments in chunks for memory efficiency
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     
     for (int start = 0; start < num_tournaments; start += chunk_size) {
         const int end = std::min(start + static_cast<int>(chunk_size), num_tournaments);
         const int current_chunk_size = end - start;
         
-        // Sample tournament indices
         auto tournament_indices = torch::empty({current_chunk_size, k}, int32_opts);
         
         dim3 sample_grid((current_chunk_size + 255) / 256);
@@ -462,7 +391,6 @@ torch::Tensor ppts_select_elites_cuda(
             tournament_indices.data_ptr<int32_t>(), N, k, current_chunk_size, rng_seed + start
         );
         
-        // Run tournaments
         launch_ppts_tournaments_kernel(
             objectives.data_ptr<float>(),
             all_winners.data_ptr<int64_t>() + start,
@@ -471,7 +399,6 @@ torch::Tensor ppts_select_elites_cuda(
         );
     }
     
-    // Deduplicate winners using sort + compact approach
     auto sort_result = torch::sort(all_winners);
     auto sorted_winners = std::get<0>(sort_result);
     auto unique_mask = torch::ones_like(sorted_winners, torch::TensorOptions().dtype(torch::kBool));
@@ -485,7 +412,6 @@ torch::Tensor ppts_select_elites_cuda(
         return unique_winners.slice(0, 0, num_elites);
     }
     
-    // If insufficient unique winners, run additional tournaments
     const int needed = num_elites - unique_winners.size(0);
     const int additional_tournaments = needed * 2;
     
@@ -501,19 +427,15 @@ torch::Tensor ppts_select_elites_cuda(
         dim3 sample_block(256);
         
         k_sample_tournament_indices<<<sample_grid, sample_block, 0, stream>>>(
-            tournament_indices.data_ptr<int32_t>(), N, k, current_chunk_size, 
-            rng_seed + num_tournaments + start
+            tournament_indices.data_ptr<int32_t>(), N, k, current_chunk_size, rng_seed + num_tournaments + start
         );
         
         launch_ppts_tournaments_kernel(
-            objectives.data_ptr<float>(),
-            additional_winners.data_ptr<int64_t>() + start,
-            tournament_indices.data_ptr<int32_t>(),
-            N, M, current_chunk_size, k, rng_seed + num_tournaments + start, stream
+            objectives.data_ptr<float>(), additional_winners.data_ptr<int64_t>() + start,
+            tournament_indices.data_ptr<int32_t>(), N, M, current_chunk_size, k, rng_seed + num_tournaments + start, stream
         );
     }
     
-    // Combine and deduplicate
     auto combined = torch::cat({unique_winners, additional_winners});
     auto combined_sort_result = torch::sort(combined);
     auto sorted_combined = std::get<0>(combined_sort_result);
@@ -528,7 +450,6 @@ torch::Tensor ppts_select_elites_cuda(
         return final_unique.slice(0, 0, num_elites);
     }
     
-    // Fill remaining deterministically if still insufficient
     auto remaining = torch::arange(N, int64_opts);
     auto selected_mask = torch::zeros({N}, torch::TensorOptions().device(device).dtype(torch::kBool));
     selected_mask.index_put_({final_unique}, true);
@@ -544,7 +465,7 @@ torch::Tensor ppts_select_elites_cuda(
 }
 
 /**
- * Parent selection implementation (allows duplicates)
+ * @brief The CUDA implementation for parent selection.
  */
 torch::Tensor ppts_pick_parents_cuda(
     const torch::Tensor& objectives,
@@ -552,7 +473,6 @@ torch::Tensor ppts_pick_parents_cuda(
     int64_t chunk_size,
     int64_t rng_seed
 ) {
-    // Input validation
     TORCH_CHECK(objectives.is_cuda() && objectives.dtype() == torch::kFloat32,
                 "objectives must be float32 CUDA tensor");
     TORCH_CHECK(objectives.dim() == 2, "objectives must be [N, M] tensor");
@@ -565,10 +485,8 @@ torch::Tensor ppts_pick_parents_cuda(
         return torch::empty({0}, torch::TensorOptions().device(objectives.device()).dtype(torch::kInt64));
     }
     
-    // Tournament size: standard size for parent selection
     const int k = std::min(static_cast<int>(std::max(2, static_cast<int>(std::ceil(std::log2(N))))), N);
     
-    // Compute chunk size if not specified
     if (chunk_size <= 0) {
         chunk_size = compute_optimal_chunk_size(N, M, k, num_parents);
     }
@@ -579,14 +497,12 @@ torch::Tensor ppts_pick_parents_cuda(
     
     auto parent_indices = torch::empty({num_parents}, int64_opts);
     
-    // Process tournaments in chunks
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     
     for (int start = 0; start < num_parents; start += chunk_size) {
         const int end = std::min(start + static_cast<int>(chunk_size), static_cast<int>(num_parents));
         const int current_chunk_size = end - start;
         
-        // Sample tournament indices
         auto tournament_indices = torch::empty({current_chunk_size, k}, int32_opts);
         
         dim3 sample_grid((current_chunk_size + 255) / 256);
@@ -596,12 +512,9 @@ torch::Tensor ppts_pick_parents_cuda(
             tournament_indices.data_ptr<int32_t>(), N, k, current_chunk_size, rng_seed + start
         );
         
-        // Run tournaments
         launch_ppts_tournaments_kernel(
-            objectives.data_ptr<float>(),
-            parent_indices.data_ptr<int64_t>() + start,
-            tournament_indices.data_ptr<int32_t>(),
-            N, M, current_chunk_size, k, rng_seed + start, stream
+            objectives.data_ptr<float>(), parent_indices.data_ptr<int64_t>() + start,
+            tournament_indices.data_ptr<int32_t>(), N, M, current_chunk_size, k, rng_seed + start, stream
         );
     }
     

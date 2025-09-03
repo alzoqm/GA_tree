@@ -1,4 +1,7 @@
 // csrc/utils_bindings.cpp
+// This file contains the Python bindings for various utility kernels, including
+// population reorganization, initialization, and validation.
+
 #include <torch/extension.h>
 #include "reorganize_kernel.cuh"
 #include "validate_kernel.cuh"
@@ -7,17 +10,22 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "High-performance CUDA utility kernels for GATree";
 
-    // --- 재구성 함수 바인딩 ---
+    // --- Population Reorganization ---
+
+    // This binding exposes the reorganize_population_cuda function to Python.
     m.def("reorganize_population", &reorganize_population_cuda, 
-          "Reorganize the population tensor on GPU to remove fragmentation.");
+          "Reorganizes the population tensor on the GPU to remove fragmentation.");
     
+    // This binding exposes the reorganize_population_with_arrays_cuda function to Python.
     m.def("reorganize_population_with_arrays", &reorganize_population_with_arrays_cuda, 
-          "Reorganize the population tensor on GPU using pre-allocated arrays from Python.",
+          "Reorganizes the population tensor on the GPU using pre-allocated arrays.",
           py::arg("population_tensor"), py::arg("active_counts_per_tree"), py::arg("old_gid_to_new_gid_map"));
 
-    // --- GPU Population Initialization with invariant guarantees ---
+    // --- Population Initialization ---
+
+    // This binding exposes the init_population_cuda function to Python.
     m.def("init_population_cuda", &init_population_cuda,
-          "Initialize a batch of trees on CUDA with invariant guarantees.",
+          "Initializes a batch of trees on the GPU with invariant guarantees.",
           py::arg("trees"), py::arg("total_budget"),
           py::arg("max_children"), py::arg("max_depth"), py::arg("max_nodes"),
           py::arg("bfs_q"), py::arg("scratch"), py::arg("child_cnt"),
@@ -26,9 +34,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("bool_feat_indices"), py::arg("ff_pairs"),
           py::arg("long_actions"), py::arg("hold_actions"), py::arg("short_actions"));
 
-    // --- Validation: checks structural constraints and throws if violations found ---
+    // --- Validation ---
+
+    // This binding exposes the validate_trees_or_throw_cuda function to Python.
     m.def("validate_trees", &validate_trees_or_throw_cuda,
-          "Validate tree structural constraints on GPU; throws on invalid trees.",
+          "Validates tree structural constraints on the GPU and throws an exception if any violations are found.",
           py::arg("trees"));
 
 }

@@ -1,13 +1,16 @@
 // csrc/subtree_crossover_kernel.cu
+// This file contains the CUDA implementation of the subtree crossover operation.
+
 #include "subtree_crossover_kernel.cuh"
 #include "crossover_utils.cuh"
 #include "constants.h"
 #include <curand_kernel.h>
 
 // ==============================================================================
-//       [수정된] 커널 4: SubtreeCrossover를 위한 배치 커널 및 헬퍼 함수
+//       Subtree Crossover Batch Kernel and Helper Functions
 // ==============================================================================
 
+// This device function gets the root branch type of a given node.
 __device__ int get_root_branch_type_device(const float* tree_ptr, int node_idx, int max_nodes) {
     int current_idx = node_idx;
     while (current_idx >= 0 && current_idx < max_nodes) {
@@ -20,6 +23,7 @@ __device__ int get_root_branch_type_device(const float* tree_ptr, int node_idx, 
     return -1; // Error or root not found
 }
 
+// This device function gets the number of active nodes in a tree.
 __device__ int get_active_node_count(const float* tree_ptr, int max_nodes) {
     int count = 0;
     for (int i = 0; i < max_nodes; ++i) {
@@ -30,6 +34,7 @@ __device__ int get_active_node_count(const float* tree_ptr, int max_nodes) {
     return count;
 }
 
+// This device function gets the maximum relative depth of a subtree.
 __device__ int get_max_relative_depth(const float* tree_ptr, int* indices, int count, int max_nodes) {
     if (count == 0) return 0;
     int root_node_idx = indices[0];
@@ -48,12 +53,12 @@ __device__ int get_max_relative_depth(const float* tree_ptr, int* indices, int c
     return (int)(max_abs_depth - root_depth);
 }
 
+// This device function checks if transplanting a subtree would violate the tree structure.
 __device__ bool would_violate_tree_structure(
     const float* child_ptr, int parent_idx, int new_subtree_root_type, int max_nodes)
 {
     if (parent_idx < 0 || parent_idx >= max_nodes) return true;
     
-    // Count existing children by type
     int action_children = 0;
     int decision_children = 0;
     
@@ -68,30 +73,24 @@ __device__ bool would_violate_tree_structure(
         }
     }
     
-    // Check if adding new subtree would violate rules
     if (new_subtree_root_type == NODE_TYPE_ACTION) {
-        // Rule 1: No mixed children (action + decision)
         if (decision_children > 0) return true;
-        
-        // Rule 2: Parent with action child must have exactly one child
-        if (action_children > 0) return true; // Already has action child, can't add another
+        if (action_children > 0) return true;
     } else if (new_subtree_root_type == NODE_TYPE_DECISION) {
-        // Rule 1: No mixed children (action + decision)  
         if (action_children > 0) return true;
     }
     
     return false;
 }
 
+// This device function performs a one-way transplant of a subtree.
 __device__ bool transplant_one_way_device(
     float* child_ptr, const float* recipient_ptr, const float* donor_ptr,
     int r_idx, int d_idx, int* r_indices, int r_count, int* d_indices, int d_count,
     int* my_old_to_new_map, int* my_empty_slots_buffer, int max_nodes)
 {
-    // [FIX 1] Early validation: Check if we have enough space before any modifications
     if (d_count <= 0 || r_count < 0 || d_count > max_nodes) return false;
     
-    // Count current empty slots before modification
     int available_empty_slots = 0;
     for (int i = 0; i < max_nodes; ++i) {
         if (recipient_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
@@ -99,16 +98,13 @@ __device__ bool transplant_one_way_device(
         }
     }
     
-    // Add slots that will be freed by removing r_indices
     int slots_after_removal = available_empty_slots + r_count;
     if (slots_after_removal < d_count) {
-        return false; // Not enough space even after removal - abort early
+        return false;
     }
 
-    // 1. recipient로부터 child를 초기화
     for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
 
-    // 2. child에서 제거될 서브트리 영역을 비움
     for (int i = 0; i < r_count; ++i) {
         int idx_to_clear = r_indices[i];
         if (idx_to_clear >= 0 && idx_to_clear < max_nodes) {
@@ -116,22 +112,19 @@ __device__ bool transplant_one_way_device(
         }
     }
 
-    // 3. [FIX 2] 비어있는 슬롯 찾기 with bounds checking
     int empty_count = 0;
     for (int i = 0; i < max_nodes && empty_count < d_count; ++i) {
         if (child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] == NODE_TYPE_UNUSED) {
-            if (empty_count < max_nodes) { // Prevent buffer overflow
+            if (empty_count < max_nodes) {
                 my_empty_slots_buffer[empty_count++] = i;
             }
         }
     }
     if (empty_count < d_count) {
-        // [FIX 3] Restore original state on failure
         for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
         return false;
     }
 
-    // 4. old_to_new_map 생성 with bounds checking
     for (int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
     for (int i = 0; i < d_count; ++i) {
         if (i < empty_count && d_indices[i] >= 0 && d_indices[i] < max_nodes) {
@@ -139,25 +132,20 @@ __device__ bool transplant_one_way_device(
         }
     }
     
-    // 5. 깊이 오프셋 계산
     int r_parent_idx = (int)recipient_ptr[r_idx * NODE_INFO_DIM + COL_PARENT_IDX];
     if(r_parent_idx < 0 || r_parent_idx >= max_nodes) {
-        // [FIX 3] Restore original state on failure
         for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
         return false;
     }
     float insertion_depth = recipient_ptr[r_parent_idx * NODE_INFO_DIM + COL_DEPTH] + 1.0f;
     float depth_offset = insertion_depth - donor_ptr[d_idx * NODE_INFO_DIM + COL_DEPTH];
 
-    // 5.5. Check if transplantation would violate tree structure rules
     int donor_root_type = (int)donor_ptr[d_idx * NODE_INFO_DIM + COL_NODE_TYPE];
     if (would_violate_tree_structure(child_ptr, r_parent_idx, donor_root_type, max_nodes)) {
-        // [FIX 3] Restore original state on failure
         for(int i=0; i < max_nodes * NODE_INFO_DIM; ++i) child_ptr[i] = recipient_ptr[i];
         return false;
     }
 
-    // 6. [FIX 4] 노드 복사 및 업데이트 with atomic-style validation
     for (int i = 0; i < d_count; ++i) {
         int old_idx = d_indices[i];
         if (old_idx < 0 || old_idx >= max_nodes) continue;
@@ -178,15 +166,15 @@ __device__ bool transplant_one_way_device(
             if (old_parent_idx >= 0 && old_parent_idx < max_nodes && my_old_to_new_map[old_parent_idx] != -1) {
                 dest_node[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
             } else {
-                // [FIX 3] Invalid parent mapping - restore and abort
                 for(int j=0; j < max_nodes * NODE_INFO_DIM; ++j) child_ptr[j] = recipient_ptr[j];
                 return false;
             }
         }
     }
-    return true; // Success
+    return true;
 }
 
+// This kernel performs subtree crossover on a batch of trees.
 __global__ void subtree_crossover_kernel(
     float* child1_out_ptr, float* child2_out_ptr,
     const float* p1_batch_ptr, const float* p2_batch_ptr,
@@ -199,14 +187,11 @@ __global__ void subtree_crossover_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // --- 1. 스레드별 포인터 및 버퍼 설정 ---
     float* c1_ptr = child1_out_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     float* c2_ptr = child2_out_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
 
-    // [중요 수정] p1, p2 서브트리를 동시에 담기 위해 버퍼를 2*max_nodes로 사용
-    //   - 래퍼에서 bfs_queue_buffer/result_indices_buffer는 [batch, 2*max_nodes]로 할당되어야 함
     int* my_queue1   = bfs_queue_buffer_ptr     + batch_idx * (2 * max_nodes);
     int* my_queue2   = my_queue1                + max_nodes;
     int* my_results1 = result_indices_buffer_ptr+ batch_idx * (2 * max_nodes);
@@ -221,7 +206,6 @@ __global__ void subtree_crossover_kernel(
 
     bool success = false;
     for (int retry = 0; retry < max_retries && !success; ++retry) {
-        // --- 2. 교차 후보군 선택 ---
         int p1_cand_count = 0, p2_cand_count = 0;
         
         if (mode == 0) { // free mode
@@ -242,14 +226,12 @@ __global__ void subtree_crossover_kernel(
         int p1_idx = p1_candidates[(int)(curand_uniform(&state) * p1_cand_count)];
         int p2_idx = p2_candidates[(int)(curand_uniform(&state) * p2_cand_count)];
 
-        // --- 3. 서브트리 정보 수집 ---
         int s1_count = find_subtree_nodes_device(p1_ptr, p1_idx, my_queue1, my_results1, max_nodes);
         int s2_count = find_subtree_nodes_device(p2_ptr, p2_idx, my_queue2, my_results2, max_nodes);
 
         int p1_total_nodes = get_active_node_count(p1_ptr, max_nodes);
         int p2_total_nodes = get_active_node_count(p2_ptr, max_nodes);
         
-        // --- 4. 제약 조건 검증 (only node count limits) ---
         int p1_parent_idx = (int)p1_ptr[p1_idx*NODE_INFO_DIM + COL_PARENT_IDX];
         if(p1_parent_idx < 0 || p1_parent_idx >= max_nodes) continue;
         if(p1_total_nodes - s1_count + s2_count > max_nodes) continue;
@@ -258,7 +240,6 @@ __global__ void subtree_crossover_kernel(
         if(p2_parent_idx < 0 || p2_parent_idx >= max_nodes) continue;
         if(p2_total_nodes - s2_count + s1_count > max_nodes) continue;
 
-        // --- 5. 이식 수행 ---
         bool transplant1_success = transplant_one_way_device(c1_ptr, p1_ptr, p2_ptr,
             p1_idx, p2_idx,
             my_results1, s1_count,
@@ -281,10 +262,10 @@ __global__ void subtree_crossover_kernel(
 }
 
 // ==============================================================================
-//                       C++ 래퍼 함수 (커널 런처)
+//                       C++ Wrapper Function (Kernel Launcher)
 // ==============================================================================
 
-// [수정된] SubtreeCrossover 래퍼 함수
+// This is the C++ wrapper function that launches the subtree_crossover_kernel.
 void subtree_crossover_batch_cuda(
     torch::Tensor& child1_out,
     torch::Tensor& child2_out,
@@ -303,17 +284,11 @@ void subtree_crossover_batch_cuda(
     const int batch_size = p1_batch.size(0);
     if (batch_size == 0) return;
 
-    // [중요] 버퍼 크기 검증: 큐/결과는 2*max_nodes, 그 외는 >= max_nodes
-    TORCH_CHECK(bfs_queue_buffer.dim() >= 2 && bfs_queue_buffer.size(1) >= 2*max_nodes,
-                "bfs_queue_buffer must have second dim >= 2*max_nodes");
-    TORCH_CHECK(result_indices_buffer.dim() >= 2 && result_indices_buffer.size(1) >= 2*max_nodes,
-                "result_indices_buffer must have second dim >= 2*max_nodes");
-    TORCH_CHECK(old_to_new_map_buffer.dim() >= 2 && old_to_new_map_buffer.size(1) >= max_nodes,
-                "old_to_new_map_buffer must have second dim >= max_nodes");
-    TORCH_CHECK(p1_candidates_buffer.dim() >= 2 && p1_candidates_buffer.size(1) >= max_nodes,
-                "p1_candidates_buffer must have second dim >= max_nodes");
-    TORCH_CHECK(p2_candidates_buffer.dim() >= 2 && p2_candidates_buffer.size(1) >= max_nodes,
-                "p2_candidates_buffer must have second dim >= max_nodes");
+    TORCH_CHECK(bfs_queue_buffer.dim() >= 2 && bfs_queue_buffer.size(1) >= 2*max_nodes, "bfs_queue_buffer must have second dim >= 2*max_nodes");
+    TORCH_CHECK(result_indices_buffer.dim() >= 2 && result_indices_buffer.size(1) >= 2*max_nodes, "result_indices_buffer must have second dim >= 2*max_nodes");
+    TORCH_CHECK(old_to_new_map_buffer.dim() >= 2 && old_to_new_map_buffer.size(1) >= max_nodes, "old_to_new_map_buffer must have second dim >= max_nodes");
+    TORCH_CHECK(p1_candidates_buffer.dim() >= 2 && p1_candidates_buffer.size(1) >= max_nodes, "p1_candidates_buffer must have second dim >= max_nodes");
+    TORCH_CHECK(p2_candidates_buffer.dim() >= 2 && p2_candidates_buffer.size(1) >= max_nodes, "p2_candidates_buffer must have second dim >= max_nodes");
 
     subtree_crossover_kernel<<<batch_size, 1>>>(
         child1_out.data_ptr<float>(),

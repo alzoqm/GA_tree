@@ -1,11 +1,26 @@
 // csrc/node_crossover_kernel.cu
+// This file implements CUDA kernels for node-level crossover operations.
+// These operations include generating contextual masks and swapping node parameters.
+
 #include "node_crossover_kernel.cuh"
 #include "constants.h"
 #include <curand_kernel.h>
 
 // ==============================================================================
-//           커널 1: 컨텍스트 마스크 생성 (Contextual Mask Generation)
+//           Kernel 1: Contextual Mask Generation
 // ==============================================================================
+
+/**
+ * @brief This kernel generates a mask for nodes that match a specific node type
+ *        and are within a specific root branch context.
+ *
+ * @param trees_ptr Pointer to the population tensor.
+ * @param output_mask_ptr Pointer to the output mask tensor.
+ * @param batch_size The number of trees in the batch.
+ * @param max_nodes The maximum number of nodes per tree.
+ * @param node_type_target The target node type to mask.
+ * @param branch_type_target The target root branch type.
+ */
 __global__ void get_contextual_mask_kernel(
     const float* trees_ptr,
     bool* output_mask_ptr,
@@ -23,10 +38,10 @@ __global__ void get_contextual_mask_kernel(
 
     const float* node_data = trees_ptr + gid * NODE_INFO_DIM;
     
-    // 1. 노드 타입이 일치하는지 확인
+    // 1. Check if the node type matches the target.
     if ((int)node_data[COL_NODE_TYPE] == node_type_target) {
         
-        // 2. 루트까지 부모를 거슬러 올라가기
+        // 2. Traverse up to the root of the tree.
         int current_idx = node_idx;
         int parent_idx = (int)node_data[COL_PARENT_IDX];
 
@@ -35,7 +50,7 @@ __global__ void get_contextual_mask_kernel(
             parent_idx = (int)trees_ptr[(batch_idx * max_nodes + current_idx) * NODE_INFO_DIM + COL_PARENT_IDX];
         }
 
-        // 3. 루트 분기 타입이 일치하는지 확인
+        // 3. Check if the root branch type matches the target.
         const float* root_data = trees_ptr + (batch_idx * max_nodes + current_idx) * NODE_INFO_DIM;
         if ((int)root_data[COL_PARAM_1] == branch_type_target) {
             output_mask_ptr[gid] = true;
@@ -44,8 +59,20 @@ __global__ void get_contextual_mask_kernel(
 }
 
 // ==============================================================================
-//         커널 2: 노드 파라미터 교환 (Node Parameter Swap)
+//         Kernel 2: Node Parameter Swap
 // ==============================================================================
+
+/**
+ * @brief This kernel swaps the parameters of a random number of nodes between two
+ *        populations, based on the provided masks.
+ *
+ * @param c1_ptr Pointer to the first population tensor.
+ * @param c2_ptr Pointer to the second population tensor.
+ * @param p1_mask_ptr Pointer to the mask for the first population.
+ * @param p2_mask_ptr Pointer to the mask for the second population.
+ * @param batch_size The number of trees in the batch.
+ * @param max_nodes The maximum number of nodes per tree.
+ */
 __global__ void swap_node_params_kernel(
     float* c1_ptr,
     float* c2_ptr,
@@ -57,7 +84,7 @@ __global__ void swap_node_params_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // --- 1. 교환 가능한 노드 수 계산 ---
+    // --- 1. Count the number of swappable nodes in each population. ---
     int p1_count = 0;
     int p2_count = 0;
     for (int i = 0; i < max_nodes; ++i) {
@@ -68,16 +95,16 @@ __global__ void swap_node_params_kernel(
     int max_swaps = min(p1_count, p2_count);
     if (max_swaps == 0) return;
 
-    // --- 2. 교환할 개수 'k' 결정 ---
+    // --- 2. Determine the number of swaps to perform. ---
     curandState state;
     curand_init(batch_idx, 0, 0, &state);
     int k_upper = max(1, max_swaps / 2);
     int k = (int)(curand_uniform(&state) * k_upper) + 1;
     k = min(k, max_swaps);
 
-    // --- 3. 교환 수행 (단일 스레드 내 루프) ---
+    // --- 3. Perform the swaps in a loop within a single thread. ---
     for (int i = 0; i < k; ++i) {
-        // p1에서 랜덤 인덱스 선택
+        // Select a random node from the first population.
         int p1_rand_n = (int)(curand_uniform(&state) * p1_count);
         int p1_swap_idx = -1;
         int current_n = 0;
@@ -91,7 +118,7 @@ __global__ void swap_node_params_kernel(
             }
         }
 
-        // p2에서 랜덤 인덱스 선택
+        // Select a random node from the second population.
         int p2_rand_n = (int)(curand_uniform(&state) * p2_count);
         int p2_swap_idx = -1;
         current_n = 0;
@@ -106,7 +133,7 @@ __global__ void swap_node_params_kernel(
         }
 
         if (p1_swap_idx != -1 && p2_swap_idx != -1) {
-            // 파라미터(COL_PARAM_1 ~ 끝) 교환
+            // Swap the parameters (from COL_PARAM_1 to the end).
             for (int param_col = COL_PARAM_1; param_col < NODE_INFO_DIM; ++param_col) {
                 float* p1_addr = c1_ptr + (batch_idx * max_nodes + p1_swap_idx) * NODE_INFO_DIM + param_col;
                 float* p2_addr = c2_ptr + (batch_idx * max_nodes + p2_swap_idx) * NODE_INFO_DIM + param_col;
@@ -120,8 +147,10 @@ __global__ void swap_node_params_kernel(
 }
 
 // ==============================================================================
-//                       C++ 래퍼 함수 (커널 런처)
+//                       C++ Wrapper Functions (Kernel Launchers)
 // ==============================================================================
+
+// This function launches the get_contextual_mask_kernel.
 void get_contextual_mask_cuda(const torch::Tensor& trees, torch::Tensor& output_mask, int node_type, int branch_type) {
     const int batch_size = trees.size(0);
     const int max_nodes = trees.size(1);
@@ -138,6 +167,7 @@ void get_contextual_mask_cuda(const torch::Tensor& trees, torch::Tensor& output_
     cudaDeviceSynchronize();
 }
 
+// This function launches the swap_node_params_kernel.
 void swap_node_params_cuda(torch::Tensor& c1, torch::Tensor& c2, const torch::Tensor& p1_mask, const torch::Tensor& p2_mask) {
     const int batch_size = c1.size(0);
     if (batch_size == 0) return;

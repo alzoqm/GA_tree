@@ -1,4 +1,8 @@
 // csrc/adjacency_builder.cuh
+// This header file declares the functions for building and validating tree
+// adjacency structures on the GPU. These functions are implemented in
+// adjacency_builder.cu and are called from the C++ bindings.
+
 #pragma once
 #include <torch/extension.h>
 #include <pybind11/pybind11.h>
@@ -7,14 +11,19 @@
 namespace py = pybind11;
 
 /**
- * Pass 1: Count children and produce CSR offsets, with overflow detection.
+ * @brief Pass 1: Counts children per parent and creates CSR offsets.
  * 
- * @param trees          (B,N,D) float32 CUDA contiguous
- * @param max_children   Maximum allowed children per parent
- * @return (total_children, offsets_flat, overflow_mask)
- *         total_children: long
- *         offsets_flat:   (B*N+1) int32 CUDA
- *         overflow_mask:  (B)     int32 CUDA (0 if OK, 1 if any parent in tree overflowed)
+ * This function is the first pass in a two-pass process to build a Compressed
+ * Sparse Row (CSR) representation of the tree adjacencies. It also detects
+ * if any parent node has more children than a specified maximum.
+ * 
+ * @param trees A (B, N, D) float32 CUDA tensor representing a batch of trees.
+ * @param max_children The maximum number of children a parent node is allowed to have.
+ * 
+ * @return A tuple containing:
+ *         - total_children: A long integer with the total number of child nodes across all trees.
+ *         - offsets_flat: A (B*N+1) int32 CUDA tensor for the CSR representation.
+ *         - overflow_mask: A (B) int32 CUDA tensor where a 1 indicates that a tree has at least one parent with too many children.
  */
 std::tuple<long, torch::Tensor, torch::Tensor> count_and_create_offsets_cuda(
     const torch::Tensor& trees,
@@ -22,17 +31,18 @@ std::tuple<long, torch::Tensor, torch::Tensor> count_and_create_offsets_cuda(
 );
 
 /**
- * Pass 2: Fill child_indices and (optionally) sort per parent.
+ * @brief Pass 2: Fills the child_indices array and optionally sorts children.
  * 
- * - Uses dynamic shared memory only (no fixed arrays)
- * - Automatically disables sorting if shared memory budget cannot accommodate it
- * - Automatically switches to a global-cursor mode if tiling would cause excessive rescans
+ * This is the second pass of the CSR construction. It populates the child_indices
+ * array. It can dynamically switch between a shared-memory-based implementation
+ * and a global-memory-based one depending on the available resources and the
+ * problem size.
  *
- * @param trees           (B,N,D) float32 CUDA contiguous
- * @param offsets_flat    (B*N+1) int32 CUDA
- * @param child_indices   (total_children) int32 CUDA (output filled in-place)
- * @param max_children    Maximum allowed children per parent
- * @param sort_children   Whether to sort child lists per parent (default true)
+ * @param trees A (B, N, D) float32 CUDA tensor representing a batch of trees.
+ * @param offsets_flat The (B*N+1) int32 CUDA CSR offset tensor from the first pass.
+ * @param child_indices A (total_children) int32 CUDA tensor to be filled with child indices.
+ * @param max_children The maximum number of children a parent node is allowed to have.
+ * @param sort_children A boolean indicating whether to sort the children of each parent by their index.
  */
 void fill_child_indices_cuda(
     const torch::Tensor& trees,
@@ -43,18 +53,27 @@ void fill_child_indices_cuda(
 );
 
 /**
- * Validator: CSR-based structural checks. Writes per-tree bitmask (0 means OK).
+ * @brief Validates the structural integrity of the trees using the CSR representation.
  * 
- * Bits (ViolBits):
- *  - V_MIXED_CHILDREN   (1<<0)  parent has both ACTION and DECISION children
- *  - V_LEAF_NOT_ACTION  (1<<1)  leaf that is not ACTION (excluding roots)
- *  - V_ACTION_HAS_CHILD (1<<2)  ACTION node with any child
- *  - V_SINGLE_ACTION_BR (1<<3)  parent has action children but deg != 1 (single-action rule)
- *  - V_DEPTH_MISMATCH   (1<<4)  child's depth != parent's + 1, or >= max_depth
- *  - V_CHILD_OVERFLOW   (1<<5)  degree > max_children
- *  - V_BAD_PARENT       (1<<6)  child index out of [0,N)
- *  - V_ROOT_BROKEN      (1<<7)  parent == -1 but node not ROOT_BRANCH or depth != 0
- *  - V_ROOT_LEAF        (1<<8)  root (parent == -1) has no children (optional diagnostic)
+ * This function checks for various structural violations in the trees, such as mixed
+ * child types, incorrect depths, and invalid parent-child relationships. The results
+ * are returned as a bitmask for each tree.
+ * 
+ * Violations (ViolBits):
+ *  - V_MIXED_CHILDREN:   A parent has both ACTION and DECISION children.
+ *  - V_LEAF_NOT_ACTION:  A leaf node is not an ACTION node (roots are excluded).
+ *  - V_ACTION_HAS_CHILD: An ACTION node has one or more children.
+ *  - V_SINGLE_ACTION_BR: A parent has action children, but the degree is not 1.
+ *  - V_DEPTH_MISMATCH:   A child's depth is not parent's depth + 1.
+ *  - V_CHILD_OVERFLOW:   A parent has more children than max_children.
+ *  - V_BAD_PARENT:       A child index is out of the valid range [0, N).
+ *  - V_ROOT_BROKEN:      A node with parent == -1 is not a ROOT_BRANCH or its depth is not 0.
+ *  - V_ROOT_LEAF:        A root node (parent == -1) has no children.
+ * 
+ * @param trees A (B, N, D) float32 CUDA tensor representing a batch of trees.
+ * @param offsets_flat The (B*N+1) int32 CUDA CSR offset tensor.
+ * @param child_indices The (total_children) int32 CUDA tensor of child indices.
+ * @param out_violation_mask A (B) int32 CUDA tensor to store the violation bitmasks.
  */
 void validate_adjacency_cuda(
     const torch::Tensor& trees,
@@ -64,16 +83,17 @@ void validate_adjacency_cuda(
 );
 
 /**
- * Build adjacency dictionaries for Python synchronization.
+ * @brief Builds adjacency dictionaries for synchronization with Python.
  * 
- * This function replaces the Python loop in _build_adjacency_list() 
- * by performing adjacency list building for all trees in parallel on GPU.
+ * This function provides a way to get the tree adjacency information back to Python.
+ * It builds the adjacency lists for all trees in parallel on the GPU.
  * 
- * @param trees          (B,N,D) float32 CUDA contiguous
- * @param next_idxs      (B) int32 CUDA - next_idx per tree (number of active nodes)
- * @return (offsets, children)
- *         offsets:      (B*N+1) int32 CUDA - CSR offsets for each tree
- *         children:     (total_children) int32 CUDA - child node indices
+ * @param trees A (B, N, D) float32 CUDA tensor representing a batch of trees.
+ * @param next_idxs A (B) int32 CUDA tensor indicating the number of active nodes in each tree.
+ * 
+ * @return A tuple containing:
+ *         - offsets: A (B*N+1) int32 CUDA CSR offset tensor.
+ *         - children: A (total_children) int32 CUDA tensor of child node indices.
  */
 std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
     const torch::Tensor& trees,
@@ -81,15 +101,17 @@ std::tuple<torch::Tensor, torch::Tensor> build_adjacency_dicts_cuda(
 );
 
 /**
- * Memory-optimized adjacency dict builder that returns Python dictionaries directly.
+ * @brief A memory-optimized function to build and return adjacency dictionaries directly as Python objects.
  * 
- * Completely eliminates Python loops by building adjacency dictionaries in C++
- * and returning them as Python objects ready for direct assignment.
+ * This function is designed to be highly efficient by avoiding Python loops for dictionary
+ * construction. It builds the adjacency dictionaries in C++ and returns them as a Python
+ * list of dictionaries.
  * 
- * @param trees          (B,N,D) float32 CUDA contiguous
- * @param next_idxs      (B) int32 CUDA - next_idx per tree (number of active nodes)
- * @return py::list      List of B Python dictionaries, each containing adjacency 
- *                       lists for one tree (parent_idx -> [child_indices])
+ * @param trees A (B, N, D) float32 CUDA tensor representing a batch of trees.
+ * @param next_idxs A (B) int32 CUDA tensor indicating the number of active nodes in each tree.
+ * 
+ * @return A py::list containing B Python dictionaries, where each dictionary represents the
+ *         adjacency list of a tree (parent_idx -> [child_indices]).
  */
 py::list build_adjacency_dicts_optimized_cuda(
     const torch::Tensor& trees,
