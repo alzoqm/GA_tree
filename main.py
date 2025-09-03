@@ -252,10 +252,8 @@ def main():
             logging.error(f"Data length: {total_data_len}, train_bars: {wfo_cfg['train_bars']}, oos_bars: {wfo_cfg['oos_bars']}")
             return
         
-        # Track elite population across windows if enabled
-        elite_population = None
-        if not wfo_cfg.get('reset_population_each_window', False):
-            elite_population = population  # Start with initial population
+        # Using in-place population reuse across windows to avoid overhead
+        # We keep the same GATreePop instance bound to the evolution engine.
         
         # WFO window loop with progress
         for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows, desc="WFO Windows")):
@@ -267,17 +265,10 @@ def main():
             window_checkpoint_dir = os.path.join(env_cfg['output_dir'], 'checkpoints', f'wf_window_{window_idx}')
             os.makedirs(window_checkpoint_dir, exist_ok=True)
             
-            # Reset or initialize population for this window
-            if wfo_cfg.get('reset_population_each_window', False) or window_idx == 0:
-                if window_idx > 0:
-                    # Reinitialize population
-                    population.make_population(device=env_cfg['device'])
-                    logging.info("Population reset for new window")
-            else:
-                # Use elite population from previous window
-                if elite_population is not None:
-                    population = elite_population
-                    logging.info("Using elite population from previous window")
+            # Reset population only when requested; otherwise reuse in-place
+            if window_idx > 0 and wfo_cfg.get('reset_population_each_window', False):
+                population.make_population(device=env_cfg['device'])
+                logging.info("Population reset for new window")
             
             # === In-Sample Training ===
             logging.info(f"Starting IS training for window {window_idx + 1}...")
@@ -363,34 +354,15 @@ def main():
                     logging.info(f"  {obj_name}: {stats['mean']:.4f}±{stats['std']:.4f} "
                                f"[{stats['min']:.4f}, {stats['max']:.4f}] {direction}")
             
-            # Update elite population for next window (if not resetting)
+            # In-place elite carryover for next window (if not resetting)
             if not wfo_cfg.get('reset_population_each_window', False):
-                # Select top performers as elite for next window
                 elite_size = min(ga_cfg['evolution_loop']['elite_size'], len(window_best_chromosomes))
-                elite_population = GATreePop(
-                    pop_size=ga_cfg['population']['size'],  # Keep original population size
-                    max_nodes=ga_cfg['population']['max_nodes'],
-                    max_depth=ga_cfg['population']['max_depth'],
-                    max_children=ga_cfg['population']['max_children'],
-                    **model_config
-                )
-                
-                # Copy elite individuals and fill rest with random individuals
-                elite_population.population_tensor[:elite_size].copy_(window_best_chromosomes[:elite_size])
-                if elite_size < ga_cfg['population']['size']:
-                    # Generate random individuals for the rest
-                    remaining_pop = GATreePop(
-                        pop_size=ga_cfg['population']['size'] - elite_size,
-                        max_nodes=ga_cfg['population']['max_nodes'],
-                        max_depth=ga_cfg['population']['max_depth'],
-                        max_children=ga_cfg['population']['max_children'],
-                        **model_config
-                    )
-                    remaining_pop.make_population(device=env_cfg['device'])
-                    elite_population.population_tensor[elite_size:].copy_(remaining_pop.population_tensor)
-                
-                elite_population.set_next_idx()
-                elite_population.initialized = True
+                # Option: refresh diversity by reinitializing full population, then overwrite elites
+                population.make_population(device=env_cfg['device'])
+                population.population_tensor[:elite_size].copy_(window_best_chromosomes[:elite_size])
+                population.set_next_idx()
+                population.initialized = True
+                logging.info(f"Prepared next window population in-place with {elite_size} elites + random rest")
         
         # === Final Aggregation and Ranking ===
         logging.info("\n=== Final WFO Aggregation and Ranking ===")
