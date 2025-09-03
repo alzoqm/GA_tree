@@ -1,52 +1,86 @@
 // csrc/subtree_mutation_kernel.cuh
+// This header file declares the CUDA functions for performing subtree mutations.
+
 #pragma once
 #include <torch/extension.h>
 
-// Batch AddSubtree mutation (one kernel). All large buffers are allocated in Python.
-// Dtypes: trees=float32; num_to_grow=int32; outputs as documented below.
+/**
+ * @brief Adds subtrees to a batch of trees.
+ *
+ * @param trees The population tensor.
+ * @param num_to_grow The number of nodes to grow for each tree.
+ * @param max_nodes The maximum number of nodes per tree.
+ * @param max_new_nodes The maximum number of new nodes that can be added.
+ * @param new_decision_nodes A tensor to store the indices of new decision nodes.
+ * @param new_action_nodes A tensor to store the indices of new action nodes.
+ * @param action_root_branch_type A tensor to store the root branch type of new action nodes.
+ * @param bfs_queue_buffer A buffer for the BFS queue.
+ * @param result_indices_buffer A buffer to store the result of the BFS.
+ * @param child_count_buffer A buffer for child counts.
+ * @param act_cnt_buffer A buffer for action child counts.
+ * @param dec_cnt_buffer A buffer for decision child counts.
+ * @param candidate_indices_buffer A buffer for candidate node indices.
+ * @param candidate_weights_buffer A buffer for candidate node weights.
+ */
 void add_subtrees_batch_cuda(
-    torch::Tensor trees,                    // (B, N, D) float32
-    torch::Tensor num_to_grow,              // (B,) int32
+    torch::Tensor trees,
+    torch::Tensor num_to_grow,
     int max_nodes,
     int max_new_nodes,
-    torch::Tensor new_decision_nodes,       // (B, K) int32, init -1
-    torch::Tensor new_action_nodes,         // (B, K) int32, init -1
-    torch::Tensor action_root_branch_type,  // (B, K) float32, init -1
-    torch::Tensor bfs_queue_buffer,         // (B, 2*N) int32
-    torch::Tensor result_indices_buffer,    // (B, 2*N) int32 (scratch: freelist and counters)
-    torch::Tensor child_count_buffer,       // (B, N) int32
-    torch::Tensor act_cnt_buffer,           // (B, N) int32
-    torch::Tensor dec_cnt_buffer,           // (B, N) int32
-    torch::Tensor candidate_indices_buffer, // (B, N) int32
-    torch::Tensor candidate_weights_buffer  // (B, N) float32
+    torch::Tensor new_decision_nodes,
+    torch::Tensor new_action_nodes,
+    torch::Tensor action_root_branch_type,
+    torch::Tensor bfs_queue_buffer,
+    torch::Tensor result_indices_buffer,
+    torch::Tensor child_count_buffer,
+    torch::Tensor act_cnt_buffer,
+    torch::Tensor dec_cnt_buffer,
+    torch::Tensor candidate_indices_buffer,
+    torch::Tensor candidate_weights_buffer
 );
 
-// Batch Delete-Subtree mutation (one kernel). All buffers are provided by Python.
+/**
+ * @brief Deletes subtrees from a batch of trees.
+ *
+ * @param trees The population tensor.
+ * @param mutate_mask_i32 A mask indicating which trees to mutate.
+ * @param max_nodes The maximum number of nodes per tree.
+ * @param alpha An exponent for weighting subtree size.
+ * @param ensure_action_left A flag to ensure at least one action node is left.
+ * @param child_count_buffer A buffer for child counts.
+ * @param act_cnt_buffer A buffer for action child counts.
+ * @param dec_cnt_buffer A buffer for decision child counts.
+ * @param candidate_indices_buffer A buffer for candidate node indices.
+ * @param candidate_weights_buffer A buffer for candidate node weights.
+ * @param bfs_queue_buffer A buffer for the BFS queue.
+ * @param result_indices_buffer A buffer to store the result of the BFS.
+ * @param deletion_mask_buffer A buffer for the deletion mask.
+ * @param repair_mask_buffer A buffer for the repair mask.
+ * @param chosen_roots_buffer A buffer to store the chosen roots for deletion.
+ */
 void delete_subtrees_batch_cuda(
-    torch::Tensor trees,                    // (B, N, D) float32
-    torch::Tensor mutate_mask_i32,          // (B,) int32 0/1
+    torch::Tensor trees,
+    torch::Tensor mutate_mask_i32,
     int max_nodes,
-    float alpha,                            // subtree-size exponent
-    int ensure_action_left,                 // bool as int
-
-    // Work buffers (all int32/float32, preallocated in Python)
-    torch::Tensor child_count_buffer,       // (B, N) int32
-    torch::Tensor act_cnt_buffer,           // (B, N) int32
-    torch::Tensor dec_cnt_buffer,           // (B, N) int32
-
-    torch::Tensor candidate_indices_buffer, // (B, N) int32
-    torch::Tensor candidate_weights_buffer, // (B, N) float32
-
-    torch::Tensor bfs_queue_buffer,         // (B, 2*N) int32
-    torch::Tensor result_indices_buffer,    // (B, 2*N) int32 (scratch)
-
-    torch::Tensor deletion_mask_buffer,     // (B, N) int32 (0/1) out
-    torch::Tensor repair_mask_buffer,       // (B, N) int32 (0/1) out
-
-    torch::Tensor chosen_roots_buffer       // (B,) int32 out
+    float alpha,
+    int ensure_action_left,
+    torch::Tensor child_count_buffer,
+    torch::Tensor act_cnt_buffer,
+    torch::Tensor dec_cnt_buffer,
+    torch::Tensor candidate_indices_buffer,
+    torch::Tensor candidate_weights_buffer,
+    torch::Tensor bfs_queue_buffer,
+    torch::Tensor result_indices_buffer,
+    torch::Tensor deletion_mask_buffer,
+    torch::Tensor repair_mask_buffer,
+    torch::Tensor chosen_roots_buffer
 );
 
-// Critical repair: Ensure no root branch is left without children (CUDA replacement for slow Python loops)
+/**
+ * @brief A critical repair function to ensure that no root branch is left without children.
+ *
+ * @param trees The population tensor.
+ */
 void critical_repair_batch_cuda(
-    torch::Tensor trees                     // (B, N, D) float32
+    torch::Tensor trees
 );

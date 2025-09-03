@@ -1,4 +1,6 @@
 // csrc/validate_kernel.cu
+// This file contains the CUDA implementation for validating the structural integrity of the trees.
+
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <vector>
@@ -8,14 +10,15 @@
 #include "constants.h"
 #include "validate_kernel.cuh"
 
-// Error bitmask definitions
-// 1 << 0: root branches invalid (count/parent/depth/branch types)
-// 1 << 1: invalid parent or depth relation
-// 1 << 2: leaf not action, or action has children
-// 1 << 3: mixed child types under a parent (action+decision)
-// 1 << 4: parent with action child has more than one child
-// 1 << 5: invalid node type encountered
+// Error bitmask definitions:
+// 1 << 0: Invalid root branches (count, parent, depth, or branch types).
+// 1 << 1: Invalid parent-child relationship or depth.
+// 1 << 2: A leaf node is not an action, or an action node has children.
+// 1 << 3: A parent has mixed child types (action and decision).
+// 1 << 4: A parent with an action child has more than one child.
+// 1 << 5: An invalid node type was encountered.
 
+// This kernel validates the structural integrity of a batch of trees.
 __global__ void validate_trees_kernel(
     const float* __restrict__ trees,
     int B,
@@ -31,12 +34,10 @@ __global__ void validate_trees_kernel(
     int error_mask = 0;
     int error_node = -1;
 
-    // 1) Validate root branches: exactly three, depth==0, parent==-1, unique branch types {0,1,2}
+    // 1. Validate root branches.
     int root_count = 0;
     int branch_seen[3] = {0, 0, 0};
 
-    // Precompute parents/depths/types for convenience
-    // Also count total active nodes (optional, not strictly used)
     for (int i = 0; i < max_nodes; ++i) {
         const float* node = base + i * node_dim;
         int t = (int)node[COL_NODE_TYPE];
@@ -61,7 +62,6 @@ __global__ void validate_trees_kernel(
                 error_node = (error_node == -1 ? i : error_node);
             }
         } else {
-            // Non-root with parent == -1 is invalid
             if (parent == -1) {
                 error_mask |= (1 << 1);
                 error_node = (error_node == -1 ? i : error_node);
@@ -73,7 +73,7 @@ __global__ void validate_trees_kernel(
         error_mask |= (1 << 0);
     }
 
-    // 2) Validate depth relation and gather child stats (O(N^2) scan per tree)
+    // 2. Validate depth relationships and gather child statistics.
     for (int p = 0; p < max_nodes; ++p) {
         const float* pnode = base + p * node_dim;
         int ptype = (int)pnode[COL_NODE_TYPE];
@@ -91,7 +91,6 @@ __global__ void validate_trees_kernel(
             if (ctype == NODE_TYPE_UNUSED) continue;
             int parent = (int)cnode[COL_PARENT_IDX];
             if (parent == p) {
-                // Check parent-depth relation for child
                 int cdepth = (int)cnode[COL_DEPTH];
                 if (cdepth != pdepth + 1) {
                     error_mask |= (1 << 1);
@@ -103,28 +102,23 @@ __global__ void validate_trees_kernel(
             }
         }
 
-        // Leaf nodes must be ACTION (root branches should not be leaves)
         if (pchild_count == 0) {
             if (ptype != NODE_TYPE_ACTION) {
-                // A root branch or decision node without children is invalid
                 error_mask |= (1 << 2);
                 error_node = (error_node == -1 ? p : error_node);
             }
         } else {
-            // Non-leaf action is invalid
             if (ptype == NODE_TYPE_ACTION) {
                 error_mask |= (1 << 2);
                 error_node = (error_node == -1 ? p : error_node);
             }
         }
 
-        // Mixed children types under the same parent not allowed
         if (action_children > 0 && decision_children > 0) {
             error_mask |= (1 << 3);
             error_node = (error_node == -1 ? p : error_node);
         }
 
-        // If a parent has an ACTION child, it must have exactly one child
         if (action_children > 0 && pchild_count != 1) {
             error_mask |= (1 << 4);
             error_node = (error_node == -1 ? p : error_node);
@@ -135,6 +129,7 @@ __global__ void validate_trees_kernel(
     out_error_node[b] = error_node;
 }
 
+// This function launches the validation kernel and throws an exception if any errors are found.
 void validate_trees_or_throw_cuda(const torch::Tensor& trees) {
     TORCH_CHECK(trees.is_cuda(), "Trees tensor must be on CUDA");
     TORCH_CHECK(trees.is_contiguous(), "Trees tensor must be contiguous");
@@ -159,11 +154,9 @@ void validate_trees_or_throw_cuda(const torch::Tensor& trees) {
     );
     cudaDeviceSynchronize();
 
-    // Copy results to CPU
     auto h_mask = error_mask.cpu();
     auto h_node = error_node.cpu();
 
-    // Collect invalid indices and format message
     std::vector<int> bad_indices;
     bad_indices.reserve(B);
     std::ostringstream oss;
@@ -178,7 +171,6 @@ void validate_trees_or_throw_cuda(const torch::Tensor& trees) {
     }
 
     if (any_bad) {
-        // Build detailed message
         oss << "Tree structure validation failed. Invalid tree indices: [";
         for (size_t i = 0; i < bad_indices.size(); ++i) {
             oss << bad_indices[i] << (i + 1 < bad_indices.size() ? ", " : "]\n");
@@ -192,7 +184,6 @@ void validate_trees_or_throw_cuda(const torch::Tensor& trees) {
         }
         oss << "Bit meanings: 1:roots, 2:parent/depth, 4:leaf/action, 8:mixed-children, 16:action-child>1, 32:invalid-type";
 
-        // Throw with formatted message (prints indices and raises error)
         TORCH_CHECK(false, oss.str());
     }
 }

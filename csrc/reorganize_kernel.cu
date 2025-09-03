@@ -1,9 +1,12 @@
-// /csrc/reorganize_kernel.cu (수정된 최종 코드)
+// csrc/reorganize_kernel.cu
+// This file contains the CUDA implementation for reorganizing the population by
+// removing unused nodes and compacting the trees.
+
 #include "reorganize_kernel.cuh"
 #include "constants.h"
 #include <algorithm> // for std::min
 
-// 커널 1: 활성 노드 수 계산 및 인덱스 리매핑
+// Kernel 1: Computes the number of active nodes and remaps indices.
 __global__ void compute_remap_indices_kernel(
     const float* population_ptr,
     int* active_counts_per_tree_ptr,
@@ -16,13 +19,14 @@ __global__ void compute_remap_indices_kernel(
     
     extern __shared__ int local_scan_buffer[];
     
+    // Identify active nodes.
     for (int i = threadIdx.x; i < max_nodes; i += blockDim.x) {
         const int old_gid = tree_idx * max_nodes + i;
         local_scan_buffer[i] = (population_ptr[old_gid * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED) ? 1 : 0;
     }
     __syncthreads();
 
-    // Blelloch 스캔 (레이스 컨디션 방지)
+    // Perform a Blelloch scan to compute the new indices.
     for (int offset = 1; offset < max_nodes; offset *= 2) {
         __syncthreads();
         int temp = 0;
@@ -36,6 +40,7 @@ __global__ void compute_remap_indices_kernel(
     }
     __syncthreads();
     
+    // Create the remapping from old to new indices.
     for (int i = threadIdx.x; i < max_nodes; i += blockDim.x) {
         const int old_gid = tree_idx * max_nodes + i;
         if (population_ptr[old_gid * NODE_INFO_DIM + COL_NODE_TYPE] != NODE_TYPE_UNUSED) {
@@ -51,7 +56,7 @@ __global__ void compute_remap_indices_kernel(
     }
 }
 
-// 커널 2: 노드 재배치 및 부모 인덱스 업데이트 (변경 없음)
+// Kernel 2: Reorganizes the nodes and updates parent indices.
 __global__ void reorganize_and_update_kernel(
     const float* original_pop_ptr,
     const int* old_gid_to_new_gid_map_ptr,
@@ -66,10 +71,12 @@ __global__ void reorganize_and_update_kernel(
         const int new_gid = old_gid_to_new_gid_map_ptr[old_gid];
         if (new_gid == -1) return;
         
+        // Copy node data to the new location.
         for (int i = 0; i < NODE_INFO_DIM; ++i) {
             new_pop_ptr[new_gid * NODE_INFO_DIM + i] = original_pop_ptr[old_gid * NODE_INFO_DIM + i];
         }
 
+        // Update the parent index.
         int old_parent_local_idx = (int)original_pop_ptr[old_gid * NODE_INFO_DIM + COL_PARENT_IDX];
         if (old_parent_local_idx != -1) {
             int tree_idx = old_gid / max_nodes;
@@ -77,7 +84,6 @@ __global__ void reorganize_and_update_kernel(
             int new_parent_gid = old_gid_to_new_gid_map_ptr[old_parent_gid];
             
             if (new_parent_gid != -1) {
-                // 부모의 새로운 로컬 인덱스 계산 (같은 트리 내에서)
                 int new_parent_local_idx = new_parent_gid % max_nodes;
                 new_pop_ptr[new_gid * NODE_INFO_DIM + COL_PARENT_IDX] = (float)new_parent_local_idx;
             } else {
@@ -87,7 +93,7 @@ __global__ void reorganize_and_update_kernel(
     }
 }
 
-// C++ 래퍼 함수 (커널 런처 - 변경 없음)
+// C++ wrapper function to launch the reorganization kernels.
 void reorganize_population_cuda(torch::Tensor population_tensor) {
     TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device for reorganize.");
     const int pop_size = population_tensor.size(0);
@@ -118,7 +124,7 @@ void reorganize_population_cuda(torch::Tensor population_tensor) {
     population_tensor.copy_(new_population);
 }
 
-// 새로운 함수: Python에서 할당된 배열을 사용하는 버전
+// A version of the reorganization function that uses pre-allocated arrays.
 void reorganize_population_with_arrays_cuda(
     torch::Tensor population_tensor,
     torch::Tensor active_counts_per_tree,
@@ -135,7 +141,6 @@ void reorganize_population_with_arrays_cuda(
     const int total_nodes = pop_size * max_nodes;
     if (total_nodes == 0) return;
 
-    // 배열이 올바른 크기인지 확인
     TORCH_CHECK(active_counts_per_tree.size(0) == pop_size, "active_counts_per_tree size mismatch");
     TORCH_CHECK(old_gid_to_new_gid_map.size(0) == total_nodes, "old_gid_to_new_gid_map size mismatch");
     
@@ -148,7 +153,6 @@ void reorganize_population_with_arrays_cuda(
         max_nodes
     );
 
-    // CUDA 동기화로 커널 완료 대기
     cudaError_t err = cudaDeviceSynchronize();
     TORCH_CHECK(err == cudaSuccess, "CUDA synchronization failed in compute_remap_indices_kernel: " + std::string(cudaGetErrorString(err)));
 
@@ -165,7 +169,6 @@ void reorganize_population_with_arrays_cuda(
         max_nodes
     );
 
-    // CUDA 동기화로 커널 완료 대기
     err = cudaDeviceSynchronize();
     TORCH_CHECK(err == cudaSuccess, "CUDA synchronization failed in reorganize_and_update_kernel: " + std::string(cudaGetErrorString(err)));
 

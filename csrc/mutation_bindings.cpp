@@ -1,4 +1,8 @@
 // csrc/mutation_bindings.cpp
+// This file contains the Python bindings for the CUDA mutation kernels.
+// It uses pybind11 to expose the C++/CUDA functions to Python, allowing for
+// high-performance mutations to be called directly from Python.
+
 #include <torch/extension.h>
 #include "value_mutation_kernel.cuh"
 #include "node_mutation_kernel.cuh"
@@ -8,7 +12,9 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "High-performance CUDA mutation kernels for GATree";
 
-    // --- 값 기반 돌연변이 함수 바인딩 ---
+    // Bindings for value-based mutation functions
+
+    // This binding exposes the NodeParamMutation kernel to Python.
     m.def("node_param_mutate", 
         [](torch::Tensor& population, float mutation_prob, float noise_ratio, int leverage_change,
            torch::Tensor& feature_num_indices, torch::Tensor& feature_min_vals, torch::Tensor& feature_max_vals) {
@@ -20,12 +26,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 empty_int_tensor, empty_int_tensor
             );
         },
-        "Perform NodeParamMutation on GPU.",
+        "Performs NodeParamMutation on the GPU. This mutation adjusts the parameters of existing nodes.",
         py::arg("population"), py::arg("mutation_prob"), py::arg("noise_ratio"),
         py::arg("leverage_change"), py::arg("feature_num_indices"),
         py::arg("feature_min_vals"), py::arg("feature_max_vals")
     );
 
+    // This binding exposes the ReinitializeNodeMutation kernel to Python.
     m.def("reinitialize_node_mutate", 
         [](torch::Tensor& population, float mutation_prob,
            torch::Tensor& feature_num_indices, torch::Tensor& feature_min_vals, torch::Tensor& feature_max_vals,
@@ -37,15 +44,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                feature_comparison_indices, feature_bool_indices
            );
         },
-        "Perform ReinitializeNodeMutation on GPU.",
+        "Performs ReinitializeNodeMutation on the GPU. This mutation re-initializes a node from scratch.",
         py::arg("population"), py::arg("mutation_prob"),
         py::arg("feature_num_indices"), py::arg("feature_min_vals"), py::arg("feature_max_vals"),
         py::arg("feature_comparison_indices"), py::arg("feature_bool_indices")
     );
 
-    // --- NEW: add-node mutation ---
+    // Bindings for structural mutation functions
+
+    // This binding exposes the add_decision_nodes_batch_cuda kernel to Python.
     m.def("add_decision_nodes_batch", &add_decision_nodes_batch_cuda,
-        "Batch add-node mutation (edge split) with invariant guards.",
+        "Performs batch add-node mutation (edge splitting) with invariant guards.",
         py::arg("trees"),
         py::arg("num_to_add"),
         py::arg("max_nodes"),
@@ -57,8 +66,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("candidate_indices_buffer"),
         py::arg("candidate_weights_buffer"));
 
+    // This binding exposes the delete_nodes_batch_cuda kernel to Python.
     m.def("delete_nodes_batch", &delete_nodes_batch_cuda,
-        "Batch delete-node mutation with invariant guards.",
+        "Performs batch delete-node mutation with invariant guards.",
         py::arg("trees"),
         py::arg("num_to_delete"),
         py::arg("max_nodes"),
@@ -72,9 +82,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("candidate_indices_buffer"),
         py::arg("candidate_weights_buffer"));
 
-    // --- NEW: AddSubtree batch mutation ---
+    // This binding exposes the add_subtrees_batch_cuda kernel to Python.
     m.def("add_subtrees_batch", &add_subtrees_batch_cuda,
-        "Batch add-subtree mutation with invariant guards.",
+        "Performs batch add-subtree mutation with invariant guards.",
         py::arg("trees"), py::arg("num_to_grow"),
         py::arg("max_nodes"), py::arg("max_new_nodes"),
         py::arg("new_decision_nodes"), py::arg("new_action_nodes"), py::arg("action_root_branch_type"),
@@ -82,9 +92,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("child_count_buffer"), py::arg("act_cnt_buffer"), py::arg("dec_cnt_buffer"),
         py::arg("candidate_indices_buffer"), py::arg("candidate_weights_buffer"));
 
-    // --- NEW: Delete-Subtree batch mutation ---
+    // This binding exposes the delete_subtrees_batch_cuda kernel to Python.
     m.def("delete_subtrees_batch", &delete_subtrees_batch_cuda,
-        "Batch delete-subtree mutation with invariant guards and repairs.",
+        "Performs batch delete-subtree mutation with invariant guards and repairs.",
         py::arg("trees"),
         py::arg("mutate_mask_i32"),
         py::arg("max_nodes"),
@@ -102,44 +112,49 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("chosen_roots_buffer")
     );
 
-    // --- NEW: Critical repair function (CUDA replacement for slow Python loops) ---
+    // Binding for the critical repair function.
     m.def("critical_repair_batch", &critical_repair_batch_cuda,
-        "Critical repair: Ensure no root branch is left without children (CUDA replacement for slow Python loops).",
+        "Ensures no root branch is left without children, replacing slow Python loops.",
         py::arg("trees")
     );
 
-    // --- NEW: mutation utils (GPU variants of utils.py) ---
+    // Bindings for mutation utility functions.
+
+    // This binding exposes the find_subtree_nodes_batch_cuda kernel to Python.
     m.def("find_subtree_nodes_batch", &find_subtree_nodes_batch_cuda,
-        "Collect subtree nodes for each (b, root_idx) into result buffer.",
+        "Collects all nodes in a subtree for each (batch_index, root_index) pair.",
         py::arg("trees"),
-        py::arg("root_indices"),           // (B,) int32 or (-1 for skip)
+        py::arg("root_indices"),
         py::arg("max_nodes"),
         py::arg("bfs_queue_buffer"),
         py::arg("result_indices_buffer"),
-        py::arg("out_counts"));            // (B,) int32
+        py::arg("out_counts"));
 
+    // This binding exposes the update_subtree_depth_batch_cuda kernel to Python.
     m.def("update_subtree_depth_batch", &update_subtree_depth_batch_cuda,
-        "Delta-add to depth for each subtree.",
+        "Adds a delta to the depth of all nodes in a subtree.",
         py::arg("trees"),
-        py::arg("root_indices"),           // (B,)
+        py::arg("root_indices"),
         py::arg("delta"),
         py::arg("max_nodes"),
         py::arg("bfs_queue_buffer"),
         py::arg("result_indices_buffer"));
 
+    // This binding exposes the get_subtree_max_depth_batch_cuda kernel to Python.
     m.def("get_subtree_max_depth_batch", &get_subtree_max_depth_batch_cuda,
-        "Return max depth over subtree for each (b,root).",
+        "Returns the maximum depth of a subtree for each (batch_index, root_index) pair.",
         py::arg("trees"),
-        py::arg("root_indices"),           // (B,)
+        py::arg("root_indices"),
         py::arg("max_nodes"),
         py::arg("bfs_queue_buffer"),
         py::arg("result_indices_buffer"),
-        py::arg("out_max_depths"));        // (B,) int32
+        py::arg("out_max_depths"));
 
+    // This binding exposes the find_empty_slots_batch_cuda kernel to Python.
     m.def("find_empty_slots_batch", &find_empty_slots_batch_cuda,
-        "Return first 'count' UNUSED slots per tree into out_indices; -1 if not enough.",
+        "Finds the first 'count' unused slots in each tree.",
         py::arg("trees"),
-        py::arg("count"),                  // int
+        py::arg("count"),
         py::arg("max_nodes"),
-        py::arg("out_indices"));           // (B, count) int32
+        py::arg("out_indices"));
 }

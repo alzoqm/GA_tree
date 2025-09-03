@@ -1,11 +1,13 @@
 // csrc/root_crossover_kernel.cu
+// This file contains the CUDA implementation of the root branch crossover operations.
+
 #include "root_crossover_kernel.cuh"
 #include "crossover_utils.cuh"
 #include "constants.h"
 #include <curand_kernel.h>
 
 // ==============================================================================
-//       [신규] 커널 3: RootBranchCrossover를 위한 배치 복사 커널
+//       Kernel 3: Batch Copy Kernel for RootBranchCrossover
 // ==============================================================================
 __global__ void copy_branches_kernel(
     float* child_batch_ptr,
@@ -21,16 +23,14 @@ __global__ void copy_branches_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // [안전성] child 버퍼 중 non-root 노드만 UNUSED로 초기화하여 잔존 쓰레기 노드 방지
-    // 루트 브랜치(0,1,2)는 Python에서 이미 설정되었으므로 건드리지 않음
+    // Initialize non-root nodes of the child buffer to UNUSED to prevent residual nodes.
     float* child_ptr_init = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
-    for (int i = 3; i < max_nodes; ++i) {  // Start from index 3, skip root branches (0,1,2)
+    for (int i = 3; i < max_nodes; ++i) {
         float* nd = child_ptr_init + i * NODE_INFO_DIM;
         nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
-        // 부모/깊이/파라미터는 필요 시 이후 복사에서 덮어씀
     }
 
-    // --- 1. 스레드별 포인터 및 버퍼 설정 ---
+    // --- 1. Set up thread-specific pointers and buffers ---
     float* child_ptr = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p1_ptr = p1_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     const float* p2_ptr = p2_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
@@ -41,7 +41,7 @@ __global__ void copy_branches_kernel(
 
     int child_next_idx = 3; 
 
-    // --- 2. 3개의 브랜치(LONG, HOLD, SHORT)에 대해 순차적으로 복사 ---
+    // --- 2. Sequentially copy the three branches (LONG, HOLD, SHORT) ---
     for (int b_idx = 0; b_idx < 3; ++b_idx) {
         int donor_choice = donor_map_ptr[batch_idx * 3 + b_idx];
         const float* donor_ptr = (donor_choice == 0) ? p1_ptr : p2_ptr;
@@ -90,14 +90,7 @@ __global__ void copy_branches_kernel(
 }
 
 // ==============================================================================
-//                 NEW: Repair After RootBranch Crossover Kernel
-//   - All work buffers are allocated in Python and passed in here.
-//   - Ensures:
-//       1) Each root (0,1,2) has at least one child (adds default ACTION if empty)
-//       2) No DECISION leaves: convert DECISION with no children -> ACTION
-//       3) No mixing under a parent: if any ACTION child exists, remove all DECISION children
-//          and keep exactly one ACTION child (delete extra ACTION subtrees if any)
-//   - Deletions use BFS buffers to clear full subtrees.
+//                 Repair After RootBranch Crossover Kernel
 // ==============================================================================
 
 __device__ __forceinline__ int   rb_f2i(float x){ return __float2int_rn(x); }
@@ -161,11 +154,9 @@ __global__ void repair_after_root_branch_kernel(
     int* q  = bfs_q     + (size_t)b * (2 * N);
     int* rs = bfs_res   + (size_t)b * (2 * N);
 
-    // Zero counts in parallel
     for (int i = threadIdx.x; i < N; i += blockDim.x){ ch[i] = 0; ac[i] = 0; dc[i] = 0; }
     __syncthreads();
 
-    // Build counts in parallel
     for (int j = threadIdx.x; j < N; j += blockDim.x){
         const float* nb = rb_node(tree, D, j);
         int t = rb_f2i(nb[COL_NODE_TYPE]);
@@ -179,21 +170,15 @@ __global__ void repair_after_root_branch_kernel(
     __syncthreads();
 
     if (threadIdx.x == 0){
-        // CONSERVATIVE REPAIR: Force each root branch to have exactly one ACTION child only
-        // This is much simpler and more robust than complex tree manipulation
-        
-        for (int r = 0; r < 3; ++r){  // For each root branch (0,1,2)
-            // First, clear ALL children of this root
+        for (int r = 0; r < 3; ++r){
             for (int j = 3; j < N; ++j){
                 float* nd = rb_node(tree, D, j);
                 if (rb_f2i(nd[COL_NODE_TYPE]) != NODE_TYPE_UNUSED && 
                     rb_f2i(nd[COL_PARENT_IDX]) == r){
-                    // Clear this subtree completely
                     rb_clear_subtree(tree, N, D, j, q, rs, 2*N);
                 }
             }
             
-            // Now find or create exactly one ACTION child for this root
             int action_slot = -1;
             for (int i = 3; i < N; ++i){
                 float* nd = rb_node(tree, D, i);
@@ -209,21 +194,15 @@ __global__ void repair_after_root_branch_kernel(
                 nd[COL_PARENT_IDX] = rb_i2f(r);
                 nd[COL_DEPTH]      = 1.0f;
                 nd[COL_PARAM_1]    = rb_i2f(ACTION_CLOSE_ALL);
-                // zero other params
                 for (int c = 4; c < D; ++c) nd[c] = 0.0f;
             }
         }
     }
     __syncthreads();
-
-    // That's it! The conservative repair ensures a minimal valid structure:
-    // - Each root branch (0,1,2) has exactly one ACTION leaf child
-    // - No other nodes exist, preventing any validation violations
-    // This sacrifices genetic diversity for guaranteed structural validity
 }
 
 // ==============================================================================
-//                NEW: Parent Pool Sampling Root Branch Crossover Kernel
+//                Parent Pool Sampling Root Branch Crossover Kernel
 // ==============================================================================
 
 __global__ void root_branch_sampling_crossover_kernel(
@@ -241,14 +220,11 @@ __global__ void root_branch_sampling_crossover_kernel(
     const int batch_idx = blockIdx.x;
     if (batch_idx >= batch_size) return;
 
-    // --- 1. Thread-local pointers and buffer setup ---
     float* child_ptr = child_batch_ptr + batch_idx * max_nodes * NODE_INFO_DIM;
     int* my_queue = bfs_queue_buffer_ptr + batch_idx * max_nodes;
     int* my_results = result_indices_buffer_ptr + batch_idx * max_nodes;
     int* my_old_to_new_map = old_to_new_map_buffer_ptr + batch_idx * max_nodes;
 
-    // Initialize child tree (roots should already be set by Python)
-    // Clear non-root nodes to UNUSED
     for (int i = 3; i < max_nodes; ++i) {
         float* nd = child_ptr + i * NODE_INFO_DIM;
         nd[COL_NODE_TYPE] = NODE_TYPE_UNUSED;
@@ -257,118 +233,81 @@ __global__ void root_branch_sampling_crossover_kernel(
         for (int c = 3; c < NODE_INFO_DIM; ++c) nd[c] = 0.0f;
     }
 
-    // Initialize RNG for this batch
     curandState state;
     curand_init(batch_idx, 0, 0, &state);
 
-    int child_next_idx = 3; // Start after root branches (0,1,2)
+    int child_next_idx = 3;
     bool success = false;
 
-    // --- 2. Retry mechanism for valid offspring generation ---
     for (int retry = 0; retry < max_retries && !success; ++retry) {
-        // Reset child pointer for this retry
         child_next_idx = 3;
         for (int i = 3; i < max_nodes; ++i) {
             child_ptr[i * NODE_INFO_DIM + COL_NODE_TYPE] = NODE_TYPE_UNUSED;
         }
 
-        // Sample three parents independently for LONG, HOLD, SHORT branches
         int branch_parents[3];
-        int total_estimated_size = 3; // Start with 3 roots
+        int total_estimated_size = 3;
         bool size_ok = true;
         
         if (batch_idx == 0) {
-            printf("[DEBUG] Batch %d, Retry %d: Starting retry\n", batch_idx, retry);
         }
 
         for (int branch = 0; branch < 3; ++branch) {
-            // Sample random parent from pool
             branch_parents[branch] = (int)(curand_uniform(&state) * pool_size);
-            
-            
-            // Get pointer to selected parent tree
             const float* parent_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
-            
             int branch_child_count = 0;
-            // Find all children of this branch in the selected parent
             for (int node_idx = 0; node_idx < max_nodes; ++node_idx) {
                 int node_parent_idx = (int)parent_ptr[node_idx * NODE_INFO_DIM + COL_PARENT_IDX];
-                
-                // Checking node for parent relationship
-                
                 if (node_parent_idx == branch) {
-                    // This node is a child of the current branch, measure its subtree
                     int subtree_size = find_subtree_nodes_device(parent_ptr, node_idx, my_queue, my_results, max_nodes);
                     total_estimated_size += subtree_size;
                     branch_child_count++;
-                    
                 }
             }
-            
         }
 
-        // Check if estimated size fits
-        
         if (total_estimated_size > max_nodes) {
             size_ok = false;
             if (batch_idx == 0) {
-                // Size constraint violated, retrying
             }
-            continue; // Retry with different parent selection
+            continue;
         }
 
-        // --- 3. Copy branches from selected parents ---
         if (size_ok) {
             bool copy_success = true;
-            
-            
             for (int branch = 0; branch < 3 && copy_success; ++branch) {
                 const float* donor_ptr = parent_pool_ptr + branch_parents[branch] * max_nodes * NODE_INFO_DIM;
-                
-                // Find and copy all subtrees under this branch
                 for (int donor_node_idx = 0; donor_node_idx < max_nodes && copy_success; ++donor_node_idx) {
                     if ((int)donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_PARENT_IDX] == branch) {
-                        // This is a child of the current branch, copy its entire subtree
                         int subtree_size = find_subtree_nodes_device(donor_ptr, donor_node_idx, my_queue, my_results, max_nodes);
-                        
-                        // Check if we have space
                         if (child_next_idx + subtree_size > max_nodes) {
                             copy_success = false;
                             break;
                         }
 
-                        // Initialize old_to_new_map
                         for(int i = 0; i < max_nodes; ++i) my_old_to_new_map[i] = -1;
                         for (int k = 0; k < subtree_size; ++k) {
                             my_old_to_new_map[my_results[k]] = child_next_idx + k;
                         }
 
-                        // Calculate depth offset
-                        float dest_parent_depth = child_ptr[branch * NODE_INFO_DIM + COL_DEPTH]; // Root depth is 0
+                        float dest_parent_depth = child_ptr[branch * NODE_INFO_DIM + COL_DEPTH];
                         float source_root_depth = donor_ptr[donor_node_idx * NODE_INFO_DIM + COL_DEPTH];
                         float depth_offset = (dest_parent_depth + 1) - source_root_depth;
 
-                        // Copy subtree nodes
                         for (int k = 0; k < subtree_size; ++k) {
                             int old_idx = my_results[k];
                             int new_idx = my_old_to_new_map[old_idx];
-                            
                             const float* src_node_data = donor_ptr + old_idx * NODE_INFO_DIM;
                             float* dest_node_data = child_ptr + new_idx * NODE_INFO_DIM;
 
-                            // Copy all node data
                             for(int d = 0; d < NODE_INFO_DIM; ++d) dest_node_data[d] = src_node_data[d];
 
-                            // Adjust depth
                             dest_node_data[COL_DEPTH] += depth_offset;
                             
-                            // Remap parent index
                             int old_parent_idx = (int)src_node_data[COL_PARENT_IDX];
                             if (old_idx == donor_node_idx) {
-                                // This is the subtree root, parent is the branch root
                                 dest_node_data[COL_PARENT_IDX] = (float)branch;
                             } else {
-                                // Internal node, parent is within the subtree
                                 dest_node_data[COL_PARENT_IDX] = (float)my_old_to_new_map[old_parent_idx];
                             }
                         }
@@ -376,18 +315,13 @@ __global__ void root_branch_sampling_crossover_kernel(
                     }
                 }
             }
-            
             if (copy_success) {
                 success = true;
-            } else {
-                // copy_failed: will retry or fallback below
             }
         }
     }
 
-    // --- 4. Fallback: Create minimal valid tree if all retries failed ---
     if (!success) {
-        // Conservative fallback: one ACTION per root branch
         child_next_idx = 3;
         for (int branch = 0; branch < 3; ++branch) {
             if (child_next_idx < max_nodes) {
@@ -395,20 +329,17 @@ __global__ void root_branch_sampling_crossover_kernel(
                 action_node[COL_NODE_TYPE] = (float)NODE_TYPE_ACTION;
                 action_node[COL_PARENT_IDX] = (float)branch;
                 action_node[COL_DEPTH] = 1.0f;
-                action_node[COL_PARAM_1] = (float)ACTION_CLOSE_ALL; // Safe default action
-                // Zero other parameters
+                action_node[COL_PARAM_1] = (float)ACTION_CLOSE_ALL;
                 for (int c = 4; c < NODE_INFO_DIM; ++c) action_node[c] = 0.0f;
-                
                 child_next_idx++;
             } else {
-                // No space left for fallback action
             }
         }
     }
 }
 
 // ==============================================================================
-//                       C++ 래퍼 함수 (커널 런처)
+//                       C++ Wrapper Functions (Kernel Launchers)
 // ==============================================================================
 
 void copy_branches_batch_cuda(
@@ -491,7 +422,6 @@ void root_branch_sampling_crossover_cuda(
     const int pool_size = parent_pool.size(0);
     if (batch_size == 0 || pool_size == 0) return;
 
-    // Validate tensor shapes
     TORCH_CHECK(child_batch.is_cuda(), "child_batch must be CUDA");
     TORCH_CHECK(parent_pool.is_cuda(), "parent_pool must be CUDA");
     TORCH_CHECK(child_batch.scalar_type() == torch::kFloat32, "child_batch must be float32");

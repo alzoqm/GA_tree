@@ -1,28 +1,31 @@
-// csrc/predict_kernel.cuh - Optimized GA-Tree Prediction Kernel
+// csrc/predict_kernel.cuh
+// This header file declares the CUDA function for performing predictions with a GA-Tree.
+
 #pragma once
 
 #include <torch/extension.h>
 
 /**
- * GPU-accelerated prediction for GA-Tree populations with safety guarantees
- * 
- * This function performs batch prediction on GA-Tree populations with the following guarantees:
- * - No illegal memory access even with malformed inputs
- * - No infinite loops through visited bitmap and step limits
- * - Proper CSR validation and bounds checking
- * - Scalable to hundreds of thousands of trees
- * 
- * Architecture: One block per tree for optimal scalability
- * Traversal: BFS from root branch to first reachable ACTION node
- * 
- * @param trees       (B,N,D) float32, CUDA, contiguous - population tensor
- * @param features    (F,) float32, CUDA - shared feature vector
- * @param positions   (B,) int32, CUDA - root branch types per tree
- * @param offsets     (B,N+1) int32, CUDA - CSR row offsets per tree
- * @param children    (B,Emax) int32, CUDA - CSR column indices per tree
- * @param results     (B,4) float32, CUDA - output [action, p2, p3, p4]
- * @param bfs_q       (B,N) int32, CUDA - BFS queue buffer per tree
- * @param visited     (B,N) int32, CUDA - visited flags per tree (0/1)
+ * @brief Performs GPU-accelerated prediction for a batch of GA-Trees with safety guarantees.
+ *
+ * This function performs batch prediction on a population of GA-Trees. It is optimized for
+ * performance and includes several safety features to prevent common issues such as illegal
+ * memory access and infinite loops.
+ *
+ * Key Features:
+ * - **Safe Memory Access**: Prevents illegal memory access even with malformed inputs.
+ * - **Infinite Loop Protection**: Uses a visited bitmap and step limits to prevent infinite loops.
+ * - **CSR Validation**: Includes proper validation and bounds checking for the CSR data structure.
+ * - **Scalability**: Designed to be scalable to hundreds of thousands of trees.
+ *
+ * @param trees The population tensor (B, N, D).
+ * @param features The shared feature vector (F,).
+ * @param positions The root branch types for each tree (B,).
+ * @param offsets The CSR row offsets for each tree (B, N+1).
+ * @param children The CSR column indices for each tree (B, Emax).
+ * @param results The output tensor for the prediction results (B, 4).
+ * @param bfs_q A buffer for the BFS queue for each tree (B, N).
+ * @param visited A buffer for the visited flags for each tree (B, N).
  */
 void predict_cuda(
     torch::Tensor trees,     // (B,N,D) float32, CUDA, contiguous

@@ -1,4 +1,7 @@
 // csrc/predict_bindings.cpp
+// This file contains the Python bindings for the CUDA prediction and adjacency list kernels.
+// It uses pybind11 to expose the C++/CUDA functions to Python.
+
 #include <torch/extension.h>
 #include "predict_kernel.cuh"
 #include "adjacency_builder.cuh"
@@ -6,44 +9,50 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "High-performance CUDA prediction kernels for GATree";
 
-    // --- Adjacency (Step 1: counts + offsets + overflow mask) ---
+    // --- Adjacency List Creation ---
+
+    // Step 1: Count children, create CSR offsets, and detect overflow.
     m.def("count_and_create_offsets", &count_and_create_offsets_cuda,
-          "Step 1: Count children, build CSR offsets, and return per-tree overflow mask",
+          "Counts children, builds CSR offsets, and returns a per-tree overflow mask.",
           py::arg("population_tensor"),
           py::arg("max_children"));
 
-    // --- Adjacency (Step 2: fill + optional sort) ---
+    // Step 2: Fill the child indices array and optionally sort.
     m.def("fill_child_indices", &fill_child_indices_cuda,
-          "Step 2: Fill CSR child indices and (optionally) sort per parent",
+          "Fills CSR child indices and optionally sorts them for each parent.",
           py::arg("population_tensor"),
           py::arg("offset_array"),
           py::arg("child_indices"),
           py::arg("max_children"),
           py::arg("sort_children") = true);
 
-    // --- Validator ---
+    // --- Adjacency List Validation ---
     m.def("validate_adjacency", &validate_adjacency_cuda,
-          "Validate CSR/structure; writes per-tree violation bitmask (0 means OK)",
+          "Validates the CSR structure and writes a per-tree violation bitmask.",
           py::arg("population_tensor"),
           py::arg("offset_array"),
           py::arg("child_indices"),
           py::arg("out_violation_mask"));
 
-    // --- Adjacency Dictionary Builder for Python Synchronization ---
+    // --- Adjacency Dictionary Builder ---
+
+    // This function builds adjacency dictionaries for all trees in parallel on the GPU.
     m.def("build_adjacency_dicts", &build_adjacency_dicts_cuda,
-          "Build adjacency dictionaries for all trees in parallel (replaces Python _build_adjacency_list loop)",
+          "Builds adjacency dictionaries for all trees in parallel.",
           py::arg("trees"),
           py::arg("next_idxs"));
 
-    // --- Memory-Optimized Adjacency Dictionary Builder ---
+    // This is a memory-optimized version of the adjacency dictionary builder.
     m.def("build_adjacency_dicts_optimized", &build_adjacency_dicts_optimized_cuda,
-          "Memory-optimized adjacency dict builder eliminating Python loops with compact format",
+          "A memory-optimized function to build adjacency dictionaries.",
           py::arg("trees"),
           py::arg("next_idxs"));
 
-    // --- Optimized prediction function with safety guarantees ---
+    // --- Prediction ---
+
+    // This function performs GPU-accelerated prediction for a batch of trees.
     m.def("predict", &predict_cuda, 
-          "GPU-accelerated prediction for GA-Tree populations with safety guarantees",
+          "Performs GPU-accelerated prediction for a batch of trees with safety guarantees.",
           py::arg("trees"), py::arg("features"), py::arg("positions"), 
           py::arg("offsets"), py::arg("children"), py::arg("results"),
           py::arg("bfs_q"), py::arg("visited"));

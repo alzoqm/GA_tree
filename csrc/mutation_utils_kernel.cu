@@ -1,30 +1,35 @@
 // csrc/mutation_utils_kernel.cu
+// This file implements various utility kernels that are used by the mutation operations.
+// These utilities provide basic functionalities like finding subtrees, updating depths,
+// and finding empty nodes, which are essential for performing complex mutations.
+
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include "constants.h"
 #include "mutation_utils_kernel.cuh"
 
+// Macro for checking CUDA errors.
 #define CUDA_CHECK_ERRORS() \
   do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { \
     printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
   }} while (0)
 
-// Helper: read/write float-encoded ints safely
+// Helper functions for safe type conversion between float and int.
 __device__ __forceinline__ int f2i(float x) { return static_cast<int>(x + 0.5f); }
 __device__ __forceinline__ float i2f(int x) { return static_cast<float>(x); }
 
+// Checks if a node index is within the valid range.
 __device__ __forceinline__ bool valid_node_index(int idx, int max_nodes) {
     return idx >= 0 && idx < max_nodes;
 }
 
-// BFS over subtree rooted at r, collecting into result[]; returns count
+// Performs a Breadth-First Search (BFS) to collect all nodes in a subtree.
 __device__ int bfs_collect_subtree(
     const float* tree, int max_nodes, int node_dim,
-    int r,
+    int r, // The root of the subtree to collect.
     int* q, int* res, int qcap
 ){
     if (!valid_node_index(r, max_nodes)) return 0;
-    // skip UNUSED roots
     const float* root = tree + r*node_dim;
     if (f2i(root[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) return 0;
 
@@ -36,7 +41,7 @@ __device__ int bfs_collect_subtree(
 
     while (head < tail && tail < qcap && outc < qcap) {
         int cur = q[head++];
-        // scan all nodes to find children (parent == cur)
+        // Scan all nodes to find children of the current node.
         for (int j = 0; j < max_nodes; ++j) {
             const float* nb = tree + j*node_dim;
             if (f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) continue;
@@ -51,6 +56,7 @@ __device__ int bfs_collect_subtree(
     return outc;
 }
 
+// Kernel to find all nodes in a subtree for a batch of trees.
 __global__ void k_find_subtree_nodes_batch(
     const float* __restrict__ trees, int B, int max_nodes, int node_dim,
     const int* __restrict__ root_indices,
@@ -74,6 +80,7 @@ __global__ void k_find_subtree_nodes_batch(
     out_counts[b] = cnt;
 }
 
+// Host-side wrapper for the k_find_subtree_nodes_batch kernel.
 void find_subtree_nodes_batch_cuda(
     const torch::Tensor& trees, const torch::Tensor& root_indices, int max_nodes,
     torch::Tensor bfs_queue_buffer, torch::Tensor result_indices_buffer, torch::Tensor out_counts
@@ -101,7 +108,7 @@ void find_subtree_nodes_batch_cuda(
     CUDA_CHECK_ERRORS();
 }
 
-// Update depth += delta for each subtree root in batch
+// Kernel to update the depth of all nodes in a subtree by a given delta.
 __global__ void k_update_subtree_depth_batch(
     float* __restrict__ trees, int B, int max_nodes, int node_dim,
     const int* __restrict__ root_indices,
@@ -128,6 +135,7 @@ __global__ void k_update_subtree_depth_batch(
     }
 }
 
+// Host-side wrapper for the k_update_subtree_depth_batch kernel.
 void update_subtree_depth_batch_cuda(
     torch::Tensor trees, const torch::Tensor& root_indices, int delta, int max_nodes,
     torch::Tensor bfs_queue_buffer, torch::Tensor result_indices_buffer
@@ -150,7 +158,7 @@ void update_subtree_depth_batch_cuda(
     CUDA_CHECK_ERRORS();
 }
 
-// Get max depth inside subtree
+// Kernel to get the maximum depth of a subtree.
 __global__ void k_get_subtree_max_depth_batch(
     const float* __restrict__ trees, int B, int max_nodes, int node_dim,
     const int* __restrict__ root_indices,
@@ -183,6 +191,7 @@ __global__ void k_get_subtree_max_depth_batch(
     out_max_depths[b] = md;
 }
 
+// Host-side wrapper for the k_get_subtree_max_depth_batch kernel.
 void get_subtree_max_depth_batch_cuda(
     const torch::Tensor& trees, const torch::Tensor& root_indices, int max_nodes,
     torch::Tensor bfs_queue_buffer, torch::Tensor result_indices_buffer, torch::Tensor out_max_depths
@@ -207,7 +216,7 @@ void get_subtree_max_depth_batch_cuda(
     CUDA_CHECK_ERRORS();
 }
 
-// Find first `count` UNUSED slots per tree
+// Kernel to find the first 'count' empty (UNUSED) slots in each tree.
 __global__ void k_find_empty_slots_batch(
     const float* __restrict__ trees, int B, int max_nodes, int node_dim,
     int count,
@@ -219,12 +228,12 @@ __global__ void k_find_empty_slots_batch(
     const float* tree = trees + b*max_nodes*node_dim;
     int found = 0;
     
-    // Initialize all outputs to -1
+    // Initialize all output indices to -1.
     for (int j = 0; j < count; ++j) {
         out_indices[b*count + j] = -1;
     }
     
-    // Find UNUSED slots
+    // Find UNUSED slots.
     for (int i = 0; i < max_nodes && found < count; ++i) {
         const float* nb = tree + i*node_dim;
         if (f2i(nb[COL_NODE_TYPE]) == NODE_TYPE_UNUSED) {
@@ -234,6 +243,7 @@ __global__ void k_find_empty_slots_batch(
     }
 }
 
+// Host-side wrapper for the k_find_empty_slots_batch kernel.
 void find_empty_slots_batch_cuda(
     const torch::Tensor& trees, int count, int max_nodes, torch::Tensor out_indices
 ){
