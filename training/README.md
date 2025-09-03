@@ -122,16 +122,17 @@ print(metrics.shape)  # (B, 6): mean, PF, winrate(event), maxDD, compound, winra
 - 최소 제약(기본값은 `experiment_config.yaml`의 `evaluation.simulation_env`로부터 주입):
   - `min_entry_ratio`: 0.05 (5%). 신규 진입 및 플립 시 최소 진입 비율로 적용.
   - `min_leverage`: 2. 신규 진입 및 플립 시 레버리지 하한.
+  - `max_leverage`: 100. 신규 진입 및 플립 시 레버리지 상한.
   - `min_additional_enter_ratio`: 0.05 (5%). 추가 진입의 최소 단위 및 남은 자본 용량 판정에 사용.
 
 - 신규 진입(ACTION_NEW_LONG / ACTION_NEW_SHORT):
   - 입력 비율은 `[min_entry_ratio, 1.0]`로 클램프.
-  - 레버리지는 최소 `min_leverage`로 클램프.
+  - 레버리지는 `[min_leverage, max_leverage]` 범위로 클램프.
   - 수수료 차감 후 포지션, 평균가, 레버리지, 진입 비율 초기화.
 
 - 포지션 플립(ACTION_FLIP_POSITION):
   - 기존 포지션을 청산(PnL 및 수수료 정산) 후, 동일 바에서 즉시 반대 포지션으로 진입.
-  - 새 진입 비율은 `[min_entry_ratio, 1.0]`로, 레버리지는 최소 `min_leverage`로 강제.
+  - 새 진입 비율은 `[min_entry_ratio, 1.0]`로, 레버리지는 `[min_leverage, max_leverage]`로 강제.
   - 청산 수수료(기존 비율/레버리지) + 신규 진입 수수료(새 비율/레버리지) 모두 반영.
 
 - 전부 청산(ACTION_CLOSE_ALL):
