@@ -11,13 +11,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "High-performance CUDA utility kernels for GATree";
 
     // --- Population Reorganization ---
-
-    // This binding exposes the reorganize_population_cuda function to Python.
-    m.def("reorganize_population", &reorganize_population_cuda, 
-          "Reorganizes the population tensor on the GPU to remove fragmentation.");
-    
-    // This binding exposes the reorganize_population_with_arrays_cuda function to Python.
-    m.def("reorganize_population_with_arrays", &reorganize_population_with_arrays_cuda, 
+    // Canonical API: reorganize_population uses pre-allocated arrays for performance and stability.
+    m.def("reorganize_population", &reorganize_population_with_arrays_cuda, 
           "Reorganizes the population tensor on the GPU using pre-allocated arrays.",
           py::arg("population_tensor"), py::arg("active_counts_per_tree"), py::arg("old_gid_to_new_gid_map"));
 

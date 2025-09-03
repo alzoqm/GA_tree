@@ -93,37 +93,6 @@ __global__ void reorganize_and_update_kernel(
     }
 }
 
-// C++ wrapper function to launch the reorganization kernels.
-void reorganize_population_cuda(torch::Tensor population_tensor) {
-    TORCH_CHECK(population_tensor.is_cuda(), "Population tensor must be on a CUDA device for reorganize.");
-    const int pop_size = population_tensor.size(0);
-    const int max_nodes = population_tensor.size(1);
-    const int total_nodes = pop_size * max_nodes;
-    if (total_nodes == 0) return;
-
-    auto int_options = torch::TensorOptions().device(population_tensor.device()).dtype(torch::kInt32);
-    torch::Tensor active_counts_per_tree = torch::zeros({pop_size}, int_options);
-    torch::Tensor old_gid_to_new_gid_map = torch::empty({total_nodes}, int_options);
-    
-    const int threads_per_block_scan = std::min(max_nodes, 1024);
-    compute_remap_indices_kernel<<<pop_size, threads_per_block_scan, max_nodes * sizeof(int)>>>(
-        population_tensor.data_ptr<float>(), active_counts_per_tree.data_ptr<int>(),
-        old_gid_to_new_gid_map.data_ptr<int>(), pop_size, max_nodes
-    );
-
-    torch::Tensor new_population = torch::full_like(population_tensor, 0.0f);
-    new_population.select(2, COL_NODE_TYPE).fill_(NODE_TYPE_UNUSED);
-
-    const int threads_per_block_reorg = 256;
-    const int num_blocks_reorg = (total_nodes + threads_per_block_reorg - 1) / threads_per_block_reorg;
-    reorganize_and_update_kernel<<<num_blocks_reorg, threads_per_block_reorg>>>(
-        population_tensor.data_ptr<float>(), old_gid_to_new_gid_map.data_ptr<int>(),
-        new_population.data_ptr<float>(), pop_size, max_nodes
-    );
-
-    population_tensor.copy_(new_population);
-}
-
 // A version of the reorganization function that uses pre-allocated arrays.
 void reorganize_population_with_arrays_cuda(
     torch::Tensor population_tensor,

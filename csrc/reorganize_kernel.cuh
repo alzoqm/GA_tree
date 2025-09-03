@@ -5,13 +5,6 @@
 #include <torch/extension.h>
 
 /**
- * @brief Reorganizes the population by removing unused nodes and compacting the trees.
- *
- * @param population_tensor The population tensor to be reorganized in-place.
- */
-void reorganize_population_cuda(torch::Tensor population_tensor);
-
-/**
  * @brief Reorganizes the population using pre-allocated arrays.
  *
  * @param population_tensor The population tensor to be reorganized in-place.

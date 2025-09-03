@@ -54,10 +54,22 @@ try:
     # Utility functions (from gatree_utils)
     validate_trees = gatree_utils.validate_trees
     init_population_cuda = gatree_utils.init_population_cuda
-    reorganize_population_with_arrays = gatree_utils.reorganize_population_with_arrays
-    # [추가] 단순 재배열 함수 노출
-    if hasattr(gatree_utils, 'reorganize_population'):
-        reorganize_population = gatree_utils.reorganize_population
+    # Canonical API name: reorganize_population
+    # Prefer array-backed version when available; otherwise, support legacy signature transparently.
+    if hasattr(gatree_utils, 'reorganize_population_with_arrays'):
+        def reorganize_population(population_tensor, active_counts_per_tree, old_gid_to_new_gid_map):
+            return gatree_utils.reorganize_population_with_arrays(
+                population_tensor, active_counts_per_tree, old_gid_to_new_gid_map
+            )
+    elif hasattr(gatree_utils, 'reorganize_population'):
+        def reorganize_population(population_tensor, active_counts_per_tree=None, old_gid_to_new_gid_map=None):
+            # Support both new (3-arg) and legacy (1-arg) bindings transparently
+            if active_counts_per_tree is not None and old_gid_to_new_gid_map is not None:
+                return gatree_utils.reorganize_population(
+                    population_tensor, active_counts_per_tree, old_gid_to_new_gid_map
+                )
+            else:
+                return gatree_utils.reorganize_population(population_tensor)
     else:
         reorganize_population = None
     
@@ -102,7 +114,6 @@ except ImportError as e:
     root_branch_sampling_crossover_cuda = None
     validate_trees = None
     init_population_cuda = None
-    reorganize_population_with_arrays = None
     reorganize_population = None
     ppts_select_elites = None
     ppts_pick_parents = None

@@ -833,7 +833,7 @@ class GATreePop:
                 tree.reorganize_nodes()
             return
         
-        # [수정] Python에서 배열 할당 수행
+        # Python에서 배열 할당 수행 (callers supply pre-allocated buffers)
         pop_size = self.population_tensor.size(0)
         max_nodes = self.population_tensor.size(1)
         total_nodes = pop_size * max_nodes
@@ -845,8 +845,8 @@ class GATreePop:
         active_counts_per_tree = torch.zeros(pop_size, **int_options)
         old_gid_to_new_gid_map = torch.empty(total_nodes, **int_options)
         
-        # [수정] C++/CUDA 확장 모듈에 사전 할당된 배열 전달
-        gatree_cuda.reorganize_population_with_arrays(
+        # C++/CUDA 확장 모듈에 사전 할당된 배열 전달
+        gatree_cuda.reorganize_population(
             self.population_tensor,
             active_counts_per_tree,
             old_gid_to_new_gid_map
