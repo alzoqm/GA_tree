@@ -3,7 +3,12 @@
 import pandas as pd
 import numpy as np
 import yaml
-import data.ta_lib_feature_generator as talib_feat
+import re
+try:
+    import data.ta_lib_feature_generator as talib_feat
+except Exception:
+    # Lazy/optional import to allow using classification helpers without TA-Lib
+    talib_feat = None
 from typing import List, Dict, Any, Tuple
 
 # ==============================================================================
@@ -41,6 +46,10 @@ def generate_multi_timeframe_features(
     source_df.set_index(timestamp_col, inplace=True)
     
     all_new_columns = []
+
+    # talib 기반 기능이 필요하므로 모듈 체크
+    if talib_feat is None:
+        raise ImportError("TA-Lib 기반 피처 생성을 위해 'data.ta_lib_feature_generator' 임포트가 필요합니다. TA-Lib 설치를 확인하세요.")
 
     # --- 1. 기준 시간 단위 결정 및 기준 데이터프레임 생성 ---
     time_deltas = [pd.to_timedelta(tf.replace('m', 'T').replace('h','H').replace('d','D')) for tf in target_timeframes]
@@ -135,66 +144,93 @@ def _generate_model_config_from_features(
     """
     생성된 전체 피처 목록과 YAML에서 로드한 '분류 설정'을 받아
     모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
-    [수정] `startswith`로 인한 오분류를 막기 위해 템플릿을 이름 길이순으로 정렬합니다.
+
+    개선 사항:
+    - 접두어 startswith 매칭을 경계 기반 정규식으로 대체: ^key(?:_|$)
+    - 컬럼명 끝의 타임프레임 접미사(_5m/_1h/_4h/_1d 등)는 매칭 시에만 제거
+    - 교차 카테고리 키 중복/다중 매칭 경고 출력
     """
     print("\n--- YAML 설정을 기반으로 모델 config를 동적으로 생성합니다 ---")
-    
+
     feature_num_template = classification_config.get('feature_num', {})
     feature_comparison_template = classification_config.get('feature_comparison', [])
     feature_bool_template = classification_config.get('feature_bool', [])
-    
-    # --- [수정] 가장 긴 이름부터 매칭되도록 템플릿 키를 정렬 (오분류 방지) ---
-    # 예: 'SMA_Ratio'가 'SMA'보다 먼저 검사되도록 하여 정확한 타입으로 분류
-    sorted_bool_keys = sorted(feature_bool_template, key=len, reverse=True)
-    sorted_comparison_keys = sorted(feature_comparison_template, key=len, reverse=True)
-    sorted_num_keys = sorted(feature_num_template.keys(), key=len, reverse=True)
-    # --- [수정] 끝 ---
-    
-    final_feature_num = {}
-    final_feature_bool = []
-    comparison_feature_list = []
-    unclassified_cols = []
+
+    # Helper: strip trailing timeframe suffix like _5m, _1h, _4h, _1d (matching only)
+    tf_suffix_re = re.compile(r"^(.*)_(\d+[mhd])$")
+    def strip_tf(name: str) -> str:
+        m = tf_suffix_re.match(name)
+        return m.group(1) if m else name
+
+    # Build boundary-aware patterns and sort by key length desc
+    def make_patterns(keys):
+        sorted_keys = sorted(keys, key=len, reverse=True)
+        return [(k, re.compile(rf"^{re.escape(k)}(?:_|$)")) for k in sorted_keys]
+
+    pat_bool = make_patterns(feature_bool_template)
+    pat_cmp = make_patterns(feature_comparison_template)
+    pat_num = make_patterns(list(feature_num_template.keys()))
+
+    # Cross-category key overlap check (warn only)
+    set_bool = set(feature_bool_template)
+    set_cmp = set(feature_comparison_template)
+    set_num = set(feature_num_template.keys())
+    overlaps = {
+        'bool&cmp': sorted(list(set_bool & set_cmp)),
+        'bool&num': sorted(list(set_bool & set_num)),
+        'cmp&num': sorted(list(set_cmp & set_num)),
+    }
+    for tag, ov in overlaps.items():
+        if ov:
+            print(f"경고: 분류 키 중복 감지({tag}): {ov}")
+
+    final_feature_num: Dict[str, Tuple[float, float]] = {}
+    final_feature_bool: List[str] = []
+    comparison_feature_list: List[str] = []
+    unclassified_cols: List[str] = []
+
+    def match_keys(name: str, patterns):
+        base = strip_tf(name)
+        return [k for (k, p) in patterns if p.match(base)]
 
     for col_name in all_generated_cols:
-        classified = False
-        
-        # 1. 불리언 타입 피처 분류 (정렬된 키 사용)
-        for base_name in sorted_bool_keys:
-            if col_name.startswith(base_name):
-                final_feature_bool.append(col_name)
-                classified = True
-                break
-        if classified: continue
+        matches_bool = match_keys(col_name, pat_bool)
+        matches_cmp = match_keys(col_name, pat_cmp)
+        matches_num = match_keys(col_name, pat_num)
 
-        # 2. 피처-피처 비교 타입 피처 분류 (정렬된 키 사용)
-        for base_name in sorted_comparison_keys:
-            if col_name.startswith(base_name):
-                comparison_feature_list.append(col_name)
-                classified = True
-                break
-        if classified: continue
+        # Multi-category conflict detection (warn only)
+        matched_categories = [c for c, arr in (
+            ('bool', matches_bool), ('cmp', matches_cmp), ('num', matches_num)
+        ) if arr]
+        if len(matched_categories) > 1:
+            print(f"경고: 다중 카테고리 매칭 감지: '{col_name}' -> {matched_categories}")
 
-        # 3. 피처-숫자 비교 타입 피처 분류 (정렬된 키 사용)
-        for base_name in sorted_num_keys:
-            if col_name.startswith(base_name):
-                final_feature_num[col_name] = feature_num_template[base_name]
-                classified = True
-                break
-        if classified: continue
-        
-        if not classified:
-            unclassified_cols.append(col_name)
+        # Priority: bool > cmp > num (backward compatible)
+        if matches_bool:
+            # If multiple keys match, first is the longest due to sorting
+            final_feature_bool.append(col_name)
+            continue
+        if matches_cmp:
+            comparison_feature_list.append(col_name)
+            continue
+        if matches_num:
+            key = matches_num[0]
+            final_feature_num[col_name] = feature_num_template[key]
+            continue
 
-    # 5. 최종 feature_comparison_map 생성
+        # No match
+        unclassified_cols.append(col_name)
+
+    # 5. 최종 feature_comparison_map 생성 (모든 비교 피처 간 pairwise 비교)
     final_feature_comparison_map = {
         feat: [other for other in comparison_feature_list if other != feat]
         for feat in comparison_feature_list
     }
-    
+
     print(f"  - 숫자 비교(feature_num) 타입 피처: {len(final_feature_num)}개")
     print(f"  - 피처간 비교(feature_comparison) 타입 피처: {len(final_feature_comparison_map)}개")
     print(f"  - 불리언(feature_bool) 타입 피처: {len(final_feature_bool)}개")
-    
+
     if unclassified_cols:
         print(f"  - 경고: 분류되지 않은 피처 {len(unclassified_cols)}개 발견: {unclassified_cols}")
 
