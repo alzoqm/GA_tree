@@ -13,3 +13,4 @@
 *.so
 /build/
 /test/
+/docs/

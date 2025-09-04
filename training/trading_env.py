@@ -85,6 +85,13 @@ class TradingEnvironment:
         self.trade_realized_pnl = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.trade_win_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
         self.trade_total_count = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+        # Trade-level aggregates for monitoring/analysis
+        self.trade_holding_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        self.trade_holding_avg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        self.curr_win_streak = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+        self.curr_loss_streak = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+        self.max_win_streak = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+        self.max_loss_streak = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
 
         # === 다중 목표 최적화 추가 기능 ===
         if objectives_config is None:
@@ -110,10 +117,14 @@ class TradingEnvironment:
         self.risk_free_rate = objectives_config.get('risk_free_rate', 0.0)
         self.lookback_period = objectives_config.get('lookback_period', 252)  # for annualization
         self.volatility_lookback = objectives_config.get('volatility_lookback', 30)
+        # Additional advanced metric params
+        self.mar = float(objectives_config.get('mar', 0.0))
+        self.benchmark_mode = str(objectives_config.get('benchmark_mode', 'close_to_next_open'))
         
         # 고급 메트릭 계산용 히스토리 (메모리 효율적으로 관리)
         self.returns_history = []  # Store return history for rolling calculations
         self.equity_history = []   # Store equity history for advanced metrics
+        self.bench_returns_history = []  # Benchmark returns for Information Ratio
 
         # === 액션 중복 방지(De-duplication) 설정 및 버퍼 ===
         self.enable_action_dedup = bool(env_config.get('enable_action_dedup', False))
@@ -187,6 +198,9 @@ class TradingEnvironment:
                 if win_mask.any():
                     idx_win = liquidated_indices[win_mask]
                     self.trade_win_count[idx_win] += 1
+                # Record trade-close monitoring stats
+                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
+                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
                 self.trade_open[liquidated_indices] = False
                 self.trade_realized_pnl[liquidated_indices] = 0.0
                 self.pos_list[liquidated_indices] = 0
@@ -224,6 +238,9 @@ class TradingEnvironment:
                 if win_mask.any():
                     idx_win = liquidated_indices[win_mask]
                     self.trade_win_count[idx_win] += 1
+                # Record trade-close monitoring stats
+                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
+                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
                 self.trade_open[liquidated_indices] = False
                 self.trade_realized_pnl[liquidated_indices] = 0.0
                 self.pos_list[liquidated_indices] = 0
@@ -283,6 +300,10 @@ class TradingEnvironment:
             if win_mask.any():
                 idx_win = torch.where(long_close_mask)[0][win_mask]
                 self.trade_win_count[idx_win] += 1
+            # Record trade-close monitoring stats
+            idxs_close = torch.where(long_close_mask)[0]
+            self._record_trade_close(idxs_close, self.trade_realized_pnl[idxs_close])
+            self.trade_holding_avg[idxs_close] = self.trade_holding_sum[idxs_close] / torch.clamp(self.trade_total_count[idxs_close].float(), min=1.0)
             self.trade_open[long_close_mask] = False
             self.trade_realized_pnl[long_close_mask] = 0.0
         short_close_mask = action_mask & currently_short
@@ -300,6 +321,10 @@ class TradingEnvironment:
             if win_mask.any():
                 idx_win = torch.where(short_close_mask)[0][win_mask]
                 self.trade_win_count[idx_win] += 1
+            # Record trade-close monitoring stats
+            idxs_close = torch.where(short_close_mask)[0]
+            self._record_trade_close(idxs_close, self.trade_realized_pnl[idxs_close])
+            self.trade_holding_avg[idxs_close] = self.trade_holding_sum[idxs_close] / torch.clamp(self.trade_total_count[idxs_close].float(), min=1.0)
             self.trade_open[short_close_mask] = False
             self.trade_realized_pnl[short_close_mask] = 0.0
         self.pos_list[action_mask] = 0
@@ -340,6 +365,9 @@ class TradingEnvironment:
                 win_mask = self.trade_realized_pnl[cidx] > 0
                 if win_mask.any():
                     self.trade_win_count[cidx[win_mask]] += 1
+                # Record trade-close monitoring stats
+                self._record_trade_close(cidx, self.trade_realized_pnl[cidx])
+                self.trade_holding_avg[cidx] = self.trade_holding_sum[cidx] / torch.clamp(self.trade_total_count[cidx].float(), min=1.0)
                 self.trade_open[cidx] = False
                 self.trade_realized_pnl[cidx] = 0.0
                 self.pos_list[cidx] = 0
@@ -389,6 +417,9 @@ class TradingEnvironment:
                 win_mask = self.trade_realized_pnl[cidx] > 0
                 if win_mask.any():
                     self.trade_win_count[cidx[win_mask]] += 1
+                # Record trade-close monitoring stats
+                self._record_trade_close(cidx, self.trade_realized_pnl[cidx])
+                self.trade_holding_avg[cidx] = self.trade_holding_sum[cidx] / torch.clamp(self.trade_total_count[cidx].float(), min=1.0)
                 self.trade_open[cidx] = False
                 self.trade_realized_pnl[cidx] = 0.0
                 self.pos_list[cidx] = 0
@@ -481,6 +512,10 @@ class TradingEnvironment:
             if win_mask.any():
                 idx_win = torch.where(flip_to_short_mask)[0][win_mask]
                 self.trade_win_count[idx_win] += 1
+            # Record trade-close monitoring stats
+            idxs_close = torch.where(flip_to_short_mask)[0]
+            self._record_trade_close(idxs_close, self.trade_realized_pnl[idxs_close])
+            self.trade_holding_avg[idxs_close] = self.trade_holding_sum[idxs_close] / torch.clamp(self.trade_total_count[idxs_close].float(), min=1.0)
             self.trade_open[flip_to_short_mask] = False
             self.trade_realized_pnl[flip_to_short_mask] = 0.0
             fee_open = ratio * lev.float() * self.taker_fee_rate
@@ -515,6 +550,10 @@ class TradingEnvironment:
             if win_mask.any():
                 idx_win = torch.where(flip_to_long_mask)[0][win_mask]
                 self.trade_win_count[idx_win] += 1
+            # Record trade-close monitoring stats
+            idxs_close = torch.where(flip_to_long_mask)[0]
+            self._record_trade_close(idxs_close, self.trade_realized_pnl[idxs_close])
+            self.trade_holding_avg[idxs_close] = self.trade_holding_sum[idxs_close] / torch.clamp(self.trade_total_count[idxs_close].float(), min=1.0)
             self.trade_open[flip_to_long_mask] = False
             self.trade_realized_pnl[flip_to_long_mask] = 0.0
             fee_open = ratio * lev.float() * self.taker_fee_rate
@@ -721,12 +760,24 @@ class TradingEnvironment:
         returns = (post_equity - pre_equity) / (pre_equity + 1e-9)
         self.returns_history.append(returns)
         self.equity_history.append(post_equity)
+        # Benchmark returns for Information Ratio (default: close_to_next_open)
+        if self.benchmark_mode == 'close_to_next_open':
+            curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
+            bench_r = (next_open_price - curr_close) / (curr_close + 1e-9)
+            if bench_r.dim() == 0:
+                bench_r_val = bench_r.item()
+                bench_vec = torch.full((self.chromosomes_size,), bench_r_val, dtype=torch.float32, device=self.device)
+            else:
+                bench_vec = bench_r
+            self.bench_returns_history.append(bench_vec)
         
         # Keep only recent history for memory efficiency
         max_history = max(self.volatility_lookback, self.lookback_period)
         if len(self.returns_history) > max_history:
             self.returns_history.pop(0)
             self.equity_history.pop(0)
+        if len(self.bench_returns_history) > max_history:
+            self.bench_returns_history.pop(0)
 
     def get_final_metrics(self, minimum_date=40):
         """원본 메트릭 계산 완전 보존"""
@@ -834,6 +885,113 @@ class TradingEnvironment:
         
         return sortino_ratios
 
+    def _calculate_omega_ratio(self, returns: List[torch.Tensor], mar: float) -> torch.Tensor:
+        """오메가 비율 계산 (MAR 기준 이익/손실 비)"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        ret = torch.stack(returns)  # [T, B]
+        period_mar = mar / self.lookback_period
+        excess = ret - period_mar
+        gains = torch.clamp(excess, min=0.0).sum(dim=0)
+        losses = torch.clamp(-excess, min=0.0).sum(dim=0)
+        omega = torch.where(losses > 1e-12, gains / (losses + 1e-12), torch.zeros_like(gains))
+        return omega
+
+    def _calculate_information_ratio(self, returns: List[torch.Tensor], bench_returns: List[torch.Tensor]) -> torch.Tensor:
+        """정보 비율 계산 (전략-벤치마크 초과수익 평균 / 추적오차)"""
+        if len(returns) < 2 or len(bench_returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        t = min(len(returns), len(bench_returns))
+        ret = torch.stack(returns[-t:])
+        bench = torch.stack(bench_returns[-t:])
+        active = ret - bench
+        mean_active = active.mean(dim=0)
+        tracking_err = active.std(dim=0, unbiased=True)
+        ir = torch.where(tracking_err > 1e-8, mean_active / tracking_err * np.sqrt(self.lookback_period), torch.zeros_like(mean_active))
+        return ir
+
+    def _calculate_t_stat(self, returns: List[torch.Tensor]) -> torch.Tensor:
+        """스텝 수익률의 t-통계량 계산"""
+        if len(returns) < 2:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+        ret = torch.stack(returns)
+        mean = ret.mean(dim=0)
+        std = ret.std(dim=0, unbiased=True)
+        n = ret.shape[0]
+        t = torch.where(std > 1e-8, mean / (std / (torch.sqrt(torch.tensor(float(n), device=self.device)))) , torch.zeros_like(mean))
+        return t
+
+    def _record_trade_close(self, indices: torch.Tensor, realized_vec: torch.Tensor):
+        """거래 종료 시 보유기간 합산 및 연승/연패 스트릭 갱신"""
+        if indices.numel() == 0:
+            return
+        is_win = realized_vec > 0
+        if is_win.any():
+            win_idx = indices[is_win]
+            self.curr_win_streak[win_idx] += 1
+            self.max_win_streak[win_idx] = torch.maximum(self.max_win_streak[win_idx], self.curr_win_streak[win_idx])
+            self.curr_loss_streak[win_idx] = 0
+        if (~is_win).any():
+            loss_idx = indices[~is_win]
+            self.curr_loss_streak[loss_idx] += 1
+            self.max_loss_streak[loss_idx] = torch.maximum(self.max_loss_streak[loss_idx], self.curr_loss_streak[loss_idx])
+            self.curr_win_streak[loss_idx] = 0
+        # Holding period accumulation for closed trades
+        hp = self.holding_period[indices].float()
+        self.trade_holding_sum[indices] += hp
+
+    def _calculate_psr(self, returns: List[torch.Tensor], sr_benchmark: float = 0.0) -> torch.Tensor:
+        """
+        Probabilistic Sharpe Ratio (Bailey & López de Prado) 계산
+        - SR_hat: 비연환산 샤프(기간 수익률 기준)
+        - S: 왜도, K: (피어슨) 첨도
+        - PSR = Phi( ((SR_hat - SR*) * sqrt(N-1)) / sqrt(1 - S*SR_hat + ((K-1)/4)*SR_hat^2) )
+        """
+        if len(returns) < 3:
+            return torch.zeros(self.chromosomes_size, device=self.device)
+
+        # Excess returns (per-step)
+        ret = torch.stack(returns)  # [T, B]
+        period_rf = self.risk_free_rate / self.lookback_period
+        ex = ret - period_rf
+
+        n = ex.shape[0]
+        # Sample moments
+        mean = ex.mean(dim=0)
+        std = ex.std(dim=0, unbiased=True)
+        # Guard for zero-variance cases
+        safe_mask = std > 1e-12
+        sr_hat = torch.zeros(self.chromosomes_size, device=self.device)
+        sr_hat[safe_mask] = mean[safe_mask] / std[safe_mask]
+
+        # Centralize for higher moments
+        xc = ex - mean
+        m2 = (xc.pow(2).sum(dim=0)) / (n - 1)
+        m3 = (xc.pow(3).sum(dim=0)) / (n - 1)
+        m4 = (xc.pow(4).sum(dim=0)) / (n - 1)
+
+        # Skewness and (Pearson) kurtosis
+        # S = m3 / m2^(3/2), K = m4 / m2^2
+        eps = 1e-12
+        denom_s = torch.clamp(m2, min=eps).pow(1.5)
+        denom_k = torch.clamp(m2, min=eps).pow(2.0)
+        S = m3 / denom_s
+        K = m4 / denom_k
+
+        # Denominator of PSR expression
+        denom = torch.sqrt(torch.clamp(1.0 - S * sr_hat + ((K - 1.0) / 4.0) * (sr_hat ** 2), min=eps))
+        num = (sr_hat - sr_benchmark) * torch.sqrt(torch.tensor(float(n - 1), device=self.device))
+
+        z = torch.zeros_like(sr_hat)
+        valid = denom > 0
+        z[valid] = num[valid] / denom[valid]
+
+        # Standard normal CDF via erf
+        psr = 0.5 * (1.0 + torch.erf(z / np.sqrt(2.0)))
+        psr = torch.clamp(psr, 0.0, 1.0)
+        psr[~safe_mask] = 0.0
+        return psr
+
     def get_multi_objective_metrics(self, minimum_date: int = 40) -> np.ndarray:
         """
         다중 목표 메트릭 계산 (원본 메트릭 + 고급 메트릭)
@@ -855,12 +1013,16 @@ class TradingEnvironment:
             volatilities = self._calculate_volatility(self.returns_history)
             calmar_ratios = self._calculate_calmar_ratio(self.returns_history)
             sortino_ratios = self._calculate_sortino_ratio(self.returns_history)
+            omega_ratios = self._calculate_omega_ratio(self.returns_history, self.mar)
+            information_ratios = self._calculate_information_ratio(self.returns_history, self.bench_returns_history)
         else:
             # Fallback for insufficient data
             sharpe_ratios = torch.zeros_like(mean_returns)
             volatilities = torch.zeros_like(mean_returns)
             calmar_ratios = torch.zeros_like(mean_returns)
             sortino_ratios = torch.zeros_like(mean_returns)
+            omega_ratios = torch.zeros_like(mean_returns)
+            information_ratios = torch.zeros_like(mean_returns)
         
         # Build objective dictionary
         available_objectives = {
@@ -873,7 +1035,9 @@ class TradingEnvironment:
             'trade_win_rate': trade_win_rates,
             'volatility': volatilities,
             'calmar_ratio': calmar_ratios,
-            'sortino_ratio': sortino_ratios
+            'sortino_ratio': sortino_ratios,
+            'omega_ratio': omega_ratios,
+            'information_ratio': information_ratios
         }
         
         # Select and arrange objectives according to configuration

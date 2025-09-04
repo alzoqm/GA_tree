@@ -498,8 +498,10 @@ def main():
                     objectives = best_metrics[i]
                     logging.info(f"Candidate {i+1:2d} | ", end="")
                     for obj_name, obj_val, minimize in zip(agg_obj_names, objectives, agg_minimize):
+                        # Display in natural form: flip sign for maximize metrics
+                        disp_val = obj_val if minimize else -obj_val
                         direction = "↓" if minimize else "↑"
-                        logging.info(f"{obj_name}: {obj_val:.4f} {direction} | ", end="")
+                        logging.info(f"{obj_name}: {disp_val:.4f} {direction} | ", end="")
                     logging.info("")
         
         logging.info("============================================")
@@ -545,12 +547,14 @@ def main():
         # Get objective names from evaluation config
         objectives_config = eval_cfg.get('objectives', eval_cfg.get('multi_objectives', {}))
         objective_names = objectives_config.get('objectives', ['obj1', 'obj2', 'obj3', 'obj4'])
+        minimize_flags = objectives_config.get('minimize', [True] * len(objective_names))
         
         for i in range(len(test_objectives)):
             objectives = test_objectives[i]
             logging.info(f"Individual {i:02d} | ", end="")
-            for j, (obj_name, obj_val) in enumerate(zip(objective_names, objectives)):
-                logging.info(f"{obj_name}: {obj_val:.4f} | ", end="")
+            for j, (obj_name, obj_val, minimize) in enumerate(zip(objective_names, objectives, minimize_flags)):
+                disp_val = obj_val if minimize else -obj_val
+                logging.info(f"{obj_name}: {disp_val:.4f} | ", end="")
             logging.info("")  # New line
         logging.info("===============================================================")
 

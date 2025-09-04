@@ -372,7 +372,11 @@ class MultiObjectiveFitnessEvaluator:
             valid_mask = ~np.isin(obj_values, [-1e9, 1e9]) & ~np.isnan(obj_values) & ~np.isinf(obj_values)
             
             if np.any(valid_mask):
-                valid_values = obj_values[valid_mask]
+                # Convert to natural display form: maximize metrics were negated upstream
+                if self.minimize_objectives[i]:
+                    valid_values = obj_values[valid_mask]
+                else:
+                    valid_values = -obj_values[valid_mask]
                 summary['statistics'][obj_name] = {
                     'mean': float(np.mean(valid_values)),
                     'std': float(np.std(valid_values)),
