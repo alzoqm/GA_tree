@@ -9,6 +9,8 @@ import logging
 import random
 import numpy as np
 import json
+from datetime import datetime
+from typing import List
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
@@ -20,6 +22,7 @@ from evolution.Mutation import (
     ReinitializeNodeMutation, AddSubtreeMutation, DeleteSubtreeMutation
 )
 from training.runner import generation_training, generation_test
+from tools import wandb_logger
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -100,6 +103,15 @@ def main():
 
     set_seed(env_cfg['seed'])
     setup_environment(env_cfg['output_dir'])
+
+    # --- Initialize Weights & Biases (optional) ---
+    wandb_cfg = config.get('wandb', {})
+    ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    run_name = f"{data_cfg.get('symbol','SYM')}-{data_cfg.get('interval','int')}-{env_cfg.get('seed',0)}-{ts}"
+    try:
+        wandb_logger.init_run(wandb_cfg, run_name, env_cfg['output_dir'], full_config=config)
+    except Exception:
+        pass
 
     # ==========================================================================
     #             Phase 1: 데이터 준비 및 피처 생성 (단순 검사)
@@ -294,7 +306,8 @@ def main():
                 device=env_cfg['device'],
                 warming_step=ga_cfg['evolution_loop']['warming_steps'],
                 evaluation_config=window_eval_config,
-                output_dir=window_checkpoint_dir
+                output_dir=window_checkpoint_dir,
+                wandb_config=wandb_cfg,
             )
             
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:
@@ -353,6 +366,68 @@ def main():
                     direction = "↓" if stats['minimize'] else "↑"
                     logging.info(f"  {obj_name}: {stats['mean']:.4f}±{stats['std']:.4f} "
                                f"[{stats['min']:.4f}, {stats['max']:.4f}] {direction}")
+
+            # --- Weights & Biases logging per window ---
+            try:
+                def _natural_values(arr: np.ndarray, minimize_flags: List[bool]) -> np.ndarray:
+                    arr = np.array(arr, dtype=float)
+                    out = arr.copy()
+                    for j, minimize in enumerate(minimize_flags):
+                        if not minimize:
+                            out[:, j] = -out[:, j]
+                    return out
+
+                def _valid_mask(v: np.ndarray) -> np.ndarray:
+                    return (~np.isin(v, [-1e9, 1e9])) & np.isfinite(v)
+
+                # IS stats (from window_best_objectives)
+                is_cfg = eval_cfg.get('is_objectives', eval_cfg.get('objectives', {}))
+                is_names = is_cfg.get('objectives', [])
+                is_min_flags = is_cfg.get('minimize', [True] * len(is_names))
+                if window_best_objectives is not None and len(window_best_objectives) > 0:
+                    is_vals_nat = _natural_values(window_best_objectives, is_min_flags)
+                    log_payload = {"window/index": window_idx}
+                    for j, name in enumerate(is_names):
+                        col = is_vals_nat[:, j]
+                        m = _valid_mask(col)
+                        if m.any():
+                            log_payload[f"is/{name}/mean"] = float(np.mean(col[m]))
+                            log_payload[f"is/{name}/std"] = float(np.std(col[m]))
+                            log_payload[f"is/{name}/p05"] = float(np.percentile(col[m], 5))
+                            log_payload[f"is/{name}/p95"] = float(np.percentile(col[m], 95))
+                            log_payload[f"is/{name}/valid_count"] = int(np.sum(m))
+                        else:
+                            log_payload[f"is/{name}/valid_count"] = 0
+                    # OOS stats
+                    oos_cfg_names = oos_objectives_config.get('objectives', [])
+                    oos_min_flags = oos_objectives_config.get('minimize', [True] * len(oos_cfg_names))
+                    if oos_objectives is not None and len(oos_objectives) > 0:
+                        oos_vals_nat = _natural_values(oos_objectives, oos_min_flags)
+                        for j, name in enumerate(oos_cfg_names):
+                            col = oos_vals_nat[:, j]
+                            m = _valid_mask(col)
+                            if m.any():
+                                log_payload[f"oos/{name}/mean"] = float(np.mean(col[m]))
+                                log_payload[f"oos/{name}/std"] = float(np.std(col[m]))
+                                log_payload[f"oos/{name}/p05"] = float(np.percentile(col[m], 5))
+                                log_payload[f"oos/{name}/p95"] = float(np.percentile(col[m], 95))
+                                log_payload[f"oos/{name}/valid_count"] = int(np.sum(m))
+                            else:
+                                log_payload[f"oos/{name}/valid_count"] = 0
+                        # Log candidate table (Top-K)
+                        topk = int(wandb_cfg.get('log_tables_topk', 200))
+                        K = min(topk, oos_objectives.shape[0])
+                        if K > 0:
+                            table_cols = ["candidate_id"] + oos_cfg_names
+                            rows = []
+                            for k in range(K):
+                                cid = f"w{window_idx}_c{k}"
+                                vals = [float(v) for v in oos_vals_nat[k, :len(oos_cfg_names)].tolist()]
+                                rows.append([cid] + vals)
+                            wandb_logger.log_table("tables/oos_candidates", table_cols, rows, step=window_idx)
+                    wandb_logger.log(log_payload, step=window_idx)
+            except Exception:
+                pass
             
             # In-place elite carryover for next window (if not resetting)
             if not wfo_cfg.get('reset_population_each_window', False):
@@ -404,6 +479,50 @@ def main():
             best_metrics = aggregated_objectives[:top_k]
             
         logging.info("Walk-Forward Optimization completed.")
+
+        # --- Weights & Biases: log final summary and artifacts ---
+        try:
+            final_step = len(windows) if 'windows' in locals() else 0
+            agg_names = eval_cfg.get('oos_aggregate', {}).get('objectives', [])
+            agg_min = eval_cfg.get('oos_aggregate', {}).get('minimize', [True] * len(agg_names))
+            if isinstance(best_metrics, np.ndarray) and best_metrics.size and len(agg_names) > 0:
+                # Natural orientation for logging
+                top1 = best_metrics[0]
+                topk_avg = np.mean(best_metrics, axis=0)
+                payload = {"final/windows": int(len(windows)),
+                           "final/candidates": int(len(best_metrics))}
+                for j, name in enumerate(agg_names):
+                    val_top1 = float(-top1[j] if not agg_min[j] else top1[j])
+                    val_avg = float(-topk_avg[j] if not agg_min[j] else topk_avg[j])
+                    payload[f"final/top1/{name}"] = val_top1
+                    payload[f"final/topK/avg/{name}"] = val_avg
+                wandb_logger.log(payload, step=final_step)
+            # Artifacts
+            artifacts = []
+            best_population_path = os.path.join(env_cfg['output_dir'], "best_population.pth")
+            topk_path = os.path.join(env_cfg['output_dir'], "best_population_topK.pth")
+            wfo_results_path = os.path.join(env_cfg['output_dir'], 'wfo_results.json')
+            for p in [best_population_path, topk_path, wfo_results_path]:
+                if os.path.exists(p):
+                    artifacts.append(p)
+            if artifacts and bool(wandb_cfg.get('log_artifacts', True)):
+                wandb_logger.log_artifacts(artifacts, name=f"{run_name}-models", type_="model")
+                # Also add results json under results
+                wandb_logger.log_artifacts([wfo_results_path], name=f"{run_name}-results", type_="results")
+            # Analysis images, if generated by tools/analyze_best.py
+            analysis_dir = os.path.join(env_cfg['output_dir'], 'analysis')
+            if os.path.isdir(analysis_dir):
+                for fname in [
+                    'feature_usage.png',
+                    'comparison_type_mix.png',
+                    'feature_interaction.png',
+                    'permutation_importance.png',
+                ]:
+                    fpath = os.path.join(analysis_dir, fname)
+                    if os.path.exists(fpath):
+                        wandb_logger.log_image(f"analysis/{fname}", fpath, step=final_step)
+        except Exception:
+            pass
         
     else:
         # === Traditional Single-Split Mode (Backward Compatibility) ===
@@ -429,7 +548,8 @@ def main():
             device=env_cfg['device'],
             warming_step=ga_cfg['evolution_loop']['warming_steps'],
             evaluation_config=eval_cfg,
-            output_dir=env_cfg['output_dir']
+            output_dir=env_cfg['output_dir'],
+            wandb_config=wandb_cfg,
         )
         best_metrics = best_objectives  # For PPTS, these are objective vectors
 
