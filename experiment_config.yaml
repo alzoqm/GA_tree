@@ -10,6 +10,28 @@ environment:
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/dataset"
 
+# 1.1. Weights & Biases 설정
+wandb:
+  enabled: true           # wandb 로깅 사용 여부
+  project: "GA_tree"      # 프로젝트명
+  entity: null            # 팀/엔티티 (없으면 null)
+  group: "WFO"            # 그룹 태그
+  job_type: "train"
+  tags: ["ga", "tree", "wfo"]
+  mode: "online"         # "online" | "offline" | "disabled"
+  dir: "results/exp_default"  # 기본 로그 디렉토리 (없으면 output_dir 사용)
+  log_tables_topk: 200    # 윈도우별 테이블 로우 제한
+  analysis_max_features: 10  # 분석 플롯 Top-M 피처
+  log_quantile_bins: 10   # 응답곡선 분할수
+  log_artifacts: true     # 산출물 업로드 여부
+  # === Generation-level logging options ===
+  gen_log: true           # 세대별 로깅 활성화
+  gen_log_interval: 1     # N 세대마다 로깅
+  gen_log_tables_topk: 0  # 세대별 테이블 로깅 비활성(0). 필요시 Top-K 지정
+  monitoring:
+    enabled: false        # 모니터링 전용 지표(PSR, t-stat 등) 세대 로깅 (옵션)
+    metrics: ["psr", "t_stat", "profit_per_trade", "avg_holding_period", "max_win_streak", "max_loss_streak"]
+
 # 2. 데이터 설정
 data:
   symbol: "BTCUSDT"
