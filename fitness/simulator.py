@@ -28,7 +28,8 @@ class FitnessSimulator:
         stop_data_cnt: int,
         device: str,
         evaluation_config: dict,
-    ) -> np.ndarray:
+        return_returns: bool = False,
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         env_config = evaluation_config['simulation_env']
         objectives_config = evaluation_config.get(
             'multi_objectives',
@@ -95,7 +96,19 @@ class FitnessSimulator:
             minimum_trades = wfo_min_trades
 
         objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
-        return objectives
+
+        if return_returns:
+            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
+            try:
+                if len(environment.returns_history) > 0:
+                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
+                else:
+                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+            except Exception:
+                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+            return objectives, ret_stack
+        else:
+            return objectives
 
 
 def fitness_fn(

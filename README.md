@@ -34,6 +34,21 @@ python preprocess_data.py
 ```
 Run feature generation pipeline without full training.
 
+## Analysis (Section 2.2)
+
+- In WFO mode, the Top-K best models are saved as `best_population_topK.pth` along with `best_population.pth`.
+- Generate interpretability and behavior reports (feature usage, type mix, interaction heatmap, threshold distributions, quantile-binned curves, permutation importance):
+
+```
+python tools/analyze_best.py -c experiment_config.yaml
+```
+
+- Outputs are written to `results/.../analysis/` as JSON and PNGs (PNG generation requires matplotlib; otherwise JSON is still produced).
+- Options:
+  - `--topk 10` limit analyzed individuals
+  - `--max_features 10` focus on top-M features by usage
+  - `--quantiles 10` number of bins for response curves
+
 ## Architecture Overview
 
 ### Core Components
