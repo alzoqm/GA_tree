@@ -464,8 +464,9 @@ def main():
         
         logging.info(f"WFO results saved to '{wfo_results_path}'")
 
-        # Save the top-1 best model if reconstructed
+        # Save the top-1 and Top-K best models if reconstructed
         if best_chromosomes is not None and len(best_chromosomes) > 0:
+            # Top-1
             top1 = best_chromosomes[:1]
             logging.info(f"Saving top-1 WFO model to '{best_population_path}'")
             best_population = GATreePop(
@@ -480,6 +481,22 @@ def main():
             best_population.initialized = True
             best_population.save(best_population_path)
             logging.info("WFO best population saved successfully.")
+
+            # Top-K (all reconstructed)
+            topk_path = os.path.join(env_cfg['output_dir'], "best_population_topK.pth")
+            logging.info(f"Saving Top-K WFO models to '{topk_path}'")
+            topk_population = GATreePop(
+                pop_size=len(best_chromosomes),
+                max_nodes=ga_cfg['population']['max_nodes'],
+                max_depth=ga_cfg['population']['max_depth'],
+                max_children=ga_cfg['population']['max_children'],
+                **model_config
+            )
+            topk_population.population_tensor.copy_(best_chromosomes)
+            topk_population.set_next_idx()
+            topk_population.initialized = True
+            topk_population.save(topk_path)
+            logging.info("WFO Top-K population saved successfully.")
         else:
             logging.warning("Could not reconstruct best chromosomes for saving in WFO mode.")
         
