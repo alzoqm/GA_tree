@@ -6,7 +6,7 @@
 # 1. 환경 및 경로 설정
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
-  seed: 12
+  seed: 135
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/dataset"
 
@@ -35,10 +35,10 @@ ga_core:
     max_depth: 10
     max_children: 30
   evolution_loop:
-    generations: 30
-    parent_pool_size: 32 # 교배 풀(Mating Pool) 크기
-    elite_size: 8 # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 8 # 최종까지 보관할 누적 베스트 개체 수
+    generations: 3
+    parent_pool_size: 4000 # 교배 풀(Mating Pool) 크기
+    elite_size: 2000 # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 2000 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0 # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
@@ -129,12 +129,33 @@ evaluation:
     minimize: [false, true, false, false]
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # Advanced metrics params (optional)
+    mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
+    benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
     
   # === WFO 사용시 목표 설정 ===
   # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
   is_objectives:
-    objectives: ["mean_return", "max_drawdown"]
-    minimize: [false, true]
+    objectives: [
+      "mean_return",
+      "max_drawdown",
+      "sharpe_ratio",
+      "win_rate",
+      "profit_factor",
+      "calmar_ratio",
+      "sortino_ratio",
+      "volatility"
+    ]
+    minimize: [
+      false,  # mean_return (maximize)
+      true,   # max_drawdown (minimize)
+      false,  # sharpe_ratio (maximize)
+      false,  # win_rate (maximize)
+      false,  # profit_factor (maximize)
+      false,  # calmar_ratio (maximize)
+      false,  # sortino_ratio (maximize)
+      true    # volatility (minimize)
+    ]
     normalization: "minmax"
     
   # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
@@ -143,6 +164,9 @@ evaluation:
     minimize: [false, true, false]
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # Advanced metrics params (optional)
+    mar: 0.0
+    benchmark_mode: "close_to_next_open"
     
   # 집계된 OOS 목표 (최종 모델 선택용)
   oos_aggregate:
