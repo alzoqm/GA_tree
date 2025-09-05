@@ -47,7 +47,7 @@ class FitnessSimulator:
         if not isinstance(data.index, pd.DatetimeIndex):
             data.index = pd.to_datetime(data.index)
 
-        # Build adjacency list for CUDA operations
+        # Build adjacency list for CUDA operations (once per simulate call)
         adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
         if adj_offsets is None:
             raise RuntimeError("Failed to build adjacency list on GPU.")
@@ -60,27 +60,55 @@ class FitnessSimulator:
             device=device,
         )
 
+        # Pre-extract features to numpy for fast access, and preallocate GPU buffers
         feature_data = data[all_feature_names]
+        feature_np = feature_data.to_numpy(dtype=np.float32, copy=False)
+
+        B = population.pop_size
+        N = population.max_nodes
+        F = feature_np.shape[1]
+
+        # Preallocate reusable GPU buffers
+        results = torch.empty((B, 4), dtype=torch.float32, device=device)
+        bfs = torch.empty((B, N), dtype=torch.int32, device=device)
+        visited = torch.zeros((B, N), dtype=torch.int32, device=device)
+        positions = torch.empty((B,), dtype=torch.int32, device=device)
+        features = torch.empty((F,), dtype=torch.float32, device=device)
+
+        # LUT: env.pos_list mapping -> ROOT_BRANCH_* constants
+        # env.pos_list: 0=HOLD, 1=SHORT, 2=LONG
+        from models.constants import ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG
+        lut = torch.tensor([ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG], dtype=torch.int32, device=device)
+
         pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Sim", leave=False)
         for entry_index in pbar:
             market_data_row = data.iloc[entry_index]
-            next_open_price = torch.tensor(
+            next_open_price = torch.as_tensor(
                 data['Open'].iloc[entry_index + 1], dtype=torch.float32, device=device
             )
 
-            feature_values_series = feature_data.iloc[entry_index]
+            # Fill features buffer for this step
+            # Note: from_numpy creates a CPU tensor view; then copy to GPU buffer
+            step_feat_cpu = torch.from_numpy(feature_np[entry_index])
+            features.copy_(step_feat_cpu.to(device=device))
 
-            current_positions_str = [
-                {0: 'HOLD', 1: 'SHORT', 2: 'LONG'}[pos.item()] for pos in environment.pos_list
-            ]
+            # Map env positions to ROOT_BRANCH_* on GPU
+            positions.copy_(lut[environment.pos_list])
 
             predicted_actions = predict_population_cuda(
                 population=population,
-                feature_values=feature_values_series,
-                current_positions=current_positions_str,
+                feature_values=None,
+                current_positions=positions,
                 adj_offsets=adj_offsets,
                 adj_indices=adj_indices,
                 device=device,
+                results=results,
+                bfs=bfs,
+                visited=visited,
+                positions_tensor=positions,
+                features_tensor=features,
+                validate=False,
+                sync=False,
             )
             if predicted_actions is None:
                 raise RuntimeError(

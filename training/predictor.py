@@ -140,11 +140,21 @@ def build_adjacency_list_cuda(population: GATreePop,
 
 def predict_population_cuda(
     population: GATreePop,
-    feature_values: pd.Series,
-    current_positions: List[str],
+    feature_values: pd.Series | None,
+    current_positions: List[str] | torch.Tensor,
     adj_offsets: torch.Tensor,
     adj_indices: torch.Tensor,
-    device: str = 'cuda'
+    device: str = 'cuda',
+    *,
+    # Optional preallocated buffers (reused across steps)
+    results: torch.Tensor | None = None,
+    bfs: torch.Tensor | None = None,
+    visited: torch.Tensor | None = None,
+    positions_tensor: torch.Tensor | None = None,
+    features_tensor: torch.Tensor | None = None,
+    # Debug/behavior flags
+    validate: bool = False,
+    sync: bool = False,
 ) -> torch.Tensor | None:
     """
     사전 생성된 인접 리스트를 이용하여 전체 GATree 집단의 예측을 병렬로 수행합니다.
@@ -161,11 +171,19 @@ def predict_population_cuda(
     if not population.initialized:
         raise RuntimeError("Population 객체가 초기화되지 않았습니다. make_population()을 먼저 호출하세요.")
 
-    if len(current_positions) != population.pop_size:
-        raise ValueError(f"current_positions의 길이({len(current_positions)})가 "
-                         f"population의 크기({population.pop_size})와 일치하지 않습니다.")
+    # Support both tensor and string list for positions
+    if isinstance(current_positions, list):
+        if len(current_positions) != population.pop_size:
+            raise ValueError(
+                f"current_positions의 길이({len(current_positions)})가 population의 크기({population.pop_size})와 일치하지 않습니다.")
+    else:
+        if current_positions.dim() != 1 or current_positions.numel() != population.pop_size:
+            raise ValueError("current_positions tensor must be shape (B,)")
 
-    population_tensor = population.population_tensor.to(device)
+    # Population tensor should already be on the correct device; avoid re-copy each call
+    population_tensor = population.population_tensor
+    if str(population_tensor.device) != str(device):
+        population_tensor = population_tensor.to(device)
     
     # Memory validation checks
     if not population_tensor.is_contiguous():
@@ -176,22 +194,57 @@ def predict_population_cuda(
     if population_tensor.shape != expected_shape:
         raise ValueError(f"Population tensor shape {population_tensor.shape} doesn't match expected {expected_shape}")
     
-    ordered_features = feature_values.reindex(population.all_features).values
-    numeric_features = ordered_features.astype(np.float32)
-    features_tensor = torch.tensor(numeric_features, dtype=torch.float32, device=device)
-    positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
-    positions_tensor = torch.tensor(positions_int, dtype=torch.int32, device=device)
-    results_tensor = torch.zeros((population.pop_size, 4), dtype=torch.float32, device=device)
-    bfs_queue_buffer = torch.zeros(
-        (population.pop_size, population.max_nodes), 
-        dtype=torch.int32, 
-        device=device
-    )
-    visited_buffer = torch.zeros(
-        (population.pop_size, population.max_nodes), 
-        dtype=torch.int32, 
-        device=device
-    )
+    # Prepare or reuse buffers
+    B, N = population.pop_size, population.max_nodes
+
+    # features
+    if features_tensor is None:
+        if feature_values is None:
+            raise ValueError("Either feature_values (Series) or features_tensor must be provided")
+        ordered_features = feature_values.reindex(population.all_features).values.astype(np.float32)
+        features_tensor = torch.as_tensor(ordered_features, dtype=torch.float32, device=device)
+    else:
+        # Ensure dtype/device are correct
+        if features_tensor.dtype != torch.float32:
+            features_tensor = features_tensor.to(dtype=torch.float32)
+        if str(features_tensor.device) != str(device):
+            features_tensor = features_tensor.to(device)
+
+    # positions
+    if positions_tensor is None:
+        if isinstance(current_positions, list):
+            positions_int = [POSITION_TO_INT_MAP[pos] for pos in current_positions]
+            positions_tensor = torch.tensor(positions_int, dtype=torch.int32, device=device)
+        else:
+            positions_tensor = current_positions.to(device=device, dtype=torch.int32)
+    else:
+        if str(positions_tensor.device) != str(device) or positions_tensor.dtype != torch.int32:
+            positions_tensor = positions_tensor.to(device=device, dtype=torch.int32)
+
+    # results buffer
+    if results is None:
+        results_tensor = torch.empty((B, 4), dtype=torch.float32, device=device)
+    else:
+        results_tensor = results
+        if results_tensor.shape != (B, 4):
+            raise ValueError("results buffer must be shape (B,4)")
+        if results_tensor.dtype != torch.float32 or str(results_tensor.device) != str(device):
+            raise ValueError("results buffer must be float32 on target device")
+
+    # bfs/visited buffers
+    if bfs is None:
+        bfs_queue_buffer = torch.empty((B, N), dtype=torch.int32, device=device)
+    else:
+        bfs_queue_buffer = bfs
+        if bfs_queue_buffer.shape != (B, N):
+            raise ValueError("bfs buffer must be shape (B,N)")
+    if visited is None:
+        visited_buffer = torch.zeros((B, N), dtype=torch.int32, device=device)
+    else:
+        visited_buffer = visited
+        if visited_buffer.shape != (B, N):
+            raise ValueError("visited buffer must be shape (B,N)")
+        visited_buffer.zero_()
     gatree_cuda.predict(
         population_tensor,
         features_tensor,
@@ -202,14 +255,14 @@ def predict_population_cuda(
         bfs_queue_buffer,
         visited_buffer
     )
-    # Ensure CUDA operations complete before returning
-    torch.cuda.synchronize()
-    
-    # Validate trees after CUDA predict
-    try:
-        gatree_cuda.validate_trees(population_tensor.contiguous())
-    except Exception as e:
-        raise RuntimeError(f"validate_trees failed after predict: {e}")
+    # Optional sync/validate for debugging
+    if sync:
+        torch.cuda.synchronize()
+    if validate:
+        try:
+            gatree_cuda.validate_trees(population_tensor.contiguous())
+        except Exception as e:
+            raise RuntimeError(f"validate_trees failed after predict: {e}")
 
 
     return results_tensor
