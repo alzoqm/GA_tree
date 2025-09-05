@@ -79,7 +79,7 @@ class FitnessSimulator:
         # Preallocate reusable GPU buffers
         results = torch.empty((B, 4), dtype=torch.float32, device=device)
         bfs = torch.empty((B, N), dtype=torch.int32, device=device)
-        visited = torch.zeros((B, N), dtype=torch.int32, device=device)
+        visited = torch.empty((B, N), dtype=torch.int32, device=device)
         positions = torch.empty((B,), dtype=torch.int32, device=device)
         features = torch.empty((F,), dtype=torch.float32, device=device)
 
@@ -90,6 +90,8 @@ class FitnessSimulator:
         # Optional: CUDA Graph capture to remove launch overhead
         use_graph = False
         graph = None
+        # Monotonic step id for kernel visited generation marking
+        step_id = 1
         if str(device).startswith('cuda'):
             try:
                 torch.cuda.synchronize()
@@ -111,6 +113,7 @@ class FitnessSimulator:
                     visited=visited,
                     positions_tensor=positions,
                     features_tensor=features,
+                    step_id=step_id,
                     validate=False,
                     sync=False,
                 )
@@ -130,11 +133,12 @@ class FitnessSimulator:
                     visited=visited,
                     positions_tensor=positions,
                     features_tensor=features,
+                    step_id=step_id,
                     validate=False,
                     sync=False,
                 )
                 graph.capture_end()
-                use_graph = True
+                use_graph = False  # Generation counter conflicts with captured scalars; disable graph here
             except Exception:
                 graph = None
                 use_graph = False
@@ -154,6 +158,8 @@ class FitnessSimulator:
 
             positions.copy_(lut[environment.pos_list])
 
+            # Increment step id each iteration to avoid clearing visited
+            step_id += 1
             if use_graph and graph is not None:
                 graph.replay()
                 predicted_actions = results
@@ -170,6 +176,7 @@ class FitnessSimulator:
                     visited=visited,
                     positions_tensor=positions,
                     features_tensor=features,
+                    step_id=step_id,
                     validate=False,
                     sync=False,
                 )

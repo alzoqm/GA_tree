@@ -152,6 +152,7 @@ def predict_population_cuda(
     visited: torch.Tensor | None = None,
     positions_tensor: torch.Tensor | None = None,
     features_tensor: torch.Tensor | None = None,
+    step_id: int | None = None,
     validate: bool = False,
     sync: bool = False,
 ) -> torch.Tensor | None:
@@ -237,12 +238,13 @@ def predict_population_cuda(
         if bfs_queue_buffer.shape != (B, N):
             raise ValueError("bfs buffer must be shape (B,N)")
     if visited is None:
-        visited_buffer = torch.zeros((B, N), dtype=torch.int32, device=device)
+        visited_buffer = torch.empty((B, N), dtype=torch.int32, device=device)
     else:
         visited_buffer = visited
         if visited_buffer.shape != (B, N):
             raise ValueError("visited buffer must be shape (B,N)")
-        visited_buffer.zero_()
+    # Use generation counter in kernel to avoid per-step clears.
+    sid = int(step_id) if step_id is not None else 1
     gatree_cuda.predict(
         population_tensor,
         features_tensor,
@@ -251,7 +253,8 @@ def predict_population_cuda(
         adj_indices,
         results_tensor,
         bfs_queue_buffer,
-        visited_buffer
+        visited_buffer,
+        sid
     )
     if sync:
         torch.cuda.synchronize()

@@ -72,7 +72,8 @@ __global__ void k_predict_batch(
     const int*   __restrict__ children,int Emax,
     float*       __restrict__ results,
     int*         __restrict__ bfs_q,
-    int*         __restrict__ visited
+    int*         __restrict__ visited_gen,
+    const int    step_id
 ){
     const int b = blockIdx.x;
     if (b >= B) return;
@@ -81,20 +82,15 @@ __global__ void k_predict_batch(
     const int*   off  = offsets + (size_t)b * (N + 1);
     const int*   col  = children + (size_t)b * Emax;
     float*       rout = results + (size_t)b * 4;
-    int*         q    = bfs_q   + (size_t)b * N;
-    int*         vis  = visited + (size_t)b * N;
-
-    for (int i = threadIdx.x; i < N; i += blockDim.x){
-        vis[i] = 0;
-        q[i]   = -1;
-    }
-    __syncthreads();
+    int*         q    = bfs_q       + (size_t)b * N;
+    int*         vis  = visited_gen + (size_t)b * N;
 
     if (threadIdx.x == 0){
         rout[0] = i2f(ACTION_NOT_FOUND);
         rout[1] = 0.0f;
         rout[2] = 0.0f;
         rout[3] = 0.0f;
+        q[0]    = -1;
     }
     __syncthreads();
 
@@ -115,7 +111,7 @@ __global__ void k_predict_batch(
         }
         if (start >= 0){
             q[0] = start;
-            vis[start] = 1;
+            vis[start] = step_id;
         }
     }
     __syncthreads();
@@ -156,8 +152,8 @@ __global__ void k_predict_batch(
                     break;
                 }
                 else if (nt == NODE_TYPE_DECISION){
-                    if (eval_node(nb, features, F) && !vis[v]){
-                        vis[v] = 1;
+                    if (eval_node(nb, features, F) && vis[v] != step_id){
+                        vis[v] = step_id;
                         if (qt < N) q[qt++] = v;
                     }
                 }
@@ -178,7 +174,8 @@ void predict_cuda(
     torch::Tensor children,
     torch::Tensor results,
     torch::Tensor bfs_q,
-    torch::Tensor visited
+    torch::Tensor visited_gen,
+    int step_id
 ){
     TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(), "trees must be (B,N,D) float32 CUDA contiguous");
     TORCH_CHECK(features.is_cuda() && features.dtype()==torch::kFloat32 && features.dim()==1, "features must be (F,) float32 CUDA");
@@ -187,7 +184,7 @@ void predict_cuda(
     TORCH_CHECK(children.is_cuda() && children.dtype()==torch::kInt32 && children.dim()==2, "children must be (B,Emax) int32 CUDA");
     TORCH_CHECK(results.is_cuda() && results.dtype()==torch::kFloat32 && results.dim()==2 && results.size(1)==4, "results must be (B,4) float32 CUDA");
     TORCH_CHECK(bfs_q.is_cuda() && bfs_q.dtype()==torch::kInt32 && bfs_q.dim()==2, "bfs_q must be (B,N) int32 CUDA");
-    TORCH_CHECK(visited.is_cuda() && visited.dtype()==torch::kInt32 && visited.dim()==2, "visited must be (B,N) int32 CUDA");
+    TORCH_CHECK(visited_gen.is_cuda() && visited_gen.dtype()==torch::kInt32 && visited_gen.dim()==2, "visited_gen must be (B,N) int32 CUDA");
 
     const int B = trees.size(0), N = trees.size(1), D = trees.size(2);
 
@@ -195,7 +192,7 @@ void predict_cuda(
     TORCH_CHECK(offsets.size(0)==B && offsets.size(1)==N+1, "offsets must be (B,N+1)");
     TORCH_CHECK(children.size(0)==B, "children must have first dim B");
     TORCH_CHECK(bfs_q.size(0)==B && bfs_q.size(1)==N, "bfs_q must be (B,N)");
-    TORCH_CHECK(visited.size(0)==B && visited.size(1)==N, "visited must be (B,N)");
+    TORCH_CHECK(visited_gen.size(0)==B && visited_gen.size(1)==N, "visited_gen must be (B,N)");
     TORCH_CHECK(results.size(0)==B, "results must have first dim B");
     TORCH_CHECK(positions.size(0)==B, "positions must have first dim B");
 
@@ -206,7 +203,7 @@ void predict_cuda(
 
     if (B == 0) return;
 
-    dim3 grid(B), block(128);
+    dim3 grid(B), block(1);
 
     k_predict_batch<<<grid, block>>>(
         trees.data_ptr<float>(), B, N, D,
@@ -216,7 +213,8 @@ void predict_cuda(
         children.data_ptr<int>(), Emax,
         results.data_ptr<float>(),
         bfs_q.data_ptr<int>(),
-        visited.data_ptr<int>()
+        visited_gen.data_ptr<int>(),
+        step_id
     );
 
     CUDA_CHECK_ERRORS();
