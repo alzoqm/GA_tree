@@ -6,7 +6,13 @@ import pandas as pd
 from typing import List, Dict, Tuple
 
 from models.model import GATreePop
-from models.constants import ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT
+from models.constants import (
+    ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT,
+    COL_NODE_TYPE, COL_PARENT_IDX, COL_PARAM_1, COL_PARAM_2, COL_PARAM_3, COL_PARAM_4,
+    NODE_TYPE_UNUSED, NODE_TYPE_ROOT_BRANCH, NODE_TYPE_DECISION, NODE_TYPE_ACTION,
+    OP_GTE, OP_LTE,
+    ACTION_NOT_FOUND,
+)
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -232,13 +238,15 @@ def predict_population_cuda(
 
     # BFS / visited
     if bfs is None:
-        bfs_queue_buffer = torch.empty((B, N), dtype=torch.int32, device=device)
+        # Uninitialized memory can poison BFS logic; use zeros for safety
+        bfs_queue_buffer = torch.zeros((B, N), dtype=torch.int32, device=device)
     else:
         bfs_queue_buffer = bfs
         if bfs_queue_buffer.shape != (B, N):
             raise ValueError("bfs buffer must be shape (B,N)")
     if visited is None:
-        visited_buffer = torch.empty((B, N), dtype=torch.int32, device=device)
+        # visited_gen must be initialized to 0 when using step_id==1
+        visited_buffer = torch.zeros((B, N), dtype=torch.int32, device=device)
     else:
         visited_buffer = visited
         if visited_buffer.shape != (B, N):
@@ -266,6 +274,224 @@ def predict_population_cuda(
 
 
     return results_tensor
+
+
+def _eval_node_cpu(node_row: np.ndarray, features: np.ndarray) -> bool:
+    """CPU-side decision node evaluation mirroring CUDA logic.
+
+    node_row: shape (D,) float32
+    features: shape (F,) float32, ordered by population.all_features
+    """
+    comp_type = int(node_row[COL_PARAM_3])
+    feat1 = int(node_row[COL_PARAM_1])
+    F = features.shape[0]
+    if feat1 < 0 or feat1 >= F:
+        return False
+    v1 = float(features[feat1])
+
+    # param_4 either immediate value, feat index or bool value
+    v2 = float(node_row[COL_PARAM_4])
+    if comp_type == 1:  # COMP_TYPE_FEAT_FEAT
+        feat2 = int(node_row[COL_PARAM_4])
+        if feat2 < 0 or feat2 >= F:
+            return False
+        v2 = float(features[feat2])
+    elif comp_type == 2:  # COMP_TYPE_FEAT_BOOL
+        return v1 == v2
+
+    op = int(node_row[COL_PARAM_2])
+    if op == OP_GTE:
+        return v1 >= v2
+    if op == OP_LTE:
+        return v1 <= v2
+    return False
+
+
+def predict_population_cpu(
+    population: GATreePop,
+    feature_values: pd.Series | None,
+    current_positions: List[str] | torch.Tensor,
+    device: str = 'cpu',
+    *,
+    features_tensor: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    CPU fallback that mirrors the CUDA kernel's predict behavior:
+    - Builds CSR adjacency per tree on CPU with children sorted ascending
+    - Runs a guarded BFS (visited + step cap) per tree
+    - Returns (B,4) float32 tensor with ACTION_NOT_FOUND when no action found
+    """
+    if not population.initialized:
+        raise RuntimeError("Population 객체가 초기화되지 않았습니다. make_population()을 먼저 호출하세요.")
+
+    # Move population tensor to CPU for CPU execution
+    trees = population.population_tensor.detach().to('cpu')
+    B, N, D = trees.shape
+
+    # Build positions tensor (B,) int32
+    if isinstance(current_positions, list):
+        if len(current_positions) != B:
+            raise ValueError("current_positions length must match population size")
+        pos_int = [POSITION_TO_INT_MAP[p] for p in current_positions]
+        positions = np.asarray(pos_int, dtype=np.int32)
+    else:
+        if current_positions.dim() != 1 or current_positions.numel() != B:
+            raise ValueError("current_positions tensor must be shape (B,)")
+        positions = current_positions.detach().to('cpu', dtype=torch.int32).numpy()
+
+    # Build features array (F,) float32 in the order of population.all_features
+    if features_tensor is None:
+        if feature_values is None:
+            raise ValueError("Either feature_values or features_tensor must be provided")
+        ordered = feature_values.reindex(population.all_features).values.astype(np.float32)
+        features = ordered
+    else:
+        features = features_tensor.detach().to('cpu', dtype=torch.float32).numpy()
+
+    # Pre-allocate outputs
+    results = np.zeros((B, 4), dtype=np.float32)
+    results[:, 0] = float(ACTION_NOT_FOUND)
+
+    # Build CSR adjacency per tree on CPU
+    # offsets (B, N+1), children ragged via per-tree vector
+    offsets = np.zeros((B, N + 1), dtype=np.int32)
+    # First, count children per parent
+    trees_np = trees.numpy()
+    for b in range(B):
+        child_counts = np.zeros((N,), dtype=np.int32)
+        tree = trees_np[b]
+        for i in range(N):
+            nt = int(tree[i, COL_NODE_TYPE])
+            if nt == NODE_TYPE_UNUSED:
+                continue
+            p = int(tree[i, COL_PARENT_IDX])
+            if 0 <= p < N:
+                child_counts[p] += 1
+        # Prefix sum to offsets
+        np.cumsum(child_counts, out=offsets[b, 1:])
+
+    total_children_per_tree = offsets[:, -1].astype(int)
+    max_edges = int(total_children_per_tree.max()) if B > 0 else 0
+    children = np.zeros((B, max_edges), dtype=np.int32) if max_edges > 0 else np.zeros((B, 0), dtype=np.int32)
+
+    # Fill children using local cursors, then sort per parent
+    for b in range(B):
+        tree = trees_np[b]
+        curs = offsets[b, :-1].copy()
+        num_edges = int(offsets[b, -1])
+        if num_edges > 0:
+            for i in range(N):
+                nt = int(tree[i, COL_NODE_TYPE])
+                if nt == NODE_TYPE_UNUSED:
+                    continue
+                p = int(tree[i, COL_PARENT_IDX])
+                if 0 <= p < N:
+                    pos = curs[p]
+                    if pos < offsets[b, p + 1]:
+                        children[b, pos] = i
+                        curs[p] += 1
+        # Sort children per parent ascending (to match CUDA behavior)
+        for p in range(N):
+            s = offsets[b, p]
+            e = offsets[b, p + 1]
+            deg = e - s
+            if deg > 1:
+                children[b, s:e] = np.sort(children[b, s:e], axis=0)
+
+    # BFS per tree
+    for b in range(B):
+        tree = trees_np[b]
+        start = -1
+        want = int(positions[b])
+        for i in range(3):
+            if not (0 <= i < N):
+                continue
+            if int(tree[i, COL_NODE_TYPE]) == NODE_TYPE_ROOT_BRANCH and int(tree[i, COL_PARAM_1]) == want:
+                start = i
+                break
+        if start < 0:
+            continue  # keep NOT_FOUND
+
+        q = np.full((N,), -1, dtype=np.int32)
+        qh, qt = 0, 0
+        q[qt] = start
+        qt += 1
+        visited = np.zeros((N,), dtype=np.int32)
+        visited[start] = 1
+
+        steps = 0
+        eN = int(offsets[b, N])
+        while qh < qt and steps < N:
+            u = int(q[qh])
+            qh += 1
+            if not (0 <= u < N):
+                steps += 1
+                continue
+            s = int(offsets[b, u])
+            e = int(offsets[b, u + 1]) if (u + 1) <= N else s
+            if s < 0:
+                s = 0
+            if e < s:
+                e = s
+            if e > eN:
+                e = eN
+            for p in range(s, e):
+                v = int(children[b, p])
+                if not (0 <= v < N):
+                    continue
+                nt = int(tree[v, COL_NODE_TYPE])
+                if nt == NODE_TYPE_ACTION:
+                    results[b, 0] = float(tree[v, COL_PARAM_1])
+                    results[b, 1] = float(tree[v, COL_PARAM_2])
+                    results[b, 2] = float(tree[v, COL_PARAM_3])
+                    results[b, 3] = float(tree[v, COL_PARAM_4])
+                    qh = qt  # break outer
+                    break
+                elif nt == NODE_TYPE_DECISION:
+                    if visited[v] == 0 and _eval_node_cpu(tree[v], features):
+                        visited[v] = 1
+                        if qt < N:
+                            q[qt] = v
+                            qt += 1
+            steps += 1
+
+    return torch.as_tensor(results, dtype=torch.float32, device=device)
+
+
+def predict_population(
+    population: GATreePop,
+    feature_values: pd.Series | None,
+    current_positions: List[str] | torch.Tensor,
+    adj_offsets: torch.Tensor | None = None,
+    adj_indices: torch.Tensor | None = None,
+    device: str = 'cuda',
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Unified entry point: use CUDA kernel if available; otherwise CPU fallback.
+    When using CUDA, adj_offsets/adj_indices must be provided.
+    """
+    use_cuda = device.startswith('cuda') and gatree_cuda is not None
+    if use_cuda:
+        if adj_offsets is None or adj_indices is None:
+            raise ValueError("adj_offsets and adj_indices must be provided for CUDA prediction")
+        return predict_population_cuda(
+            population=population,
+            feature_values=feature_values,
+            current_positions=current_positions,
+            adj_offsets=adj_offsets,
+            adj_indices=adj_indices,
+            device=device,
+            **kwargs,
+        )
+    # CPU fallback
+    return predict_population_cpu(
+        population=population,
+        feature_values=feature_values,
+        current_positions=current_positions,
+        device='cpu',
+        features_tensor=kwargs.get('features_tensor'),
+    )
 
 # # =======================================================
 # # ---           이 함수들을 테스트하기 위한 예제         ---
