@@ -139,6 +139,10 @@ class TradingEnvironment:
         # 직전 스텝의 액션이 실제 적용된 경우에만 중복 스킵
         self.dedup_require_applied = bool(env_config.get('dedup_require_applied', True))
 
+        # === CUDA 실행 옵션 (액션 실행 가속 경로) ===
+        self.use_cuda_execute = bool(env_config.get('use_cuda_execute', True))
+        self.debug_compare_cpu_gpu = bool(env_config.get('debug_compare_cpu_gpu', False))
+
         # 이전 스텝의 원본 예측 액션 저장 (B,4)
         self.prev_actions_raw = torch.full(
             (chromosomes_size, 4), float('nan'), dtype=torch.float32, device=device
@@ -582,6 +586,118 @@ class TradingEnvironment:
         self._add_to_positions(actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price)
         self._flip_positions(actions_tensor, currently_long, currently_short, buy_exec_price, sell_exec_price)
 
+    def _execute_actions_cuda(self, actions_tensor, exec_base_price):
+        """CUDA 커널로 액션 실행 (Thread-per-individual). Python 경로 보존."""
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+        if gatree_cuda is None or getattr(gatree_cuda, 'execute_actions_batch', None) is None:
+            # Fallback to CPU path if CUDA extension not available
+            return False
+
+        # Only run on CUDA
+        if not str(self.device).startswith('cuda'):
+            return False
+
+        # Ensure tensors are on CUDA and contiguous
+        actions = actions_tensor.to(self.device).contiguous()
+        buy_exec_price = float((exec_base_price * (1 + self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 + self.fixed_slippage_rate))
+        sell_exec_price = float((exec_base_price * (1 - self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 - self.fixed_slippage_rate))
+
+        # Optionally compare with CPU for sanity (small batch recommended)
+        if self.debug_compare_cpu_gpu:
+            snap = {
+                'pos': self.pos_list.clone(),
+                'price': self.price_list.clone(),
+                'lev': self.leverage_ratio.clone(),
+                'er': self.enter_ratio.clone(),
+                'add': self.additional_count.clone(),
+                'profit': self.profit.clone(),
+                'open': self.trade_open.clone(),
+                'rpnl': self.trade_realized_pnl.clone(),
+                'tcnt': self.trade_total_count.clone(),
+                'wcnt': self.trade_win_count.clone(),
+                'hsum': self.trade_holding_sum.clone(),
+                'havg': self.trade_holding_avg.clone(),
+                'cws': self.curr_win_streak.clone(),
+                'cls': self.curr_loss_streak.clone(),
+                'mws': self.max_win_streak.clone(),
+                'mls': self.max_loss_streak.clone(),
+            }
+            # CPU path
+            self._execute_actions(actions.clone().to(self.device), exec_base_price, None, None)
+            cpu_state = {
+                'pos': self.pos_list.clone(),
+                'price': self.price_list.clone(),
+                'lev': self.leverage_ratio.clone(),
+                'er': self.enter_ratio.clone(),
+                'add': self.additional_count.clone(),
+                'profit': self.profit.clone(),
+                'open': self.trade_open.clone(),
+                'rpnl': self.trade_realized_pnl.clone(),
+                'tcnt': self.trade_total_count.clone(),
+                'wcnt': self.trade_win_count.clone(),
+                'hsum': self.trade_holding_sum.clone(),
+                'havg': self.trade_holding_avg.clone(),
+                'cws': self.curr_win_streak.clone(),
+                'cls': self.curr_loss_streak.clone(),
+                'mws': self.max_win_streak.clone(),
+                'mls': self.max_loss_streak.clone(),
+            }
+            # Restore snapshot
+            self.pos_list.copy_(snap['pos']); self.price_list.copy_(snap['price']); self.leverage_ratio.copy_(snap['lev'])
+            self.enter_ratio.copy_(snap['er']); self.additional_count.copy_(snap['add']); self.profit.copy_(snap['profit'])
+            self.trade_open.copy_(snap['open']); self.trade_realized_pnl.copy_(snap['rpnl'])
+            self.trade_total_count.copy_(snap['tcnt']); self.trade_win_count.copy_(snap['wcnt'])
+            self.trade_holding_sum.copy_(snap['hsum']); self.trade_holding_avg.copy_(snap['havg'])
+            self.curr_win_streak.copy_(snap['cws']); self.curr_loss_streak.copy_(snap['cls'])
+            self.max_win_streak.copy_(snap['mws']); self.max_loss_streak.copy_(snap['mls'])
+
+        # Launch CUDA batch executor
+        gatree_cuda.execute_actions_batch(
+            actions,
+            self.pos_list, self.price_list, self.leverage_ratio, self.enter_ratio,
+            self.additional_count, self.profit,
+            self.trade_open, self.trade_realized_pnl, self.trade_total_count, self.trade_win_count,
+            self.trade_holding_sum, self.trade_holding_avg,
+            self.curr_win_streak, self.curr_loss_streak, self.max_win_streak, self.max_loss_streak,
+            self.holding_period,
+            float(buy_exec_price), float(sell_exec_price),
+            float(self.taker_fee_rate), float(self.min_entry_ratio),
+            int(self.min_leverage), int(self.max_leverage),
+            float(self.min_additional_enter_ratio), int(self.max_additional_entries)
+        )
+
+        if self.debug_compare_cpu_gpu:
+            # Compare with CPU results from earlier
+            atol, rtol = 1e-6, 1e-5
+            def assert_close(a, b, name):
+                if a.dtype.is_floating_point:
+                    if not torch.allclose(a, b, atol=atol, rtol=rtol):
+                        raise AssertionError(f"Mismatch in {name}")
+                else:
+                    if not torch.equal(a, b):
+                        raise AssertionError(f"Mismatch in {name}")
+            assert_close(self.pos_list, cpu_state['pos'], 'pos_list')
+            assert_close(self.price_list, cpu_state['price'], 'price_list')
+            assert_close(self.leverage_ratio, cpu_state['lev'], 'leverage_ratio')
+            assert_close(self.enter_ratio, cpu_state['er'], 'enter_ratio')
+            assert_close(self.additional_count, cpu_state['add'], 'additional_count')
+            assert_close(self.profit, cpu_state['profit'], 'profit')
+            assert_close(self.trade_open, cpu_state['open'], 'trade_open')
+            assert_close(self.trade_realized_pnl, cpu_state['rpnl'], 'trade_realized_pnl')
+            assert_close(self.trade_total_count, cpu_state['tcnt'], 'trade_total_count')
+            assert_close(self.trade_win_count, cpu_state['wcnt'], 'trade_win_count')
+            assert_close(self.trade_holding_sum, cpu_state['hsum'], 'trade_holding_sum')
+            assert_close(self.trade_holding_avg, cpu_state['havg'], 'trade_holding_avg')
+            assert_close(self.curr_win_streak, cpu_state['cws'], 'curr_win_streak')
+            assert_close(self.curr_loss_streak, cpu_state['cls'], 'curr_loss_streak')
+            assert_close(self.max_win_streak, cpu_state['mws'], 'max_win_streak')
+            assert_close(self.max_loss_streak, cpu_state['mls'], 'max_loss_streak')
+
+        return True
+
     def _calculate_current_equity(self, market_data) -> torch.Tensor:
         """현재 에쿼티 계산 (미실현 손익 포함)"""
         curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
@@ -674,7 +790,11 @@ class TradingEnvironment:
         er_before = self.enter_ratio.clone()
 
         # 체결 기준 가격으로 next_open_price 전달 (중복 필터 적용된 액션 사용)
-        self._execute_actions(predicted_actions, next_open_price, curr_high, curr_low)
+        used_cuda = False
+        if self.use_cuda_execute and str(self.device).startswith('cuda'):
+            used_cuda = self._execute_actions_cuda(predicted_actions, next_open_price)
+        if not used_cuda:
+            self._execute_actions(predicted_actions, next_open_price, curr_high, curr_low)
         
         self.holding_period[self.pos_list != 0] += 1
         self.holding_period[self.pos_list == 0] = 0

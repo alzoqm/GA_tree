@@ -54,6 +54,14 @@ setup(
                 'csrc/ppts_selection.cu',
             ],
         ),
+        # Trading environment actions execution
+        CUDAExtension(
+            name='gatree_env',
+            sources=[
+                'csrc/env_bindings.cpp',
+                'csrc/trading_env_kernel.cu',
+            ],
+        ),
     ],
     cmdclass={
         'build_ext': BuildExtension

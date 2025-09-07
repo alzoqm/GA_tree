@@ -12,6 +12,7 @@ try:
     import gatree_crossover  
     import gatree_utils
     import gatree_selection
+    import gatree_env
     
     # Prediction functions (from gatree_predict)
     predict = gatree_predict.predict
@@ -76,6 +77,9 @@ try:
     # Selection functions (from gatree_selection)
     ppts_select_elites = gatree_selection.ppts_select_elites
     ppts_pick_parents = gatree_selection.ppts_pick_parents
+
+    # Trading environment functions (from gatree_env)
+    execute_actions_batch = gatree_env.execute_actions_batch
     
 except ImportError as e:
     print("="*60)
@@ -117,3 +121,4 @@ except ImportError as e:
     reorganize_population = None
     ppts_select_elites = None
     ppts_pick_parents = None
+    execute_actions_batch = None
