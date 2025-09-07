@@ -136,6 +136,10 @@ class GATree:
                     self._adjacency_list[parent_id] = []
                 self._adjacency_list[parent_id].append(i)
 
+        # CUDA 커널과 동일한 결과 일관성을 위해 부모별 자식을 인덱스 오름차순으로 정렬
+        for pid, lst in self._adjacency_list.items():
+            lst.sort()
+
 
     def make_tree(self):
         """
@@ -482,14 +486,17 @@ class GATree:
                 break
 
         if start_node_idx == -1:
-            return (None, 0.0, 0.0, 0.0) # 기본 HOLD 동작 유도
+            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0) # CUDA와 동일한 미발견 표현
 
         self._queue_head = 0
         self._queue_tail = 0
         self._bfs_queue[self._queue_tail] = start_node_idx
         self._queue_tail += 1
+        visited = torch.zeros(self.max_nodes, dtype=torch.bool)
+        visited[start_node_idx] = True
 
-        while self._queue_head < self._queue_tail:
+        steps = 0
+        while self._queue_head < self._queue_tail and steps < self.max_nodes:
             current_node_idx = self._bfs_queue[self._queue_head]
             self._queue_head += 1
 
@@ -507,16 +514,19 @@ class GATree:
                     return (action_type, param_2, param_3, param_4)
 
                 elif child_node_type == NODE_TYPE_DECISION:
-                    if self._evaluate_node(child_idx, feature_values):
+                    if not visited[child_idx] and self._evaluate_node(child_idx, feature_values):
+                        visited[child_idx] = True
                         if self._queue_tail < self.max_nodes:
                             self._bfs_queue[self._queue_tail] = child_idx
                             self._queue_tail += 1
                         else:
-                            print("Warning: BFS queue is full. Prediction might be incomplete.")
-                            return (None, 0.0, 0.0, 0.0)
+                            # 큐 오버플로 시 CUDA 커널과 동일하게 미발견 반환
+                            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0)
+
+            steps += 1
 
         # Action을 찾지 못하면 None을 반환하여 HOLD 동작 유도
-        return (None, 0.0, 0.0, 0.0)
+        return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0)
 
 
     def save(self, filepath):

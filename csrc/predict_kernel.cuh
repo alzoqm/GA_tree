@@ -35,5 +35,6 @@ void predict_cuda(
     torch::Tensor children,  // (B,Emax) int32,  CUDA
     torch::Tensor results,   // (B,4)    float32, CUDA
     torch::Tensor bfs_q,     // (B,N)    int32, CUDA
-    torch::Tensor visited    // (B,N)    int32, CUDA
+    torch::Tensor visited_gen, // (B,N)  int32, CUDA (stores last-visited step id)
+    int step_id              // scalar step id for visited generation marking
 );
