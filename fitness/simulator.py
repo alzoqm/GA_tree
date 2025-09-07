@@ -194,7 +194,7 @@ class FitnessSimulator:
             minimum_trades = wfo_min_trades
 
         objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
-
+        print('completed multi_objective_metrics')
         if return_returns:
             # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
             try:
