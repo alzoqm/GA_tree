@@ -242,13 +242,17 @@ def main():
 
     total_data_len = len(final_df)
     
-    # Check if WFO is enabled
+    # WFO 전용 모드 강제
     wfo_cfg = config.get('walk_forward', {'enabled': False})
-    
-    if wfo_cfg.get('enabled', False):
-        # === Walk-Forward Optimization Mode ===
-        logging.info("=== Walk-Forward Optimization Mode Enabled ===")
-        
+    if not wfo_cfg.get('enabled', False):
+        logging.error("Walk-Forward Optimization mode is required but disabled in config.")
+        logging.error("Please set walk_forward.enabled: true in experiment_config.yaml")
+        sys.exit(1)
+
+    # === Walk-Forward Optimization Mode ===
+    logging.info("=== Walk-Forward Optimization Mode Enabled ===")
+
+    if True:
         # Import WFO utilities
         from training.wfo import WalkForwardOptimizer
         
@@ -524,34 +528,7 @@ def main():
         except Exception:
             pass
         
-    else:
-        # === Traditional Single-Split Mode (Backward Compatibility) ===
-        logging.info("=== Traditional Single-Split Mode ===")
-        
-        skip_data_cnt = 0
-        valid_skip_data_cnt = int(total_data_len * data_cfg['train_ratio'])
-        
-        logging.info(f"Total data points: {total_data_len}")
-        logging.info(f"Training period: index {skip_data_cnt} to {valid_skip_data_cnt}")
-
-        # 통합 다중 목표 기반 학습 수행
-        logging.info("Using Unified Multi-Objective Training Mode")
-        best_chromosomes, best_objectives = generation_training(
-            data_1m=final_df,
-            evolution=evolution_engine,
-            skip_data_cnt=skip_data_cnt,
-            valid_skip_data_cnt=valid_skip_data_cnt,
-            chromosomes_size=ga_cfg['population']['size'],
-            gen_loop=ga_cfg['evolution_loop']['generations'],
-            best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
-            elite_size=ga_cfg['evolution_loop']['elite_size'],
-            device=env_cfg['device'],
-            warming_step=ga_cfg['evolution_loop']['warming_steps'],
-            evaluation_config=eval_cfg,
-            output_dir=env_cfg['output_dir'],
-            wandb_config=wandb_cfg,
-        )
-        best_metrics = best_objectives  # For PPTS, these are objective vectors
+    # (No Traditional Single-Split Mode)
 
     logging.info("Training loop finished.")
 
@@ -564,7 +541,7 @@ def main():
 
     if best_chromosomes is None or (hasattr(best_chromosomes, '__len__') and len(best_chromosomes) == 0):
         logging.warning("No best chromosomes were found during training. Skipping final save and test.")
-    elif wfo_cfg.get('enabled', False):
+    else:
         # === WFO Mode: Save aggregated results and best population ===
         logging.info("=== WFO Mode: Saving aggregated results & best model ===")
         
@@ -643,58 +620,6 @@ def main():
         
         logging.info("============================================")
         
-    else:
-        # === Traditional Mode: Save and test as before ===
-        logging.info("=== Traditional Mode: Saving best population ===")
-        
-        logging.info(f"Saving the best {len(best_chromosomes)} chromosomes to '{best_population_path}'")
-
-        best_population = GATreePop(
-            pop_size=len(best_chromosomes),
-            max_nodes=ga_cfg['population']['max_nodes'],
-            max_depth=ga_cfg['population']['max_depth'],
-            max_children=ga_cfg['population']['max_children'],
-            **model_config
-        )
-        best_population.population_tensor.copy_(best_chromosomes)
-        best_population.set_next_idx()
-        best_population.initialized = True
-        best_population.save(best_population_path)
-        logging.info("Best population saved successfully.")
-
-        logging.info("--- Starting final test with the best population ---")
-        test_start_cnt = valid_skip_data_cnt
-        test_end_cnt = total_data_len
-
-        logging.info(f"Test period: index {test_start_cnt} to {test_end_cnt}")
-
-        # 통합 다중 목표 테스트
-        test_objectives, test_summary = generation_test(
-            data_1m=final_df,
-            population=best_population,
-            start_data_cnt=test_start_cnt,
-            end_data_cnt=test_end_cnt,
-            device=env_cfg['device'],
-            evaluation_config=eval_cfg
-        )
-
-        logging.info("\n========== FINAL PPTS TEST RESULTS (Multi-Objective) ==========")
-        logging.info(f"Evaluated on {len(best_population.population_tensor)} individuals.")
-        
-        # Get objective names from evaluation config
-        objectives_config = eval_cfg.get('objectives', eval_cfg.get('multi_objectives', {}))
-        objective_names = objectives_config.get('objectives', ['obj1', 'obj2', 'obj3', 'obj4'])
-        minimize_flags = objectives_config.get('minimize', [True] * len(objective_names))
-        
-        for i in range(len(test_objectives)):
-            objectives = test_objectives[i]
-            logging.info(f"Individual {i:02d} | ", end="")
-            for j, (obj_name, obj_val, minimize) in enumerate(zip(objective_names, objectives, minimize_flags)):
-                disp_val = obj_val if minimize else -obj_val
-                logging.info(f"{obj_name}: {disp_val:.4f} | ", end="")
-            logging.info("")  # New line
-        logging.info("===============================================================")
-
     logging.info("Main script finished.")
 
 
