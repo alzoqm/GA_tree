@@ -53,9 +53,9 @@ data:
 ga_core:
   population:
     size: 10000
-    max_nodes: 256
-    max_depth: 10
-    max_children: 30
+    max_nodes: 64
+    max_depth: 6
+    max_children: 10
   evolution_loop:
     generations: 3
     parent_pool_size: 4000 # 교배 풀(Mating Pool) 크기

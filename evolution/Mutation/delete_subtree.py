@@ -50,8 +50,9 @@ class DeleteSubtreeMutation(BaseMutation):
 
         trees = chromosomes.clone().contiguous()
         B, N, _ = trees.shape
-        if N > self.max_nodes:
-            raise ValueError(f"max_nodes({self.max_nodes}) < N({N}). Increase max_nodes.")
+        # Fail-fast: ensure runtime shape matches configured max_nodes
+        if N != self.max_nodes:
+            raise ValueError(f"DeleteSubtreeMutation: trees.size(1)={N} does not match max_nodes={self.max_nodes}.")
 
         device = trees.device
 

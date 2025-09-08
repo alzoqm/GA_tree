@@ -49,6 +49,10 @@ class DeleteNodeMutation(BaseMutation):
         device = trees.device
         dtype  = trees.dtype
 
+        # Fail-fast: ensure runtime shape matches configured max_nodes
+        if N != self.max_nodes:
+            raise ValueError(f"DeleteNodeMutation: trees.size(1)={N} does not match max_nodes={self.max_nodes}.")
+
         mutate_mask = (torch.rand(B, device=device) < self.prob)
         if not mutate_mask.any():
             return trees

@@ -173,8 +173,12 @@ class AddNodeMutation(BaseMutation):
             raise RuntimeError("gatree_cuda module is not loaded. Cannot perform add-node mutation.")
 
         trees = chromosomes.clone()  # (B, max_nodes, node_dim)
-        B = trees.shape[0]
+        B, N, _ = trees.shape
         device, dtype = trees.device, trees.dtype
+
+        # Fail-fast: ensure runtime shape matches configured max_nodes
+        if N != self.max_nodes:
+            raise ValueError(f"AddNodeMutation: trees.size(1)={N} does not match max_nodes={self.max_nodes}.")
 
         self._ensure_sampler(device, dtype)
 
