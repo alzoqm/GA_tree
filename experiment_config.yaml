@@ -158,28 +158,8 @@ evaluation:
   # === WFO 사용시 목표 설정 ===
   # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
   is_objectives:
-    objectives: [
-      "mean_return",
-      "max_drawdown",
-      "sharpe_ratio",
-      "win_rate",
-      "profit_factor",
-      "calmar_ratio",
-      "sortino_ratio",
-      "volatility",
-      "complexity"
-    ]
-    minimize: [
-      false,  # mean_return (maximize)
-      true,   # max_drawdown (minimize)
-      false,  # sharpe_ratio (maximize)
-      false,  # win_rate (maximize)
-      false,  # profit_factor (maximize)
-      false,  # calmar_ratio (maximize)
-      false,  # sortino_ratio (maximize)
-      true,   # volatility (minimize)
-      true    # complexity (minimize)
-    ]
+    objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "complexity"]
+    minimize: [false, true, false, true]
     normalization: "minmax"
     
   # Simulator-side complexity composition
@@ -190,8 +170,36 @@ evaluation:
     
   # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
   oos_objectives:
-    objectives: ["mean_return", "max_drawdown", "sharpe_ratio"]
-    minimize: [false, true, false]
+    # 자세한 검증을 위해 OOS는 확장된 지표 세트를 사용
+    objectives: [
+      "mean_return",
+      "max_drawdown",
+      "sharpe_ratio",
+      "win_rate",
+      "profit_factor",
+      "calmar_ratio",
+      "sortino_ratio",
+      "volatility",
+      "omega_ratio",
+      "information_ratio",
+      "compound_value",
+      "trade_win_rate"
+    ]
+    minimize: [
+      false,  # mean_return (maximize)
+      true,   # max_drawdown (minimize)
+      false,  # sharpe_ratio (maximize)
+      false,  # win_rate (maximize)
+      false,  # profit_factor (maximize)
+      false,  # calmar_ratio (maximize)
+      false,  # sortino_ratio (maximize)
+      true,   # volatility (minimize)
+      false,  # omega_ratio (maximize)
+      false,  # information_ratio (maximize)
+      false,  # compound_value (maximize)
+      false   # trade_win_rate (maximize)
+    ]
+    normalization: "minmax"
     risk_free_rate: 0.0
     volatility_lookback: 30
     # Advanced metrics params (optional)
@@ -200,9 +208,10 @@ evaluation:
     
   # 집계된 OOS 목표 (최종 모델 선택용)
   oos_aggregate:
-    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_sharpe", "oos_consistency", "oos_return_std"]
-    minimize: [false, true, false, false, true]
-    methods: ["mean", "max", "mean", "hit_rate", "std"]
+    # 확장된 OOS 지표 순서에 맞춰 안전하게 집계 (표준편차 제거로 라벨 불일치 방지)
+    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_sharpe", "oos_consistency"]
+    minimize: [false, true, false, false]
+    methods: ["mean", "max", "mean", "hit_rate"]
     # 일관성(hit_rate) 임계값
     thresholds:
       min_return: 0.0       # 최소 수익률 임계값
