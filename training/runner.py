@@ -83,9 +83,7 @@ def generation_training(
             if np.any(valid_mask):
                 valid_objectives = train_objectives[valid_mask]
                 valid_chromosomes = population.population_tensor[valid_mask].clone()
-                print('start pareto')
                 pareto_front_mask = evaluator._find_pareto_front(valid_objectives)
-                print('end pareto')
                 if np.any(pareto_front_mask):
                     pareto_objectives = valid_objectives[pareto_front_mask]
                     pareto_chromosomes = valid_chromosomes[pareto_front_mask]
@@ -192,12 +190,10 @@ def generation_training(
         checkpoint_path = os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt')
         torch.save(checkpoint_data, checkpoint_path)
 
-        print('start evo')
         evolution.evolve(train_objectives_tensor)
         # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
         population.move_to(device)
         population.reorganize_nodes()
-        print('end evo')
 
     return best_chromosomes, best_objectives
 
