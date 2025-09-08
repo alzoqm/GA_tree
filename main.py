@@ -215,11 +215,32 @@ def main():
     mut_probs = op_cfg['mutation']['probabilities']
     mut_params = op_cfg['mutation']
 
+    # Ensure structural mutations receive the correct max_nodes matching the population
+    _max_nodes = ga_cfg['population']['max_nodes']
     mutation_ops = [
-        AddNodeMutation(prob=mut_probs['add_node'], config=mutation_base_config, **mut_params['add_node_mutation']),
-        DeleteNodeMutation(prob=mut_probs['delete_node'], config=mutation_base_config, **mut_params['delete_node_mutation']),
-        AddSubtreeMutation(prob=mut_probs['add_subtree'], config=mutation_base_config, **mut_params['add_subtree_mutation']),
-        DeleteSubtreeMutation(prob=mut_probs['delete_subtree'], config=mutation_base_config),
+        AddNodeMutation(
+            prob=mut_probs['add_node'],
+            config=mutation_base_config,
+            max_nodes=_max_nodes,
+            **mut_params['add_node_mutation']
+        ),
+        DeleteNodeMutation(
+            prob=mut_probs['delete_node'],
+            config=mutation_base_config,
+            max_nodes=_max_nodes,
+            **mut_params['delete_node_mutation']
+        ),
+        AddSubtreeMutation(
+            prob=mut_probs['add_subtree'],
+            config=mutation_base_config,
+            max_nodes=_max_nodes,
+            **mut_params['add_subtree_mutation']
+        ),
+        DeleteSubtreeMutation(
+            prob=mut_probs['delete_subtree'],
+            config=mutation_base_config,
+            max_nodes=_max_nodes,
+        ),
         ReinitializeNodeMutation(prob=mut_probs['reinitialize_node'], config=mutation_base_config),
         NodeParamMutation(prob=mut_probs['node_param'], config=mutation_base_config, **mut_params['node_param_mutation'])
     ]

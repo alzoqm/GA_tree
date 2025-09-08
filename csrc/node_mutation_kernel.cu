@@ -7,9 +7,10 @@
 #include "mutation_utils_kernel.cuh"
 
 #define CUDA_CHECK_ERRORS() \
-  do { cudaError_t err = cudaGetLastError(); if (err != cudaSuccess) { \
-    printf("CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
-  }} while (0)
+  do { \
+    cudaError_t err = cudaGetLastError(); \
+    TORCH_CHECK(err == cudaSuccess, cudaGetErrorString(err)); \
+  } while (0)
 
 __device__ __forceinline__ int f2i(float x) { return static_cast<int>(x + 0.5f); }
 __device__ __forceinline__ float i2f(int x) { return static_cast<float>(x); }
@@ -310,12 +311,18 @@ void add_decision_nodes_batch_cuda(
     TORCH_CHECK(out_new_node_indices.is_contiguous(), "out_new_node_indices must be contiguous");
     
     int B = trees.size(0);
+    int N = trees.size(1);
     int node_dim = trees.size(2);
+
+    TORCH_CHECK(N == max_nodes, "max_nodes must match trees.size(1)");
     
     TORCH_CHECK(out_new_node_indices.size(0) == B, "out_new_node_indices batch size mismatch");
     TORCH_CHECK(out_new_node_indices.size(1) == max_add_nodes, "out_new_node_indices max_add_nodes mismatch");
     TORCH_CHECK(candidate_indices_buffer.size(0) == B && candidate_indices_buffer.size(1) == max_nodes, "candidate_indices_buffer shape must be (B, max_nodes)");
     TORCH_CHECK(candidate_weights_buffer.size(0) == B && candidate_weights_buffer.size(1) == max_nodes, "candidate_weights_buffer shape must be (B, max_nodes)");
+    TORCH_CHECK(bfs_queue_buffer.size(0) == B && bfs_queue_buffer.size(1) == 2 * max_nodes, "bfs_queue_buffer shape must be (B, 2*max_nodes)");
+    TORCH_CHECK(result_indices_buffer.size(0) == B && result_indices_buffer.size(1) == 2 * max_nodes, "result_indices_buffer shape must be (B, 2*max_nodes)");
+    TORCH_CHECK(old_to_new_map_buffer.size(0) == B && old_to_new_map_buffer.size(1) == max_nodes, "old_to_new_map_buffer shape must be (B, max_nodes)");
 
     // Initialize outputs with -1
     out_new_node_indices.fill_(-1);

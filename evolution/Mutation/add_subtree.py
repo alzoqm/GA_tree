@@ -143,6 +143,10 @@ class AddSubtreeMutation(BaseMutation):
         B, N, D = trees.shape
         device, dtype = trees.device, trees.dtype
 
+        # Fail-fast: ensure runtime shape matches configured max_nodes
+        if N != self.max_nodes:
+            raise ValueError(f"AddSubtreeMutation: trees.size(1)={N} does not match max_nodes={self.max_nodes}.")
+
         self._ensure_samplers(device, dtype)
 
         mutate_mask = (torch.rand(B, device=device) < self.prob)
