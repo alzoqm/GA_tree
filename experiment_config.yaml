@@ -166,7 +166,8 @@ evaluation:
       "profit_factor",
       "calmar_ratio",
       "sortino_ratio",
-      "volatility"
+      "volatility",
+      "complexity"
     ]
     minimize: [
       false,  # mean_return (maximize)
@@ -176,9 +177,16 @@ evaluation:
       false,  # profit_factor (maximize)
       false,  # calmar_ratio (maximize)
       false,  # sortino_ratio (maximize)
-      true    # volatility (minimize)
+      true,   # volatility (minimize)
+      true    # complexity (minimize)
     ]
     normalization: "minmax"
+    
+  # Simulator-side complexity composition
+  complexity:
+    mode: "weighted"     # "weighted" | "max" | "geomean"
+    size_weight: 0.5     # used when mode == weighted
+    depth_weight: 0.5    # used when mode == weighted
     
   # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
   oos_objectives:
