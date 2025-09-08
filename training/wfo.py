@@ -189,7 +189,7 @@ class WalkForwardOptimizer:
         window_objectives = np.array(list(window_results.values()))
         return aggregate_oos_objectives(window_objectives, self.aggregate_config)
 
-    def get_final_rankings(self) -> Tuple[List[int], np.ndarray]:
+    def get_final_rankings(self, device: str | torch.device | None = None) -> Tuple[List[int], np.ndarray]:
         if not self.candidate_archives:
             return [], np.array([])
 
@@ -201,8 +201,7 @@ class WalkForwardOptimizer:
         aggregated_matrix = np.array(aggregated_matrix)
 
         agg_evaluator = MultiObjectiveFitnessEvaluator(self.aggregate_config)
-        ranks, distances = agg_evaluator.pareto_rank(aggregated_matrix)
+        ranks, distances = agg_evaluator.pareto_rank(aggregated_matrix, device=device)
         sort_indices = np.lexsort((-distances, ranks))
         ranked_candidates = [candidate_ids[i] for i in sort_indices]
         return ranked_candidates, aggregated_matrix[sort_indices]
-
