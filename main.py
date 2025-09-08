@@ -451,7 +451,7 @@ def main():
             best_chromosomes, best_metrics = None, None
         else:
             # Get final rankings based on aggregated OOS objectives
-            ranked_candidate_ids, aggregated_objectives = wfo_optimizer.get_final_rankings()
+            ranked_candidate_ids, aggregated_objectives = wfo_optimizer.get_final_rankings(device=env_cfg['device'])
             
             logging.info(f"Ranked {len(ranked_candidate_ids)} candidates based on aggregated OOS performance.")
             

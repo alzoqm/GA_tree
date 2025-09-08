@@ -8,6 +8,38 @@ from typing import List, Dict, Tuple, Optional, Union
 # from .trading_env import TradingEnvironment, fitness_fn
 
 
+# --- Module-level CUDA crowding distance helper ---
+def _crowding_distance_cuda(front_obj: torch.Tensor) -> torch.Tensor:
+    """
+    CUDA crowding distance for a single front.
+    front_obj: [F, M], minimization 기준.
+    반환: [F] float32, 경계점=+inf
+    """
+    device = front_obj.device
+    F, M = front_obj.shape
+    if F <= 2:
+        return torch.full((F,), float('inf'), dtype=torch.float32, device=device)
+
+    dist = torch.zeros((F,), dtype=torch.float32, device=device)
+
+    for m in range(M):
+        vals = front_obj[:, m]
+        sorted_vals, sorted_idx = torch.sort(vals)  # CUDA sort
+        dist[sorted_idx[0]]  = float('inf')
+        dist[sorted_idx[-1]] = float('inf')
+
+        rng = sorted_vals[-1] - sorted_vals[0]
+        if rng > 1e-8:
+            prev = sorted_vals[:-2]
+            nxt  = sorted_vals[2:]
+            add = (nxt - prev) / rng  # [F-2]
+            core_idx = sorted_idx[1:-1]
+            # 경계가 이미 inf여도 합산은 무의미하므로 그대로 덮어쓰기 되지 않음.
+            dist[core_idx] += add.to(dist.dtype)
+
+    return dist
+
+
 class MultiObjectiveFitnessEvaluator:
     """
     Multi-objective fitness evaluator that provides utilities for managing
@@ -164,83 +196,131 @@ class MultiObjectiveFitnessEvaluator:
         
         return fitness
     
-    def pareto_rank(self, objectives: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def pareto_rank(self, objectives: np.ndarray, device: Union[str, torch.device, None] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Calculate Pareto ranking and crowding distance for objectives.
-        
-        Args:
-            objectives: [population_size, num_objectives] objective values
-            
-        Returns:
-            ranks: [population_size] Pareto rank (0 = best front)
-            distances: [population_size] crowding distances
+        CUDA 가속 Pareto 정렬 + Crowding Distance.
+        - 입력 objectives는 'minimization 기준'이어야 합니다(원 코드와 동일).
+        - 무효 개체(±1e9, NaN/Inf 포함)는 최하위 랭크로 보냅니다.
+        반환:
+            ranks: [N] (0이 최상위 전선)
+            distances: [N] crowding distance (경계점=+inf)
         """
-        population_size = len(objectives)
-        ranks = np.zeros(population_size, dtype=int)
-        distances = np.zeros(population_size)
-        
-        # Handle invalid individuals
-        valid_mask = ~np.any(np.isin(objectives, [-1e9, 1e9]), axis=1)
-        valid_objectives = objectives[valid_mask]
-        
-        if len(valid_objectives) == 0:
-            return ranks, distances
-        
-        # Fast non-dominated sorting
-        fronts = []
-        domination_counts = np.zeros(len(valid_objectives))
-        dominated_solutions = [[] for _ in range(len(valid_objectives))]
-        
-        # Calculate domination relationships
-        for i in range(len(valid_objectives)):
-            for j in range(len(valid_objectives)):
-                if i != j:
-                    if self._dominates(valid_objectives[i], valid_objectives[j]):
-                        dominated_solutions[i].append(j)
-                    elif self._dominates(valid_objectives[j], valid_objectives[i]):
-                        domination_counts[i] += 1
-            
-            if domination_counts[i] == 0:
-                if len(fronts) == 0:
-                    fronts.append([])
-                fronts[0].append(i)
-        
-        # Build subsequent fronts
-        front_idx = 0
-        while front_idx < len(fronts) and fronts[front_idx]:
-            next_front = []
-            for i in fronts[front_idx]:
-                for j in dominated_solutions[i]:
-                    domination_counts[j] -= 1
-                    if domination_counts[j] == 0:
-                        next_front.append(j)
-            
-            if next_front:
-                fronts.append(next_front)
-            front_idx += 1
-        
-        # Assign ranks and calculate crowding distances
-        valid_indices = np.where(valid_mask)[0]
-        
-        for front_num, front in enumerate(fronts):
-            if not front:
+        # Honor explicitly provided device; otherwise fall back to availability
+        if device is None:
+            use_cuda = torch.cuda.is_available()
+            device = torch.device('cuda' if use_cuda else 'cpu')
+        else:
+            device = torch.device(device)
+
+        # np.ndarray 혹은 torch.Tensor 모두 허용
+        if isinstance(objectives, np.ndarray):
+            obj = torch.from_numpy(objectives)
+        else:
+            obj = objectives
+        obj = obj.to(device=device, dtype=torch.float32)
+
+        N, M = obj.shape if obj.ndim == 2 else (0, 0)
+        if N == 0:
+            return np.zeros((0,), dtype=np.int32), np.zeros((0,), dtype=np.float32)
+
+        # 유효/무효 마스크 (행 기준): 어느 목표라도 sentinels/NaN/Inf면 무효
+        row_invalid = ((obj == -1e9) | (obj == 1e9) | ~torch.isfinite(obj)).any(dim=1)
+        valid_mask = ~row_invalid
+        valid_idx = torch.nonzero(valid_mask, as_tuple=False).squeeze(1)
+
+        # 모두 무효한 경우
+        if valid_idx.numel() == 0:
+            ranks = torch.full((N,), 0, dtype=torch.int32, device=device)
+            distances = torch.zeros((N,), dtype=torch.float32, device=device)
+            # 전선이 없으니 무효는 최하위(=0) 대신 0으로 두고, 아래에서 len_fronts로 덮어씀
+            ranks[~valid_mask] = 1  # fronts 수 = 1 로 취급
+            return ranks.cpu().numpy(), distances.cpu().numpy()
+
+        vobj = obj[valid_idx]                 # [Nv, M]
+        Nv = vobj.shape[0]
+
+        # DOM: [Nv, Nv] bool, DOM[i, j] = i가 j 지배?
+        # 메모리/성능 균형을 위해 i축 chunking
+        DOM = torch.zeros((Nv, Nv), dtype=torch.bool, device=device)
+        chunk = 1024 if Nv >= 1024 else Nv  # 필요 시 조정
+
+        for i0 in range(0, Nv, chunk):
+            i1 = min(i0 + chunk, Nv)
+            vi = vobj[i0:i1]  # [Ci, M]
+
+            # [Ci, 1, M] vs [1, Nv, M]
+            le = (vi[:, None, :] <= vobj[None, :, :]).all(dim=-1)  # [Ci, Nv]
+            lt = (vi[:, None, :] <  vobj[None, :, :]).any(dim=-1)  # [Ci, Nv]
+            block = le & lt
+
+            # 대각(자기 자신 지배 금지)
+            if i0 < i1:
+                diag_j = torch.arange(i0, i1, device=device)
+                block[torch.arange(i1 - i0, device=device), diag_j] = False
+
+            DOM[i0:i1, :] = block
+
+        # domination_counts[j] = 다른 개체가 j를 지배하는 수 = DOM[:, j].sum()
+        counts = DOM.sum(dim=0).to(torch.int32)  # [Nv]
+
+        # 전선 빌드
+        assigned = torch.zeros(Nv, dtype=torch.bool, device=device)
+        ranks_valid = torch.full((Nv,), -1, dtype=torch.int32, device=device)
+
+        fronts: list[torch.Tensor] = []
+        cur_front = torch.nonzero((counts == 0) & (~assigned), as_tuple=False).squeeze(1)
+        while cur_front.numel() > 0:
+            fronts.append(cur_front)
+            ranks_valid[cur_front] = len(fronts) - 1
+            assigned[cur_front] = True
+
+            # 현재 전선이 지배하는 개수만큼 후속 개체들의 counts 감소
+            decrements = DOM[cur_front].sum(dim=0).to(torch.int32)  # [Nv]
+            counts -= decrements
+            counts[cur_front] = -1  # 처리 완료 표식
+
+            # 다음 전선: 아직 미할당 & counts==0
+            cur_front = torch.nonzero((counts == 0) & (~assigned), as_tuple=False).squeeze(1)
+
+        num_fronts = len(fronts)
+
+        # Crowding Distance (전선별, CUDA 정렬 사용)
+        distances_valid = torch.zeros((Nv,), dtype=torch.float32, device=device)
+        for f in fronts:
+            if f.numel() == 0:
                 continue
-            
-            # Assign ranks
-            for idx in front:
-                ranks[valid_indices[idx]] = front_num
-            
-            # Calculate crowding distances for this front
-            front_objectives = valid_objectives[front]
-            front_distances = self._crowding_distance(front_objectives)
-            
-            for i, idx in enumerate(front):
-                distances[valid_indices[idx]] = front_distances[i]
-        
-        # Set invalid individuals to worst rank
-        ranks[~valid_mask] = len(fronts)
-        
-        return ranks, distances
+            _d = _crowding_distance_cuda(vobj[f])  # [|f|]
+            distances_valid[f] = _d
+
+        # 전역 결과로 되돌리기
+        ranks = torch.full((N,), num_fronts, dtype=torch.int32, device=device)  # 무효는 최하위(fronts 개수)
+        distances = torch.zeros((N,), dtype=torch.float32, device=device)
+
+        ranks[valid_idx] = ranks_valid
+        distances[valid_idx] = distances_valid
+        # 무효는 ranks= num_fronts (원 코드: len(fronts)), distances는 0
+
+        return ranks.cpu().numpy(), distances.cpu().numpy()
+
+    @staticmethod
+    def _crowding_distance_cpu_fallback(front_objectives: np.ndarray) -> np.ndarray:
+        """(비상용) CPU 폴백. CUDA 환경이 없을 때만 사용."""
+        front_size = len(front_objectives)
+        if front_size <= 2:
+            return np.full(front_size, float('inf'), dtype=np.float32)
+        distances = np.zeros(front_size, dtype=np.float32)
+        F = front_objectives.astype(np.float32, copy=False)
+        M = F.shape[1]
+        for m in range(M):
+            order = np.argsort(F[:, m], kind='mergesort')
+            distances[order[0]] = np.inf
+            distances[order[-1]] = np.inf
+            rng = F[order[-1], m] - F[order[0], m]
+            if rng > 1e-8:
+                prev = F[order[:-2], m]
+                nxt  = F[order[2:],  m]
+                distances[order[1:-1]] += (nxt - prev) / rng
+        return distances
 
     def _find_pareto_front(self, objectives: np.ndarray) -> np.ndarray:
         """
