@@ -2,7 +2,8 @@
 
 import numpy as np
 import torch
-from typing import List, Tuple, Optional, Dict
+import pandas as pd
+from typing import List, Tuple, Optional, Dict, Any
 
 from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
 
@@ -205,3 +206,127 @@ class WalkForwardOptimizer:
         sort_indices = np.lexsort((-distances, ranks))
         ranked_candidates = [candidate_ids[i] for i in sort_indices]
         return ranked_candidates, aggregated_matrix[sort_indices]
+
+    # --- High-level orchestration moved from main.py ---
+    def run(
+        self,
+        final_df: pd.DataFrame,
+        evolution_engine: Any,
+        model_config: dict,
+        ga_cfg: dict,
+        env_cfg: dict,
+        wfo_cfg: dict,
+        wandb_cfg: Optional[dict] = None,
+        output_dir: Optional[str] = None,
+    ) -> Tuple[Optional['torch.Tensor'], Optional[np.ndarray], List[Tuple[int, int, int, int]]]:
+        """Execute Walk-Forward Optimization and return best chromosomes and metrics.
+
+        Returns (best_chromosomes, best_metrics, windows).
+        """
+        import os
+        import numpy as np
+        import torch
+        from tqdm import tqdm
+        from training.runner import generation_training, generation_test
+        from models.model import GATreePop
+
+        total_data_len = len(final_df)
+        windows = self.generate_windows(total_data_len)
+        if len(windows) == 0:
+            return None, None, []
+
+        population = evolution_engine.population
+
+        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows, desc="WFO Windows")):
+            # Per-window checkpoint directory
+            window_checkpoint_dir = os.path.join(output_dir or env_cfg['output_dir'], 'checkpoints', f'wf_window_{window_idx}')
+            os.makedirs(window_checkpoint_dir, exist_ok=True)
+
+            # Reset population if requested
+            if window_idx > 0 and wfo_cfg.get('reset_population_each_window', False):
+                population.make_population(device=env_cfg['device'])
+
+            # In-Sample training
+            is_objectives_config = self.evaluation_config.get('is_objectives', self.evaluation_config.get('objectives'))
+            window_eval_config = {**self.evaluation_config, 'objectives': is_objectives_config}
+            if 'min_trades_per_window' in wfo_cfg:
+                window_eval_config['min_trades_per_window'] = wfo_cfg['min_trades_per_window']
+
+            window_best_chromosomes, window_best_objectives = generation_training(
+                data_1m=final_df,
+                evolution=evolution_engine,
+                skip_data_cnt=train_start,
+                valid_skip_data_cnt=train_end,
+                chromosomes_size=ga_cfg['population']['size'],
+                gen_loop=ga_cfg['evolution_loop']['generations'],
+                best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
+                elite_size=ga_cfg['evolution_loop']['elite_size'],
+                device=env_cfg['device'],
+                warming_step=ga_cfg['evolution_loop']['warming_steps'],
+                evaluation_config=window_eval_config,
+                output_dir=window_checkpoint_dir,
+                wandb_config=wandb_cfg,
+            )
+
+            if window_best_chromosomes is None or len(window_best_chromosomes) == 0:
+                # Skip OOS if nothing valid
+                continue
+
+            # OOS evaluation
+            oos_objectives_config = self.evaluation_config.get('oos_objectives', self.evaluation_config.get('objectives'))
+            oos_eval_config = {**self.evaluation_config, 'objectives': oos_objectives_config}
+            if 'min_trades_per_window' in wfo_cfg:
+                oos_eval_config['min_trades_per_window'] = wfo_cfg['min_trades_per_window']
+
+            oos_population = GATreePop(
+                pop_size=len(window_best_chromosomes),
+                max_nodes=ga_cfg['population']['max_nodes'],
+                max_depth=ga_cfg['population']['max_depth'],
+                max_children=ga_cfg['population']['max_children'],
+                **model_config
+            )
+            oos_population.population_tensor.copy_(window_best_chromosomes)
+            oos_population.set_next_idx()
+            oos_population.initialized = True
+
+            oos_objectives, _ = generation_test(
+                data_1m=final_df,
+                population=oos_population,
+                start_data_cnt=oos_start,
+                end_data_cnt=oos_end,
+                device=env_cfg['device'],
+                evaluation_config=oos_eval_config,
+            )
+
+            # Record results and chromosomes
+            for candidate_idx, oos_obj in enumerate(oos_objectives):
+                candidate_id = f"w{window_idx}_c{candidate_idx}"
+                candidate_chrom = window_best_chromosomes[candidate_idx]
+                self.record_window_result(window_idx, candidate_id, oos_obj, chromosome=candidate_chrom)
+
+            # Prepare next window population in-place if not resetting
+            if not wfo_cfg.get('reset_population_each_window', False):
+                elite_size = min(ga_cfg['evolution_loop']['elite_size'], len(window_best_chromosomes))
+                population.make_population(device=env_cfg['device'])
+                population.population_tensor[:elite_size].copy_(window_best_chromosomes[:elite_size])
+                population.set_next_idx()
+                population.initialized = True
+
+        # Final aggregation
+        if not self.candidate_archives:
+            return None, None, windows
+
+        ranked_candidate_ids, aggregated_objectives = self.get_final_rankings(device=env_cfg['device'])
+
+        # Reconstruct best chromosomes
+        top_k = min(len(aggregated_objectives), ga_cfg['evolution_loop']['best_chromosome_pool_size'])
+        reconstructed: List[torch.Tensor] = []
+        for rank_idx in range(top_k):
+            cid = ranked_candidate_ids[rank_idx]
+            chrom = self.get_candidate_chromosome(cid)
+            if chrom is not None:
+                reconstructed.append(chrom)
+        best_chromosomes = torch.stack(reconstructed, dim=0) if reconstructed else None
+        best_metrics = aggregated_objectives[:top_k] if aggregated_objectives.size else None
+
+        return best_chromosomes, best_metrics, windows
