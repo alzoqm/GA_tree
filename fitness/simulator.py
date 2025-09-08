@@ -87,61 +87,8 @@ class FitnessSimulator:
         from models.constants import ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG
         lut = torch.tensor([ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG], dtype=torch.int32, device=device)
 
-        # Optional: CUDA Graph capture to remove launch overhead
-        use_graph = False
-        graph = None
         # Monotonic step id for kernel visited generation marking
         step_id = 1
-        if str(device).startswith('cuda'):
-            try:
-                torch.cuda.synchronize()
-                # Warmup to allocate kernels on stream
-                positions.copy_(lut[torch.zeros(B, dtype=torch.long, device=device)])
-                if features_all_gpu is not None:
-                    features.copy_(features_all_gpu[start_data_cnt])
-                else:
-                    features.copy_(torch.from_numpy(feature_np[start_data_cnt]).to(device))
-                predict_population_cuda(
-                    population=population,
-                    feature_values=None,
-                    current_positions=positions,
-                    adj_offsets=adj_offsets,
-                    adj_indices=adj_indices,
-                    device=device,
-                    results=results,
-                    bfs=bfs,
-                    visited=visited,
-                    positions_tensor=positions,
-                    features_tensor=features,
-                    step_id=step_id,
-                    validate=False,
-                    sync=False,
-                )
-                torch.cuda.synchronize()
-
-                graph = torch.cuda.CUDAGraph()
-                graph.capture_begin()
-                predict_population_cuda(
-                    population=population,
-                    feature_values=None,
-                    current_positions=positions,
-                    adj_offsets=adj_offsets,
-                    adj_indices=adj_indices,
-                    device=device,
-                    results=results,
-                    bfs=bfs,
-                    visited=visited,
-                    positions_tensor=positions,
-                    features_tensor=features,
-                    step_id=step_id,
-                    validate=False,
-                    sync=False,
-                )
-                graph.capture_end()
-                use_graph = False  # Generation counter conflicts with captured scalars; disable graph here
-            except Exception:
-                graph = None
-                use_graph = False
 
         pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Sim", leave=False)
         for entry_index in pbar:
@@ -160,26 +107,22 @@ class FitnessSimulator:
 
             # Increment step id each iteration to avoid clearing visited
             step_id += 1
-            if use_graph and graph is not None:
-                graph.replay()
-                predicted_actions = results
-            else:
-                predicted_actions = predict_population_cuda(
-                    population=population,
-                    feature_values=None,
-                    current_positions=positions,
-                    adj_offsets=adj_offsets,
-                    adj_indices=adj_indices,
-                    device=device,
-                    results=results,
-                    bfs=bfs,
-                    visited=visited,
-                    positions_tensor=positions,
-                    features_tensor=features,
-                    step_id=step_id,
-                    validate=False,
-                    sync=False,
-                )
+            predicted_actions = predict_population_cuda(
+                population=population,
+                feature_values=None,
+                current_positions=positions,
+                adj_offsets=adj_offsets,
+                adj_indices=adj_indices,
+                device=device,
+                results=results,
+                bfs=bfs,
+                visited=visited,
+                positions_tensor=positions,
+                features_tensor=features,
+                step_id=step_id,
+                validate=False,
+                sync=False,
+            )
             if predicted_actions is None:
                 raise RuntimeError(
                     "CUDA prediction failed. Check if gatree_cuda module is compiled and available."
