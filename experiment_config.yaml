@@ -229,115 +229,173 @@ feature_classification:
   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
   feature_num:
+    # Price action (reduced)
     close_change_pct: [-10, 10]
-    body_size: [0, 100]
-    upper_wick_size: [0, 100]
-    lower_wick_size: [0, 100]
-    total_range: [0, 200]
     body_to_range_ratio: [0, 1]
+    # Momentum (canonical)
     RSI: [0, 100]
-    '%K': [0, 100]
-    '%D': [0, 100]
-    Williams_R: [-100, 0]
-    CCI: [-250, 250]
-    STOCHRSI_K: [0, 100]
-    STOCHRSI_D: [0, 100]
-    PPO: [-50, 50]
     ROC: [-50, 50]
-    ULTOSC: [0, 100]
-    MOM: [-50, 50]
-    MACD: [-100, 100]
-    MACD_Signal: [-100, 100]
+    # Trend (canonical)
     MACD_Hist: [-50, 50]
     ADX: [0, 100]
-    DI_plus: [0, 100]
-    DI_minus: [0, 100]
-    BB_Width: [0, 1]
-    ATR: [0, 100]
+    # Volatility (canonical)
     NATR: [0, 5]
-    OBV: [-1e9, 1e9]
+    BB_Width: [0, 1]
+    # Volume/flow (canonical)
     CMF: [-1, 1]
-    AD: [-1e9, 1e9]
-    ADOSC: [-1e9, 1e9]
+    # Hilbert (single numeric)
     HT_DCPERIOD: [0, 100]
-    HT_SINE: [-1, 1]
-    HT_LEADSINE: [-1, 1]
-    # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+    # Composite (single representative)
     RSI_ADX_Ratio: [-10, 10]
-    MACD_ATR_Ratio: [-50, 50]
-    RSI_Ratio: [0, 5]
-    BB_Width_Ratio: [0, 5]
-    RSI_ROC: [-100, 100]
-    ATR_ROC: [-100, 100]
-    MACD_Hist_ROC: [-100, 100]
-    CCI_ROC: [-100, 100]
-    # ----------------------------------------------
 
   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
   # 여기에 포함된 피처들은 서로 비교 대상이 됨
   feature_comparison:
-    - Open
+    - Close
     - High
     - Low
-    - Close
     - SMA
     - EMA
-    - VWMA
-    - DEMA
-    - TEMA
-    - TRIMA
-    - BB_Upper
     - BB_Mid
-    - BB_Lower
-    - Ichimoku_Tenkan
     - Ichimoku_Kijun
-    - Ichimoku_SenkouA
-    - Ichimoku_SenkouB
-    - Ichimoku_Chikou_Ratio
     - SAR
-    - Support_MA
-    - Resistance_MA
     - Pivot_Point
     - Support1_Pivot
-    - Support2_Pivot
     - Resistance1_Pivot
-    - Resistance2_Pivot
 
   # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
   feature_bool:
     - InvertedHammers
     - Hammers
-    - HangingMen
-    - DarkCloudCovers
     - Dojis
-    - DragonflyDojis
-    - GravestoneDojis
     - MorningStars
-    - MorningStarDojis
-    - PiercingPatterns
     - ShootingStars
     - '3BlackCrows'
     - '3WhiteSoldiers'
-    - '3StarsInSouth'
-    - BullishHarami
-    - BearishHarami
     - BullishEngulfing
     - BearishEngulfing
-    - BullishDojiStar
-    - BearishDojiStar
-    - BullishTasukiGap
-    - BearishTasukiGap
-    - BullishXSideGap3Methods
-    - BearishXSideGap3Methods
-    - BullishSpinningTop
-    - BearishSpinningTop
-    - BullishRise3Methods
-    - BearishFall3Methods
     - HT_TRENDMODE
-    # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+    # Composite / volume-context confirmations
     - Volume_Spike
     - Consecutive_Bullish
     - Consecutive_Bearish
     - Bullish_Confirmation
     - Bearish_Confirmation
-    # ---------------------------------------------
+
+# # 7. 피처 분류 및 모델 입력 설정 (수정됨)
+# feature_classification:
+#   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
+#   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
+#   feature_num:
+#     close_change_pct: [-10, 10]
+#     body_size: [0, 100]
+#     upper_wick_size: [0, 100]
+#     lower_wick_size: [0, 100]
+#     total_range: [0, 200]
+#     body_to_range_ratio: [0, 1]
+#     RSI: [0, 100]
+#     '%K': [0, 100]
+#     '%D': [0, 100]
+#     Williams_R: [-100, 0]
+#     CCI: [-250, 250]
+#     STOCHRSI_K: [0, 100]
+#     STOCHRSI_D: [0, 100]
+#     PPO: [-50, 50]
+#     ROC: [-50, 50]
+#     ULTOSC: [0, 100]
+#     MOM: [-50, 50]
+#     MACD: [-100, 100]
+#     MACD_Signal: [-100, 100]
+#     MACD_Hist: [-50, 50]
+#     ADX: [0, 100]
+#     DI_plus: [0, 100]
+#     DI_minus: [0, 100]
+#     BB_Width: [0, 1]
+#     ATR: [0, 100]
+#     NATR: [0, 5]
+#     OBV: [-1e9, 1e9]
+#     CMF: [-1, 1]
+#     AD: [-1e9, 1e9]
+#     ADOSC: [-1e9, 1e9]
+#     HT_DCPERIOD: [0, 100]
+#     HT_SINE: [-1, 1]
+#     HT_LEADSINE: [-1, 1]
+#     # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+#     RSI_ADX_Ratio: [-10, 10]
+#     MACD_ATR_Ratio: [-50, 50]
+#     RSI_Ratio: [0, 5]
+#     BB_Width_Ratio: [0, 5]
+#     RSI_ROC: [-100, 100]
+#     ATR_ROC: [-100, 100]
+#     MACD_Hist_ROC: [-100, 100]
+#     CCI_ROC: [-100, 100]
+#     # ----------------------------------------------
+
+#   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
+#   # 여기에 포함된 피처들은 서로 비교 대상이 됨
+#   feature_comparison:
+#     - Open
+#     - High
+#     - Low
+#     - Close
+#     - SMA
+#     - EMA
+#     - VWMA
+#     - DEMA
+#     - TEMA
+#     - TRIMA
+#     - BB_Upper
+#     - BB_Mid
+#     - BB_Lower
+#     - Ichimoku_Tenkan
+#     - Ichimoku_Kijun
+#     - Ichimoku_SenkouA
+#     - Ichimoku_SenkouB
+#     - Ichimoku_Chikou_Ratio
+#     - SAR
+#     - Support_MA
+#     - Resistance_MA
+#     - Pivot_Point
+#     - Support1_Pivot
+#     - Support2_Pivot
+#     - Resistance1_Pivot
+#     - Resistance2_Pivot
+
+#   # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
+#   feature_bool:
+#     - InvertedHammers
+#     - Hammers
+#     - HangingMen
+#     - DarkCloudCovers
+#     - Dojis
+#     - DragonflyDojis
+#     - GravestoneDojis
+#     - MorningStars
+#     - MorningStarDojis
+#     - PiercingPatterns
+#     - ShootingStars
+#     - '3BlackCrows'
+#     - '3WhiteSoldiers'
+#     - '3StarsInSouth'
+#     - BullishHarami
+#     - BearishHarami
+#     - BullishEngulfing
+#     - BearishEngulfing
+#     - BullishDojiStar
+#     - BearishDojiStar
+#     - BullishTasukiGap
+#     - BearishTasukiGap
+#     - BullishXSideGap3Methods
+#     - BearishXSideGap3Methods
+#     - BullishSpinningTop
+#     - BearishSpinningTop
+#     - BullishRise3Methods
+#     - BearishFall3Methods
+#     - HT_TRENDMODE
+#     # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+#     - Volume_Spike
+#     - Consecutive_Bullish
+#     - Consecutive_Bearish
+#     - Bullish_Confirmation
+#     - Bearish_Confirmation
+#     # ---------------------------------------------
