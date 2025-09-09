@@ -4,6 +4,7 @@
 import torch
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from models.model import GATreePop
@@ -149,6 +150,184 @@ class TradingEnvironment:
         )
         # 직전 스텝에서 실제 적용된 개체 마스크
         self.prev_applied_mask = torch.zeros(chromosomes_size, dtype=torch.bool, device=device)
+
+    # ------------------------------------------------------------
+    # Step decomposition helpers (no logic change)
+    # ------------------------------------------------------------
+    @dataclass
+    class StepState:
+        timestamp: pd.Timestamp
+        high: torch.Tensor
+        low: torch.Tensor
+        close: torch.Tensor
+        funding_rate: torch.Tensor
+        mark_t: torch.Tensor
+        exec_base_price: torch.Tensor | float
+
+    def _extract_step_state(self, market_data, next_open_price) -> "TradingEnvironment.StepState":
+        ts = market_data.name
+        high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
+        low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
+        close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
+        funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
+        mark_t = (high + low + close) / 3.0
+        return TradingEnvironment.StepState(
+            timestamp=ts,
+            high=high,
+            low=low,
+            close=close,
+            funding_rate=funding_rate,
+            mark_t=mark_t,
+            exec_base_price=next_open_price,
+        )
+
+    def _prepare_and_deduplicate_actions(self, predicted_actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        actions = predicted_actions.to(self.device)
+        raw_actions = actions.clone()
+
+        if self.enable_action_dedup:
+            cols = max(1, min(self.dedup_compare_cols, actions.shape[1], self.prev_actions_raw.shape[1]))
+            curr_type = actions[:, 0].long()
+            prev_type = self.prev_actions_raw[:, 0].long()
+            type_equal = curr_type == prev_type
+
+            if cols > 1:
+                same_params = torch.isclose(
+                    actions[:, 1:cols],
+                    self.prev_actions_raw[:, 1:cols],
+                    rtol=self.dedup_rtol,
+                    atol=self.dedup_atol,
+                    equal_nan=False
+                ).all(dim=1)
+            else:
+                same_params = torch.ones_like(type_equal, dtype=torch.bool)
+
+            if len(self.dedup_exclude_types) > 0:
+                exclude_tensor = torch.tensor(list(self.dedup_exclude_types), dtype=torch.long, device=self.device)
+                excluded_mask = torch.isin(curr_type, exclude_tensor)
+            else:
+                excluded_mask = torch.zeros_like(type_equal, dtype=torch.bool)
+
+            duplicate_mask = type_equal & same_params & (~excluded_mask)
+            if self.dedup_require_applied:
+                duplicate_mask &= self.prev_applied_mask
+
+            if duplicate_mask.any():
+                actions[duplicate_mask, :] = 0.0
+                actions[duplicate_mask, 0] = float(ACTION_NOT_FOUND)
+
+        return actions, raw_actions
+
+    def _snapshot_state_for_dedup(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.pos_list.clone(), self.enter_ratio.clone()
+
+    def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price):
+        if str(self.device).startswith('cuda'):
+            used_cuda = self._execute_actions_cuda(actions, exec_base_price)
+            if not used_cuda:
+                raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
+        else:
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
+
+    def _update_holding_periods(self):
+        self.holding_period[self.pos_list != 0] += 1
+        self.holding_period[self.pos_list == 0] = 0
+
+    def _accumulate_realized_pnl_and_stats(self):
+        non_zero_mask = self.profit != 0
+        if non_zero_mask.any():
+            realized_delta = self.profit.clone()
+            self.realized_cum += realized_delta
+            self.sum_returns[non_zero_mask] += self.profit[non_zero_mask]
+            self.count_returns[non_zero_mask] += 1
+            self.sum_sq_returns[non_zero_mask] += self.profit[non_zero_mask] ** 2
+            neg_mask = self.profit < 0
+            self.sum_neg[neg_mask] += self.profit[neg_mask]
+            self.count_neg[neg_mask] += 1
+            self.sum_sq_neg[neg_mask] += self.profit[neg_mask] ** 2
+            pos_mask = self.profit > 0
+            self.total_profit_agg[pos_mask] += self.profit[pos_mask]
+            self.total_loss_agg[neg_mask] += -self.profit[neg_mask]
+            self.count_wins[pos_mask] += 1
+            self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask])
+
+    def _compute_unrealized_pnl(self, mark_t: torch.Tensor) -> torch.Tensor:
+        open_mask = self.pos_list != 0
+        if open_mask.any():
+            side = torch.where(self.pos_list == 2, 1.0, -1.0)
+            entry = self.price_list
+            lev = self.leverage_ratio.float()
+            er = self.enter_ratio
+            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
+            unreal_vec = pnl_pct * lev * er
+            total_unreal = torch.zeros_like(self.sum_returns)
+            total_unreal[open_mask] = unreal_vec[open_mask]
+        else:
+            total_unreal = torch.zeros_like(self.sum_returns)
+        return total_unreal
+
+    def _update_equity_and_drawdown(self, total_unreal: torch.Tensor, timestamp):
+        equity = self.realized_cum + total_unreal
+        self.cum_sum = equity
+        self.running_max = torch.maximum(self.running_max, self.cum_sum)
+        current_drawdown = self.running_max - self.cum_sum
+        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
+        self.profit.zero_()
+        self.last_timestamp = timestamp
+
+    def _update_dedup_buffers_after_exec(
+        self,
+        actions: torch.Tensor,
+        raw_actions: torch.Tensor,
+        pos_before: torch.Tensor,
+        er_before: torch.Tensor,
+    ):
+        if not self.enable_action_dedup:
+            return
+        pos_after = self.pos_list
+        er_after = self.enter_ratio
+        atype_eff = actions[:, 0].long()
+
+        eps = 1e-8
+        applied_new_long = (atype_eff == ACTION_NEW_LONG) & (pos_before == 0) & (pos_after == 2)
+        applied_new_short = (atype_eff == ACTION_NEW_SHORT) & (pos_before == 0) & (pos_after == 1)
+        applied_close_all = (atype_eff == ACTION_CLOSE_ALL) & (pos_before != 0) & (pos_after == 0)
+        applied_flip = (atype_eff == ACTION_FLIP_POSITION) & (
+            ((pos_before == 2) & (pos_after == 1)) | ((pos_before == 1) & (pos_after == 2))
+        )
+        applied_close_partial = (atype_eff == ACTION_CLOSE_PARTIAL) & (pos_before != 0) & (er_after < er_before - eps)
+        applied_add = (atype_eff == ACTION_ADD_POSITION) & (pos_before != 0) & (er_after > er_before + eps)
+
+        applied_mask = (
+            applied_new_long | applied_new_short | applied_close_all |
+            applied_flip | applied_close_partial | applied_add
+        )
+
+        self.prev_applied_mask = applied_mask
+        cols_copy = min(self.prev_actions_raw.shape[1], raw_actions.shape[1])
+        self.prev_actions_raw[:, :cols_copy] = raw_actions[:, :cols_copy]
+
+    def _update_return_histories(self, pre_equity: torch.Tensor, market_data, exec_base_price):
+        post_equity = self._calculate_current_equity(market_data)
+        returns = (post_equity - pre_equity) / (pre_equity + 1e-9)
+        self.returns_history.append(returns)
+        self.equity_history.append(post_equity)
+        if self.benchmark_mode == 'close_to_next_open':
+            curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
+            bench_r = (exec_base_price - curr_close) / (curr_close + 1e-9)
+            if isinstance(bench_r, torch.Tensor) and bench_r.dim() == 0:
+                bench_r_val = bench_r.item()
+                bench_vec = torch.full((self.chromosomes_size,), bench_r_val, dtype=torch.float32, device=self.device)
+            else:
+                bench_vec = bench_r if isinstance(bench_r, torch.Tensor) else torch.full((self.chromosomes_size,), float(bench_r), dtype=torch.float32, device=self.device)
+            self.bench_returns_history.append(bench_vec)
+
+        max_history = max(self.volatility_lookback, self.lookback_period)
+        if len(self.returns_history) > max_history:
+            self.returns_history.pop(0)
+            self.equity_history.pop(0)
+        if len(self.bench_returns_history) > max_history:
+            self.bench_returns_history.pop(0)
 
     def _apply_funding_fees(self, current_timestamp, funding_rate):
         """원본 펀딩비 로직 완전 보존"""
@@ -642,181 +821,19 @@ class TradingEnvironment:
         """
         원본 step 함수 완전 보존 + 다중 목표용 히스토리 추가 추적
         """
-        # Store equity before step for return calculation (다중 목표용)
         pre_equity = self._calculate_current_equity(market_data)
-
-        # === 원본 step 로직 완전 보존 ===
-        current_timestamp = market_data.name
-        # Conservative mark-price proxy using OHLC; if real mark price is provided,
-        # users can extend data ingestion to pass separate series.
-        curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
-        curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
-        curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
-        funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
-        # Typical price as mark proxy for MtM
-        mark_t = (curr_high + curr_low + curr_close) / 3.0
-        
-        self._apply_funding_fees(current_timestamp, funding_rate)
-        # Use mark proxy bounds for liquidation touch logic
-        self._check_liquidation(curr_low, curr_high)
-        
-        # 예측 액션 텐서를 디바이스 정렬 및 보존 사본 생성
-        predicted_actions = predicted_actions.to(self.device)
-        raw_pred_actions = predicted_actions.clone()  # 견고형: 원본 예측 저장
-
-        # 액션 중복 방지: 직전 '실제 적용' 액션과 동일하면 스킵
-        if self.enable_action_dedup:
-            # 비교할 컬럼 수 한정 (최소 1: action_type)
-            cols = max(1, min(self.dedup_compare_cols, predicted_actions.shape[1], self.prev_actions_raw.shape[1]))
-
-            # 타입 비교 (정수 일치)
-            curr_type = predicted_actions[:, 0].long()
-            prev_type = self.prev_actions_raw[:, 0].long()
-            type_equal = curr_type == prev_type
-
-            # 연속형 파라미터 비교 (isclose, 공차 적용) - 벡터화
-            if cols > 1:
-                same_params = torch.isclose(
-                    predicted_actions[:, 1:cols],
-                    self.prev_actions_raw[:, 1:cols],
-                    rtol=self.dedup_rtol,
-                    atol=self.dedup_atol,
-                    equal_nan=False
-                ).all(dim=1)
-            else:
-                same_params = torch.ones_like(type_equal, dtype=torch.bool)
-
-            # 제외 타입 (예: 부분청산/추가진입)은 de-dup 적용하지 않음 - 벡터화
-            if len(self.dedup_exclude_types) > 0:
-                exclude_tensor = torch.tensor(list(self.dedup_exclude_types), dtype=torch.long, device=self.device)
-                excluded_mask = torch.isin(curr_type, exclude_tensor)
-            else:
-                excluded_mask = torch.zeros_like(type_equal, dtype=torch.bool)
-
-            duplicate_mask = type_equal & same_params & (~excluded_mask)
-            if self.dedup_require_applied:
-                duplicate_mask &= self.prev_applied_mask
-
-            # 중복된 액션은 NOT_FOUND로 무력화
-            if duplicate_mask.any():
-                predicted_actions[duplicate_mask, :] = 0.0  # 모든 파라미터 0
-                predicted_actions[duplicate_mask, 0] = float(ACTION_NOT_FOUND)
-
-        # 실행 전 상태 스냅샷 (적용 여부 판정용)
-        pos_before = self.pos_list.clone()
-        er_before = self.enter_ratio.clone()
-
-        # 체결 기준 가격으로 next_open_price 전달 (중복 필터 적용된 액션 사용)
-        # CUDA 경로만 지원: device 만 검사
-        if str(self.device).startswith('cuda'):
-            used_cuda = self._execute_actions_cuda(predicted_actions, next_open_price)
-            if not used_cuda:
-                raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
-        else:
-            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
-        
-        self.holding_period[self.pos_list != 0] += 1
-        self.holding_period[self.pos_list == 0] = 0
-        non_zero_mask = self.profit != 0
-        # 1) step 실현손익 누적
-        if non_zero_mask.any():
-            realized_delta = self.profit.clone()
-            self.realized_cum += realized_delta
-            # 이벤트 기반 집계(현행 유지)
-            self.sum_returns[non_zero_mask] += self.profit[non_zero_mask]
-            self.count_returns[non_zero_mask] += 1
-            self.sum_sq_returns[non_zero_mask] += self.profit[non_zero_mask] ** 2
-            neg_mask = self.profit < 0
-            self.sum_neg[neg_mask] += self.profit[neg_mask]
-            self.count_neg[neg_mask] += 1
-            self.sum_sq_neg[neg_mask] += self.profit[neg_mask] ** 2
-            pos_mask = self.profit > 0
-            self.total_profit_agg[pos_mask] += self.profit[pos_mask]
-            self.total_loss_agg[neg_mask] += -self.profit[neg_mask]
-            self.count_wins[pos_mask] += 1
-            # 복리 값은 실현손익 기반으로 유지
-            self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask])
-        else:
-            realized_delta = torch.zeros_like(self.profit)
-        
-        # 2) 미실현 MtM 계산 (mark proxy)
-        open_mask = self.pos_list != 0
-        if open_mask.any():
-            side = torch.where(self.pos_list == 2, 1.0, -1.0)  # long=+1, short=-1
-            entry = self.price_list
-            lev = self.leverage_ratio.float()
-            er = self.enter_ratio
-            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
-            unreal_vec = pnl_pct * lev * er
-            total_unreal = torch.zeros_like(self.sum_returns)
-            total_unreal[open_mask] = unreal_vec[open_mask]
-        else:
-            total_unreal = torch.zeros_like(self.sum_returns)
-
-        # 3) 에쿼티(실현 누적 + 미실현) 기반 드로다운 및 누적 수익
-        equity = self.realized_cum + total_unreal
-        self.cum_sum = equity
-        self.running_max = torch.maximum(self.running_max, self.cum_sum)
-        current_drawdown = self.running_max - self.cum_sum
-        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
-        self.profit.zero_()
-        self.last_timestamp = current_timestamp
-
-        # === 견고형 de-dup: 실제 적용 여부 계산 및 버퍼 갱신 ===
-        if self.enable_action_dedup:
-            pos_after = self.pos_list
-            er_after = self.enter_ratio
-            atype_eff = predicted_actions[:, 0].long()
-
-            eps = 1e-8
-            applied_new_long = (atype_eff == ACTION_NEW_LONG) & (pos_before == 0) & (pos_after == 2)
-            applied_new_short = (atype_eff == ACTION_NEW_SHORT) & (pos_before == 0) & (pos_after == 1)
-            applied_close_all = (atype_eff == ACTION_CLOSE_ALL) & (pos_before != 0) & (pos_after == 0)
-            applied_flip = (atype_eff == ACTION_FLIP_POSITION) & (
-                ((pos_before == 2) & (pos_after == 1)) | ((pos_before == 1) & (pos_after == 2))
-            )
-            applied_close_partial = (atype_eff == ACTION_CLOSE_PARTIAL) & (pos_before != 0) & (er_after < er_before - eps)
-            applied_add = (atype_eff == ACTION_ADD_POSITION) & (pos_before != 0) & (er_after > er_before + eps)
-
-            applied_mask = (
-                applied_new_long | applied_new_short | applied_close_all |
-                applied_flip | applied_close_partial | applied_add
-            )
-
-            # 직전 적용 마스크 및 원본 예측 갱신
-            self.prev_applied_mask = applied_mask
-            # 원본 예측 저장 (다음 스텝 비교 기준)
-            # shape 맞춤: predictor는 (B,4) 반환 가정
-            # prev_actions_raw의 디바이스/형태 유지
-            cols_copy = min(self.prev_actions_raw.shape[1], raw_pred_actions.shape[1])
-            self.prev_actions_raw[:, :cols_copy] = raw_pred_actions[:, :cols_copy]
-
-        # === 다중 목표 최적화용 추가 히스토리 추적 ===
-        # Store equity after step for return calculation
-        post_equity = self._calculate_current_equity(market_data)
-        
-        # Calculate and store period returns
-        returns = (post_equity - pre_equity) / (pre_equity + 1e-9)
-        self.returns_history.append(returns)
-        self.equity_history.append(post_equity)
-        # Benchmark returns for Information Ratio (default: close_to_next_open)
-        if self.benchmark_mode == 'close_to_next_open':
-            curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
-            bench_r = (next_open_price - curr_close) / (curr_close + 1e-9)
-            if bench_r.dim() == 0:
-                bench_r_val = bench_r.item()
-                bench_vec = torch.full((self.chromosomes_size,), bench_r_val, dtype=torch.float32, device=self.device)
-            else:
-                bench_vec = bench_r
-            self.bench_returns_history.append(bench_vec)
-        
-        # Keep only recent history for memory efficiency
-        max_history = max(self.volatility_lookback, self.lookback_period)
-        if len(self.returns_history) > max_history:
-            self.returns_history.pop(0)
-            self.equity_history.pop(0)
-        if len(self.bench_returns_history) > max_history:
-            self.bench_returns_history.pop(0)
+        state = self._extract_step_state(market_data, next_open_price)
+        self._apply_funding_fees(state.timestamp, state.funding_rate)
+        self._check_liquidation(state.low, state.high)
+        actions, raw_actions = self._prepare_and_deduplicate_actions(predicted_actions)
+        pos_before, er_before = self._snapshot_state_for_dedup()
+        self._execute_actions_wrapper(actions, state.exec_base_price)
+        self._update_holding_periods()
+        self._accumulate_realized_pnl_and_stats()
+        total_unreal = self._compute_unrealized_pnl(state.mark_t)
+        self._update_equity_and_drawdown(total_unreal, state.timestamp)
+        self._update_dedup_buffers_after_exec(actions, raw_actions, pos_before, er_before)
+        self._update_return_histories(pre_equity, market_data, state.exec_base_price)
 
     def get_final_metrics(self, minimum_date=40):
         """원본 메트릭 계산 완전 보존"""
