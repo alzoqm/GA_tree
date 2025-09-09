@@ -19,6 +19,9 @@ from analysis.importance import quantile_binned_curve, permutation_importance
 from fitness.simulator import FitnessSimulator
 from training.wfo import WalkForwardOptimizer
 
+import warnings
+warnings.filterwarnings("ignore")
+
 
 def load_config(config_path: str) -> dict:
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -162,7 +165,8 @@ def main():
                                      device=env['device'],
                                      evaluation_config=oos_cfg,
                                      feature_names=all_features,
-                                     base_metric_index=0)
+                                     base_metric_index=0,
+                                     features_to_permute=focus_features)
         # Filter to focus features for readability
         imp_focus = {k: imp[k] for k in focus_features if k in imp}
         with open(os.path.join(out_dir, 'permutation_importance.json'), 'w') as f:
