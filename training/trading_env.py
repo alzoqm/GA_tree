@@ -394,89 +394,99 @@ class TradingEnvironment:
                     break
 
     def _check_liquidation(self, mark_low, mark_high):
-        """원본 청산 로직 완전 보존"""
-        # Liquidation check using mark price approximation (not last price).
-        # Conservative proxy: longs tested against bar low, shorts against bar high.
-        # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> mark_low 기준)
-        long_mask = self.pos_list == 2
-        if long_mask.any():
-            pos_price = self.price_list[long_mask]
-            leverage = self.leverage_ratio[long_mask].float()
-            enter_ratio = self.enter_ratio[long_mask]
+        """CUDA 커널로 청산 체크를 수행 (Python 경로 제거)"""
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+        if gatree_cuda is None or getattr(gatree_cuda, 'check_liquidation_batch', None) is None:
+            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _check_liquidation는 제거되었습니다.")
 
-            pnl_percent = (mark_low - pos_price) / pos_price
-            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
-            
-            liquidation_mask_local = margin_balance <= maintenance_margin
-            if liquidation_mask_local.any():
-                long_indices = torch.where(long_mask)[0]
-                liquidated_indices = long_indices[liquidation_mask_local]
-                # Initial margin loss
-                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
-                # Liquidation clearance fee: notional * rate ≈ (enter_ratio * leverage) * rate
-                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
-                liq_fee = notional * self.liq_clearance_fee_rate
-                self.profit[liquidated_indices] -= liq_fee
-                # Trade-based accounting: add realized loss then settle trade
-                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
-                # Settle trade
-                self.trade_total_count[liquidated_indices] += 1
-                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
-                if win_mask.any():
-                    idx_win = liquidated_indices[win_mask]
-                    self.trade_win_count[idx_win] += 1
-                # Record trade-close monitoring stats
-                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
-                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
-                self.trade_open[liquidated_indices] = False
-                self.trade_realized_pnl[liquidated_indices] = 0.0
-                self.pos_list[liquidated_indices] = 0
-                self.price_list[liquidated_indices] = -1.0
-                self.leverage_ratio[liquidated_indices] = -1
-                self.enter_ratio[liquidated_indices] = -1.0
-                self.additional_count[liquidated_indices] = 0
-                self.holding_period[liquidated_indices] = 0
+        # Ensure CUDA and contiguous tensors for in-place kernel updates
+        pos_list = self.pos_list.contiguous()
+        price_list = self.price_list.contiguous()
+        leverage_ratio = self.leverage_ratio.contiguous()
+        enter_ratio = self.enter_ratio.contiguous()
+        additional_count = self.additional_count.contiguous()
+        holding_period = self.holding_period.contiguous()
+        profit = self.profit.contiguous()
+        trade_open = self.trade_open.contiguous()
+        trade_realized_pnl = self.trade_realized_pnl.contiguous()
+        trade_total_count = self.trade_total_count.contiguous()
+        trade_win_count = self.trade_win_count.contiguous()
+        trade_holding_sum = self.trade_holding_sum.contiguous()
+        trade_holding_avg = self.trade_holding_avg.contiguous()
+        curr_win_streak = self.curr_win_streak.contiguous()
+        curr_loss_streak = self.curr_loss_streak.contiguous()
+        max_win_streak = self.max_win_streak.contiguous()
+        max_loss_streak = self.max_loss_streak.contiguous()
 
-        # 2. 숏 포지션 청산 검사 (가격 상승 시 위험 -> mark_high 기준)
-        short_mask = self.pos_list == 1
-        if short_mask.any():
-            pos_price = self.price_list[short_mask]
-            leverage = self.leverage_ratio[short_mask].float()
-            enter_ratio = self.enter_ratio[short_mask]
-            
-            pnl_percent = (pos_price - mark_high) / pos_price
-            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
+        mark_low_f = float(mark_low.item() if isinstance(mark_low, torch.Tensor) else mark_low)
+        mark_high_f = float(mark_high.item() if isinstance(mark_high, torch.Tensor) else mark_high)
 
-            liquidation_mask_local = margin_balance <= maintenance_margin
-            if liquidation_mask_local.any():
-                short_indices = torch.where(short_mask)[0]
-                liquidated_indices = short_indices[liquidation_mask_local]
-                # Initial margin loss
-                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
-                # Liquidation clearance fee
-                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
-                liq_fee = notional * self.liq_clearance_fee_rate
-                self.profit[liquidated_indices] -= liq_fee
-                # Trade-based accounting and settlement
-                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
-                self.trade_total_count[liquidated_indices] += 1
-                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
-                if win_mask.any():
-                    idx_win = liquidated_indices[win_mask]
-                    self.trade_win_count[idx_win] += 1
-                # Record trade-close monitoring stats
-                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
-                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
-                self.trade_open[liquidated_indices] = False
-                self.trade_realized_pnl[liquidated_indices] = 0.0
-                self.pos_list[liquidated_indices] = 0
-                self.price_list[liquidated_indices] = -1.0
-                self.leverage_ratio[liquidated_indices] = -1
-                self.enter_ratio[liquidated_indices] = -1.0
-                self.additional_count[liquidated_indices] = 0
-                self.holding_period[liquidated_indices] = 0
+        gatree_cuda.check_liquidation_batch(
+            pos_list,
+            price_list,
+            leverage_ratio,
+            enter_ratio,
+            additional_count,
+            holding_period,
+            profit,
+            trade_open,
+            trade_realized_pnl,
+            trade_total_count,
+            trade_win_count,
+            trade_holding_sum,
+            trade_holding_avg,
+            curr_win_streak,
+            curr_loss_streak,
+            max_win_streak,
+            max_loss_streak,
+            float(mark_low_f),
+            float(mark_high_f),
+            float(self.maintenance_margin_rate),
+            float(self.liq_clearance_fee_rate),
+        )
+
+        # If any tensor got new storage via contiguous(), write back views
+        if pos_list.data_ptr() != self.pos_list.data_ptr():
+            self.pos_list = pos_list
+        if price_list.data_ptr() != self.price_list.data_ptr():
+            self.price_list = price_list
+        if leverage_ratio.data_ptr() != self.leverage_ratio.data_ptr():
+            self.leverage_ratio = leverage_ratio
+        if enter_ratio.data_ptr() != self.enter_ratio.data_ptr():
+            self.enter_ratio = enter_ratio
+        if additional_count.data_ptr() != self.additional_count.data_ptr():
+            self.additional_count = additional_count
+        if holding_period.data_ptr() != self.holding_period.data_ptr():
+            self.holding_period = holding_period
+        if profit.data_ptr() != self.profit.data_ptr():
+            self.profit = profit
+        if trade_open.data_ptr() != self.trade_open.data_ptr():
+            self.trade_open = trade_open
+        if trade_realized_pnl.data_ptr() != self.trade_realized_pnl.data_ptr():
+            self.trade_realized_pnl = trade_realized_pnl
+        if trade_total_count.data_ptr() != self.trade_total_count.data_ptr():
+            self.trade_total_count = trade_total_count
+        if trade_win_count.data_ptr() != self.trade_win_count.data_ptr():
+            self.trade_win_count = trade_win_count
+        if trade_holding_sum.data_ptr() != self.trade_holding_sum.data_ptr():
+            self.trade_holding_sum = trade_holding_sum
+        if trade_holding_avg.data_ptr() != self.trade_holding_avg.data_ptr():
+            self.trade_holding_avg = trade_holding_avg
+        if curr_win_streak.data_ptr() != self.curr_win_streak.data_ptr():
+            self.curr_win_streak = curr_win_streak
+        if curr_loss_streak.data_ptr() != self.curr_loss_streak.data_ptr():
+            self.curr_loss_streak = curr_loss_streak
+        if max_win_streak.data_ptr() != self.max_win_streak.data_ptr():
+            self.max_win_streak = max_win_streak
+        if max_loss_streak.data_ptr() != self.max_loss_streak.data_ptr():
+            self.max_loss_streak = max_loss_streak
+
+        # no wrapper/fallback. CUDA only.
     
     # === 원본 액션 실행 로직 완전 보존 ===
     def _open_new_positions(self, actions_tensor, currently_hold, buy_exec_price, sell_exec_price):
