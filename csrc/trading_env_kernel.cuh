@@ -32,3 +32,17 @@ void execute_actions_batch_cuda(
     float min_additional_enter_ratio,
     int64_t max_additional_entries);
 
+// Host launcher to accumulate realized PnL and related stats per individual
+void accumulate_realized_stats_cuda(
+    torch::Tensor profit,
+    torch::Tensor realized_cum,
+    torch::Tensor sum_returns,
+    torch::Tensor count_returns,
+    torch::Tensor sum_sq_returns,
+    torch::Tensor sum_neg,
+    torch::Tensor count_neg,
+    torch::Tensor sum_sq_neg,
+    torch::Tensor total_profit_agg,
+    torch::Tensor total_loss_agg,
+    torch::Tensor count_wins,
+    torch::Tensor compound_value);
