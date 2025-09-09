@@ -56,4 +56,31 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("count_wins"),
         py::arg("compound_value")
     );
+
+    m.def(
+        "check_liquidation_batch",
+        &check_liquidation_batch_cuda,
+        "Check and apply liquidations for a batch (thread-per-individual)",
+        py::arg("pos_list"),
+        py::arg("price_list"),
+        py::arg("leverage_ratio"),
+        py::arg("enter_ratio"),
+        py::arg("additional_count"),
+        py::arg("holding_period"),
+        py::arg("profit"),
+        py::arg("trade_open"),
+        py::arg("trade_realized_pnl"),
+        py::arg("trade_total_count"),
+        py::arg("trade_win_count"),
+        py::arg("trade_holding_sum"),
+        py::arg("trade_holding_avg"),
+        py::arg("curr_win_streak"),
+        py::arg("curr_loss_streak"),
+        py::arg("max_win_streak"),
+        py::arg("max_loss_streak"),
+        py::arg("mark_low"),
+        py::arg("mark_high"),
+        py::arg("maintenance_margin_rate"),
+        py::arg("liq_clearance_fee_rate")
+    );
 }

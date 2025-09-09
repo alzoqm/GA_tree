@@ -143,6 +143,8 @@ class TradingEnvironment:
         # === CUDA 실행 옵션 ===
         # debug_compare_cpu_gpu는 더 이상 사용하지 않지만, 호환을 위해 남겨둡니다.
         self.debug_compare_cpu_gpu = bool(env_config.get('debug_compare_cpu_gpu', False))
+        # Liquidation path control (for A/B comparisons)
+        self.liquidation_use_cuda = bool(env_config.get('liquidation_use_cuda', True))
 
         # 이전 스텝의 원본 예측 액션 저장 (B,4)
         self.prev_actions_raw = torch.full(
@@ -393,8 +395,8 @@ class TradingEnvironment:
                     self.profit[short_mask] += funding_pnl[short_mask] * self.enter_ratio[short_mask]
                     break
 
-    def _check_liquidation(self, mark_low, mark_high):
-        """원본 청산 로직 완전 보존"""
+    def _check_liquidation_cpu(self, mark_low, mark_high):
+        """원본 청산 로직(CPU) - 비교/검증 용도로 유지"""
         # Liquidation check using mark price approximation (not last price).
         # Conservative proxy: longs tested against bar low, shorts against bar high.
         # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> mark_low 기준)
@@ -477,6 +479,110 @@ class TradingEnvironment:
                 self.enter_ratio[liquidated_indices] = -1.0
                 self.additional_count[liquidated_indices] = 0
                 self.holding_period[liquidated_indices] = 0
+
+    def _check_liquidation_cuda(self, mark_low, mark_high):
+        """CUDA 커널로 청산 체크를 수행"""
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 _check_liquidation_cpu를 사용하세요.")
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+        if gatree_cuda is None or getattr(gatree_cuda, 'check_liquidation_batch', None) is None:
+            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. _check_liquidation_cpu로 실행하세요.")
+
+        # Ensure CUDA and contiguous tensors for in-place kernel updates
+        pos_list = self.pos_list.contiguous()
+        price_list = self.price_list.contiguous()
+        leverage_ratio = self.leverage_ratio.contiguous()
+        enter_ratio = self.enter_ratio.contiguous()
+        additional_count = self.additional_count.contiguous()
+        holding_period = self.holding_period.contiguous()
+        profit = self.profit.contiguous()
+        trade_open = self.trade_open.contiguous()
+        trade_realized_pnl = self.trade_realized_pnl.contiguous()
+        trade_total_count = self.trade_total_count.contiguous()
+        trade_win_count = self.trade_win_count.contiguous()
+        trade_holding_sum = self.trade_holding_sum.contiguous()
+        trade_holding_avg = self.trade_holding_avg.contiguous()
+        curr_win_streak = self.curr_win_streak.contiguous()
+        curr_loss_streak = self.curr_loss_streak.contiguous()
+        max_win_streak = self.max_win_streak.contiguous()
+        max_loss_streak = self.max_loss_streak.contiguous()
+
+        mark_low_f = float(mark_low.item() if isinstance(mark_low, torch.Tensor) else mark_low)
+        mark_high_f = float(mark_high.item() if isinstance(mark_high, torch.Tensor) else mark_high)
+
+        gatree_cuda.check_liquidation_batch(
+            pos_list,
+            price_list,
+            leverage_ratio,
+            enter_ratio,
+            additional_count,
+            holding_period,
+            profit,
+            trade_open,
+            trade_realized_pnl,
+            trade_total_count,
+            trade_win_count,
+            trade_holding_sum,
+            trade_holding_avg,
+            curr_win_streak,
+            curr_loss_streak,
+            max_win_streak,
+            max_loss_streak,
+            float(mark_low_f),
+            float(mark_high_f),
+            float(self.maintenance_margin_rate),
+            float(self.liq_clearance_fee_rate),
+        )
+
+        # If any tensor got new storage via contiguous(), write back views
+        if pos_list.data_ptr() != self.pos_list.data_ptr():
+            self.pos_list = pos_list
+        if price_list.data_ptr() != self.price_list.data_ptr():
+            self.price_list = price_list
+        if leverage_ratio.data_ptr() != self.leverage_ratio.data_ptr():
+            self.leverage_ratio = leverage_ratio
+        if enter_ratio.data_ptr() != self.enter_ratio.data_ptr():
+            self.enter_ratio = enter_ratio
+        if additional_count.data_ptr() != self.additional_count.data_ptr():
+            self.additional_count = additional_count
+        if holding_period.data_ptr() != self.holding_period.data_ptr():
+            self.holding_period = holding_period
+        if profit.data_ptr() != self.profit.data_ptr():
+            self.profit = profit
+        if trade_open.data_ptr() != self.trade_open.data_ptr():
+            self.trade_open = trade_open
+        if trade_realized_pnl.data_ptr() != self.trade_realized_pnl.data_ptr():
+            self.trade_realized_pnl = trade_realized_pnl
+        if trade_total_count.data_ptr() != self.trade_total_count.data_ptr():
+            self.trade_total_count = trade_total_count
+        if trade_win_count.data_ptr() != self.trade_win_count.data_ptr():
+            self.trade_win_count = trade_win_count
+        if trade_holding_sum.data_ptr() != self.trade_holding_sum.data_ptr():
+            self.trade_holding_sum = trade_holding_sum
+        if trade_holding_avg.data_ptr() != self.trade_holding_avg.data_ptr():
+            self.trade_holding_avg = trade_holding_avg
+        if curr_win_streak.data_ptr() != self.curr_win_streak.data_ptr():
+            self.curr_win_streak = curr_win_streak
+        if curr_loss_streak.data_ptr() != self.curr_loss_streak.data_ptr():
+            self.curr_loss_streak = curr_loss_streak
+        if max_win_streak.data_ptr() != self.max_win_streak.data_ptr():
+            self.max_win_streak = max_win_streak
+        if max_loss_streak.data_ptr() != self.max_loss_streak.data_ptr():
+            self.max_loss_streak = max_loss_streak
+
+    def _check_liquidation(self, mark_low, mark_high):
+        """CUDA 사용 여부에 따라 청산 체크 경로 선택"""
+        if self.liquidation_use_cuda:
+            try:
+                return self._check_liquidation_cuda(mark_low, mark_high)
+            except Exception:
+                # Fallback to CPU if CUDA path unavailable
+                return self._check_liquidation_cpu(mark_low, mark_high)
+        else:
+            return self._check_liquidation_cpu(mark_low, mark_high)
     
     # === 원본 액션 실행 로직 완전 보존 ===
     def _open_new_positions(self, actions_tensor, currently_hold, buy_exec_price, sell_exec_price):

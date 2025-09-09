@@ -18,7 +18,7 @@ GA 트리 집단의 예측을 CUDA로 가속하고, 거래 시뮬레이션 환�
   - `TradingEnvironment`:
     - 염색체별 상태: 포지션/진입가/레버리지/진입비율/추가진입/보유기간/수익누적/드로다운/복리 등
     - 펀딩 수수료(`_apply_funding_fees`): 0/8/16시 적용
-    - 청산 체크(`_check_liquidation`): 라스트가 아닌 마크 프라이스 근사(보수적 프록시: 바의 저가/고가)로 유지증거금 대비 마진 평가. 청산 시 초기증거금 손실 + 청산 정리 수수료(`liq_clearance_fee_rate`) 반영
+    - 청산 체크(`_check_liquidation`): 라스트가 아닌 마크 프라이스 근사(보수적 프록시: 바의 저가/고가)로 유지증거금 대비 마진 평가. 청산 시 초기증거금 손실 + 청산 정리 수수료(`liq_clearance_fee_rate`) 반영. CUDA 커널(`check_liquidation_batch`)로 기본 수행하며, `env_config.liquidation_use_cuda=False`로 CPU 경로 비교 가능
     - 액션 실행(`_execute_actions`): 예측된 액션을 다음 캔들 시가(`next_open_price`) 기준으로 체결, 슬리피지/테이커 수수료 적용. 신규 진입/전부/부분 청산/추가 진입/포지션 플립 지원
     - `step(market_data, next_open_price, predicted_actions)`: 한 바 진행(펀딩/청산 후 액션 실행). 룩어헤드 바이어스 방지를 위해 다음 바 시가로 체결. 에쿼티는 마크‑투‑마켓(MtM)으로 계산(typical price: (H+L+C)/3 프록시)
     - `get_final_metrics(minimum_date=40)`: 평균 수익, PF(상한 처리), 이벤트 기반 승률, 최대 낙폭, 누적 복리 값, 트레이드 기반 승률(신규) 집계
