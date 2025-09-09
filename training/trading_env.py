@@ -143,8 +143,6 @@ class TradingEnvironment:
         # === CUDA 실행 옵션 ===
         # debug_compare_cpu_gpu는 더 이상 사용하지 않지만, 호환을 위해 남겨둡니다.
         self.debug_compare_cpu_gpu = bool(env_config.get('debug_compare_cpu_gpu', False))
-        # Liquidation path control (for A/B comparisons)
-        self.liquidation_use_cuda = bool(env_config.get('liquidation_use_cuda', True))
 
         # 이전 스텝의 원본 예측 액션 저장 (B,4)
         self.prev_actions_raw = torch.full(
@@ -395,101 +393,16 @@ class TradingEnvironment:
                     self.profit[short_mask] += funding_pnl[short_mask] * self.enter_ratio[short_mask]
                     break
 
-    def _check_liquidation_cpu(self, mark_low, mark_high):
-        """원본 청산 로직(CPU) - 비교/검증 용도로 유지"""
-        # Liquidation check using mark price approximation (not last price).
-        # Conservative proxy: longs tested against bar low, shorts against bar high.
-        # 1. 롱 포지션 청산 검사 (가격 하락 시 위험 -> mark_low 기준)
-        long_mask = self.pos_list == 2
-        if long_mask.any():
-            pos_price = self.price_list[long_mask]
-            leverage = self.leverage_ratio[long_mask].float()
-            enter_ratio = self.enter_ratio[long_mask]
-
-            pnl_percent = (mark_low - pos_price) / pos_price
-            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
-            
-            liquidation_mask_local = margin_balance <= maintenance_margin
-            if liquidation_mask_local.any():
-                long_indices = torch.where(long_mask)[0]
-                liquidated_indices = long_indices[liquidation_mask_local]
-                # Initial margin loss
-                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
-                # Liquidation clearance fee: notional * rate ≈ (enter_ratio * leverage) * rate
-                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
-                liq_fee = notional * self.liq_clearance_fee_rate
-                self.profit[liquidated_indices] -= liq_fee
-                # Trade-based accounting: add realized loss then settle trade
-                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
-                # Settle trade
-                self.trade_total_count[liquidated_indices] += 1
-                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
-                if win_mask.any():
-                    idx_win = liquidated_indices[win_mask]
-                    self.trade_win_count[idx_win] += 1
-                # Record trade-close monitoring stats
-                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
-                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
-                self.trade_open[liquidated_indices] = False
-                self.trade_realized_pnl[liquidated_indices] = 0.0
-                self.pos_list[liquidated_indices] = 0
-                self.price_list[liquidated_indices] = -1.0
-                self.leverage_ratio[liquidated_indices] = -1
-                self.enter_ratio[liquidated_indices] = -1.0
-                self.additional_count[liquidated_indices] = 0
-                self.holding_period[liquidated_indices] = 0
-
-        # 2. 숏 포지션 청산 검사 (가격 상승 시 위험 -> mark_high 기준)
-        short_mask = self.pos_list == 1
-        if short_mask.any():
-            pos_price = self.price_list[short_mask]
-            leverage = self.leverage_ratio[short_mask].float()
-            enter_ratio = self.enter_ratio[short_mask]
-            
-            pnl_percent = (pos_price - mark_high) / pos_price
-            margin_balance = enter_ratio * (1 + pnl_percent * leverage)
-            maintenance_margin = (enter_ratio * leverage) * self.maintenance_margin_rate
-
-            liquidation_mask_local = margin_balance <= maintenance_margin
-            if liquidation_mask_local.any():
-                short_indices = torch.where(short_mask)[0]
-                liquidated_indices = short_indices[liquidation_mask_local]
-                # Initial margin loss
-                self.profit[liquidated_indices] -= self.enter_ratio[liquidated_indices]
-                # Liquidation clearance fee
-                notional = self.enter_ratio[liquidated_indices] * self.leverage_ratio[liquidated_indices].float()
-                liq_fee = notional * self.liq_clearance_fee_rate
-                self.profit[liquidated_indices] -= liq_fee
-                # Trade-based accounting and settlement
-                self.trade_realized_pnl[liquidated_indices] += (-self.enter_ratio[liquidated_indices] - liq_fee)
-                self.trade_total_count[liquidated_indices] += 1
-                win_mask = self.trade_realized_pnl[liquidated_indices] > 0
-                if win_mask.any():
-                    idx_win = liquidated_indices[win_mask]
-                    self.trade_win_count[idx_win] += 1
-                # Record trade-close monitoring stats
-                self._record_trade_close(liquidated_indices, self.trade_realized_pnl[liquidated_indices])
-                self.trade_holding_avg[liquidated_indices] = self.trade_holding_sum[liquidated_indices] / torch.clamp(self.trade_total_count[liquidated_indices].float(), min=1.0)
-                self.trade_open[liquidated_indices] = False
-                self.trade_realized_pnl[liquidated_indices] = 0.0
-                self.pos_list[liquidated_indices] = 0
-                self.price_list[liquidated_indices] = -1.0
-                self.leverage_ratio[liquidated_indices] = -1
-                self.enter_ratio[liquidated_indices] = -1.0
-                self.additional_count[liquidated_indices] = 0
-                self.holding_period[liquidated_indices] = 0
-
-    def _check_liquidation_cuda(self, mark_low, mark_high):
-        """CUDA 커널로 청산 체크를 수행"""
+    def _check_liquidation(self, mark_low, mark_high):
+        """CUDA 커널로 청산 체크를 수행 (Python 경로 제거)"""
         if not str(self.device).startswith('cuda'):
-            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 _check_liquidation_cpu를 사용하세요.")
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
         try:
             import gatree_cuda_compat as gatree_cuda
         except Exception:
             gatree_cuda = None
         if gatree_cuda is None or getattr(gatree_cuda, 'check_liquidation_batch', None) is None:
-            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. _check_liquidation_cpu로 실행하세요.")
+            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _check_liquidation는 제거되었습니다.")
 
         # Ensure CUDA and contiguous tensors for in-place kernel updates
         pos_list = self.pos_list.contiguous()
@@ -573,16 +486,7 @@ class TradingEnvironment:
         if max_loss_streak.data_ptr() != self.max_loss_streak.data_ptr():
             self.max_loss_streak = max_loss_streak
 
-    def _check_liquidation(self, mark_low, mark_high):
-        """CUDA 사용 여부에 따라 청산 체크 경로 선택"""
-        if self.liquidation_use_cuda:
-            try:
-                return self._check_liquidation_cuda(mark_low, mark_high)
-            except Exception:
-                # Fallback to CPU if CUDA path unavailable
-                return self._check_liquidation_cpu(mark_low, mark_high)
-        else:
-            return self._check_liquidation_cpu(mark_low, mark_high)
+        # no wrapper/fallback. CUDA only.
     
     # === 원본 액션 실행 로직 완전 보존 ===
     def _open_new_positions(self, actions_tensor, currently_hold, buy_exec_price, sell_exec_price):
