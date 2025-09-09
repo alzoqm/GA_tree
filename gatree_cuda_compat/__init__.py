@@ -80,6 +80,7 @@ try:
 
     # Trading environment functions (from gatree_env)
     execute_actions_batch = gatree_env.execute_actions_batch
+    accumulate_realized_stats = getattr(gatree_env, 'accumulate_realized_stats', None)
     
 except ImportError as e:
     print("="*60)
@@ -122,3 +123,4 @@ except ImportError as e:
     ppts_select_elites = None
     ppts_pick_parents = None
     execute_actions_batch = None
+    accumulate_realized_stats = None

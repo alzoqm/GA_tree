@@ -38,5 +38,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("min_additional_enter_ratio"),
         py::arg("max_additional_entries")
     );
-}
 
+    m.def(
+        "accumulate_realized_stats",
+        &accumulate_realized_stats_cuda,
+        "Accumulate realized PnL and stats for a batch",
+        py::arg("profit"),
+        py::arg("realized_cum"),
+        py::arg("sum_returns"),
+        py::arg("count_returns"),
+        py::arg("sum_sq_returns"),
+        py::arg("sum_neg"),
+        py::arg("count_neg"),
+        py::arg("sum_sq_neg"),
+        py::arg("total_profit_agg"),
+        py::arg("total_loss_agg"),
+        py::arg("count_wins"),
+        py::arg("compound_value")
+    );
+}

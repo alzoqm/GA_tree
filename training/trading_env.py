@@ -223,7 +223,7 @@ class TradingEnvironment:
 
     def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price):
         if str(self.device).startswith('cuda'):
-            used_cuda = self._execute_actions_cuda(actions, exec_base_price)
+            used_cuda = self._execute_actions(actions, exec_base_price)
             if not used_cuda:
                 raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
         else:
@@ -234,22 +234,67 @@ class TradingEnvironment:
         self.holding_period[self.pos_list == 0] = 0
 
     def _accumulate_realized_pnl_and_stats(self):
-        non_zero_mask = self.profit != 0
-        if non_zero_mask.any():
-            realized_delta = self.profit.clone()
-            self.realized_cum += realized_delta
-            self.sum_returns[non_zero_mask] += self.profit[non_zero_mask]
-            self.count_returns[non_zero_mask] += 1
-            self.sum_sq_returns[non_zero_mask] += self.profit[non_zero_mask] ** 2
-            neg_mask = self.profit < 0
-            self.sum_neg[neg_mask] += self.profit[neg_mask]
-            self.count_neg[neg_mask] += 1
-            self.sum_sq_neg[neg_mask] += self.profit[neg_mask] ** 2
-            pos_mask = self.profit > 0
-            self.total_profit_agg[pos_mask] += self.profit[pos_mask]
-            self.total_loss_agg[neg_mask] += -self.profit[neg_mask]
-            self.count_wins[pos_mask] += 1
-            self.compound_value[non_zero_mask] *= (1 + self.profit[non_zero_mask])
+        """Accumulate realized P&L and event-based stats using CUDA only."""
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+        if gatree_cuda is None or getattr(gatree_cuda, 'accumulate_realized_stats', None) is None:
+            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 집계 경로는 제거되었습니다.")
+
+        # Ensure CUDA and contiguous tensors
+        profit = self.profit.contiguous()
+        realized_cum = self.realized_cum.contiguous()
+        sum_returns = self.sum_returns.contiguous()
+        count_returns = self.count_returns.contiguous()
+        sum_sq_returns = self.sum_sq_returns.contiguous()
+        sum_neg = self.sum_neg.contiguous()
+        count_neg = self.count_neg.contiguous()
+        sum_sq_neg = self.sum_sq_neg.contiguous()
+        total_profit_agg = self.total_profit_agg.contiguous()
+        total_loss_agg = self.total_loss_agg.contiguous()
+        count_wins = self.count_wins.contiguous()
+        compound_value = self.compound_value.contiguous()
+
+        gatree_cuda.accumulate_realized_stats(
+            profit,
+            realized_cum,
+            sum_returns,
+            count_returns,
+            sum_sq_returns,
+            sum_neg,
+            count_neg,
+            sum_sq_neg,
+            total_profit_agg,
+            total_loss_agg,
+            count_wins,
+            compound_value,
+        )
+        # If any tensor got new storage via contiguous(), write back views
+        if realized_cum.data_ptr() != self.realized_cum.data_ptr():
+            self.realized_cum = realized_cum
+        if sum_returns.data_ptr() != self.sum_returns.data_ptr():
+            self.sum_returns = sum_returns
+        if count_returns.data_ptr() != self.count_returns.data_ptr():
+            self.count_returns = count_returns
+        if sum_sq_returns.data_ptr() != self.sum_sq_returns.data_ptr():
+            self.sum_sq_returns = sum_sq_returns
+        if sum_neg.data_ptr() != self.sum_neg.data_ptr():
+            self.sum_neg = sum_neg
+        if count_neg.data_ptr() != self.count_neg.data_ptr():
+            self.count_neg = count_neg
+        if sum_sq_neg.data_ptr() != self.sum_sq_neg.data_ptr():
+            self.sum_sq_neg = sum_sq_neg
+        if total_profit_agg.data_ptr() != self.total_profit_agg.data_ptr():
+            self.total_profit_agg = total_profit_agg
+        if total_loss_agg.data_ptr() != self.total_loss_agg.data_ptr():
+            self.total_loss_agg = total_loss_agg
+        if count_wins.data_ptr() != self.count_wins.data_ptr():
+            self.count_wins = count_wins
+        if compound_value.data_ptr() != self.compound_value.data_ptr():
+            self.compound_value = compound_value
 
     def _compute_unrealized_pnl(self, mark_t: torch.Tensor) -> torch.Tensor:
         open_mask = self.pos_list != 0
@@ -750,11 +795,8 @@ class TradingEnvironment:
             self.trade_open[flip_to_long_mask] = True
             self.trade_realized_pnl[flip_to_long_mask] = 0.0
 
-    def _execute_actions(self, actions_tensor, exec_base_price, curr_high, curr_low):
-        """[삭제됨] Python 기반 경로는 CUDA로 대체되었습니다."""
-        raise RuntimeError("Python 기반 _execute_actions 경로가 제거되었습니다. CUDA 실행만 지원합니다.")
 
-    def _execute_actions_cuda(self, actions_tensor, exec_base_price):
+    def _execute_actions(self, actions_tensor, exec_base_price):
         """CUDA 커널로 액션 실행 (Thread-per-individual)."""
         try:
             import gatree_cuda_compat as gatree_cuda

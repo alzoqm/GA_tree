@@ -337,3 +337,102 @@ void execute_actions_batch_cuda(
         (long long)max_additional_entries
     );
 }
+
+// ===============================================================
+// Accumulate realized PnL and stats (thread-per-individual)
+// ===============================================================
+
+__global__ void accumulate_realized_stats_kernel(
+    const float* __restrict__ profit,
+    float* __restrict__ realized_cum,
+    float* __restrict__ sum_returns,
+    int32_t* __restrict__ count_returns,
+    float* __restrict__ sum_sq_returns,
+    float* __restrict__ sum_neg,
+    int32_t* __restrict__ count_neg,
+    float* __restrict__ sum_sq_neg,
+    float* __restrict__ total_profit_agg,
+    float* __restrict__ total_loss_agg,
+    int32_t* __restrict__ count_wins,
+    float* __restrict__ compound_value,
+    int B)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    const float p = profit[i];
+    if (p == 0.0f) return; // exact zero: mirrors Python mask
+
+    realized_cum[i] += p;
+    sum_returns[i] += p;
+    count_returns[i] += 1;
+    const float pp = p * p;
+    sum_sq_returns[i] += pp;
+
+    if (p < 0.0f) {
+        sum_neg[i] += p;
+        count_neg[i] += 1;
+        sum_sq_neg[i] += pp;
+        total_loss_agg[i] += -p;
+    } else { // p > 0.0f
+        total_profit_agg[i] += p;
+        count_wins[i] += 1;
+    }
+
+    compound_value[i] *= (1.0f + p);
+}
+
+void accumulate_realized_stats_cuda(
+    torch::Tensor profit,
+    torch::Tensor realized_cum,
+    torch::Tensor sum_returns,
+    torch::Tensor count_returns,
+    torch::Tensor sum_sq_returns,
+    torch::Tensor sum_neg,
+    torch::Tensor count_neg,
+    torch::Tensor sum_sq_neg,
+    torch::Tensor total_profit_agg,
+    torch::Tensor total_loss_agg,
+    torch::Tensor count_wins,
+    torch::Tensor compound_value)
+{
+    auto check_cuda_contig = [](const torch::Tensor& t, const char* name){
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA tensor");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+    };
+
+    check_cuda_contig(profit, "profit");
+    check_cuda_contig(realized_cum, "realized_cum");
+    check_cuda_contig(sum_returns, "sum_returns");
+    check_cuda_contig(count_returns, "count_returns");
+    check_cuda_contig(sum_sq_returns, "sum_sq_returns");
+    check_cuda_contig(sum_neg, "sum_neg");
+    check_cuda_contig(count_neg, "count_neg");
+    check_cuda_contig(sum_sq_neg, "sum_sq_neg");
+    check_cuda_contig(total_profit_agg, "total_profit_agg");
+    check_cuda_contig(total_loss_agg, "total_loss_agg");
+    check_cuda_contig(count_wins, "count_wins");
+    check_cuda_contig(compound_value, "compound_value");
+
+    const int B = static_cast<int>(profit.size(0));
+    if (B == 0) return;
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+
+    accumulate_realized_stats_kernel<<<blocks, threads>>>(
+        profit.data_ptr<float>(),
+        realized_cum.data_ptr<float>(),
+        sum_returns.data_ptr<float>(),
+        count_returns.data_ptr<int32_t>(),
+        sum_sq_returns.data_ptr<float>(),
+        sum_neg.data_ptr<float>(),
+        count_neg.data_ptr<int32_t>(),
+        sum_sq_neg.data_ptr<float>(),
+        total_profit_agg.data_ptr<float>(),
+        total_loss_agg.data_ptr<float>(),
+        count_wins.data_ptr<int32_t>(),
+        compound_value.data_ptr<float>(),
+        B
+    );
+}
