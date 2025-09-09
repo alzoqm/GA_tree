@@ -418,13 +418,14 @@ def main():
                 logging.info("Top 5 candidates by aggregated OOS performance:")
                 for i in range(min(5, len(best_metrics))):
                     objectives = best_metrics[i]
-                    logging.info(f"Candidate {i+1:2d} | ", end="")
+                    # Build a single log line instead of using unsupported `end` kwarg
+                    line = f"Candidate {i+1:2d} | "
                     for obj_name, obj_val, minimize in zip(agg_obj_names, objectives, agg_minimize):
                         # Display in natural form: flip sign for maximize metrics
                         disp_val = obj_val if minimize else -obj_val
                         direction = "↓" if minimize else "↑"
-                        logging.info(f"{obj_name}: {disp_val:.4f} {direction} | ", end="")
-                    logging.info("")
+                        line += f"{obj_name}: {disp_val:.4f} {direction} | "
+                    logging.info(line)
         
         logging.info("============================================")
         

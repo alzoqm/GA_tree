@@ -170,7 +170,12 @@ class FitnessSimulator:
             minimum_trades = wfo_min_trades
 
         env_objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
-        print('completed multi_objective_metrics')
+        try:
+            verbose = bool(evaluation_config.get('verbose', False)) if isinstance(evaluation_config, dict) else False
+        except Exception:
+            verbose = False
+        if verbose:
+            print('completed multi_objective_metrics')
 
         # Assemble final objective matrix in the exact requested order,
         # appending simulator-side complexity metrics when asked.

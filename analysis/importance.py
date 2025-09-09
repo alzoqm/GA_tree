@@ -52,7 +52,8 @@ def permutation_importance(population,
                            device: str,
                            evaluation_config: dict,
                            feature_names: List[str],
-                           base_metric_index: int = 0) -> Dict[str, float]:
+                           base_metric_index: int = 0,
+                           features_to_permute: List[str] | None = None) -> Dict[str, float]:
     """Lightweight permutation importance on OOS slice.
 
     Args:
@@ -79,8 +80,10 @@ def permutation_importance(population,
     base_score = float(np.mean(baseline[:, base_metric_index])) if baseline.size else 0.0
 
     imp: Dict[str, float] = {}
+    # Decide which features to permute (subset allowed)
+    perm_list = features_to_permute if features_to_permute is not None else feature_names
     # Work on a copy per feature
-    for fname in feature_names:
+    for fname in perm_list:
         tmp = data.copy(deep=True)
         # Shuffle only within OOS slice to avoid leakage
         col = tmp[fname].iloc[start:stop].values
@@ -97,4 +100,3 @@ def permutation_importance(population,
         score = float(np.mean(perturbed[:, base_metric_index])) if perturbed.size else 0.0
         imp[fname] = base_score - score
     return imp
-
