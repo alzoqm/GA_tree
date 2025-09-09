@@ -70,3 +70,14 @@ void check_liquidation_batch_cuda(
     float mark_high,
     float maintenance_margin_rate,
     float liq_clearance_fee_rate);
+
+// Host launcher to compute equity (realized + unrealized) per individual
+void compute_equity_batch_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    torch::Tensor realized_cum,
+    float mark_t,
+    float equity_base,
+    torch::Tensor equity_out);

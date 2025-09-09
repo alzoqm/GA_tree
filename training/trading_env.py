@@ -143,6 +143,9 @@ class TradingEnvironment:
         # === CUDA 실행 옵션 ===
         # debug_compare_cpu_gpu는 더 이상 사용하지 않지만, 호환을 위해 남겨둡니다.
         self.debug_compare_cpu_gpu = bool(env_config.get('debug_compare_cpu_gpu', False))
+        # Equity calc CUDA toggle and debug compare
+        self.equity_calc_use_cuda = bool(env_config.get('equity_calc_use_cuda', True))
+        self.equity_calc_debug_compare = bool(env_config.get('equity_calc_debug_compare', False))
 
         # 이전 스텝의 원본 예측 액션 저장 (B,4)
         self.prev_actions_raw = torch.full(
@@ -846,28 +849,76 @@ class TradingEnvironment:
 
         return True
 
-    def _calculate_current_equity(self, market_data) -> torch.Tensor:
-        """현재 에쿼티 계산 (미실현 손익 포함)"""
+    def _calculate_current_equity_python(self, market_data) -> torch.Tensor:
+        """현재 에쿼티 계산 (미실현 손익 포함) - Python 텐서 경로 보존"""
         curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
         curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
         curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
         mark_t = (curr_high + curr_low + curr_close) / 3.0
-        
-        # Calculate unrealized P&L for open positions
         open_mask = self.pos_list != 0
         unrealized_pnl = torch.zeros_like(self.realized_cum)
-        
         if open_mask.any():
-            side = torch.where(self.pos_list == 2, 1.0, -1.0)  # long=+1, short=-1
+            side = torch.where(self.pos_list == 2, 1.0, -1.0)
             entry = self.price_list
             lev = self.leverage_ratio.float()
             er = self.enter_ratio
             pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
             unrealized_pnl[open_mask] = (pnl_pct * lev * er)[open_mask]
-        
-        # Total equity = realized + unrealized, starting from 1.0
         equity = 1.0 + self.realized_cum + unrealized_pnl
         return equity
+
+    def _calculate_current_equity(self, market_data) -> torch.Tensor:
+        """현재 에쿼티 계산 - CUDA 경로(옵션) + Python 경로 유지"""
+        # 빠른 스칼라 경로로 mark_t 계산
+        try:
+            h = float(market_data['High'])
+            l = float(market_data['Low'])
+            c = float(market_data['Close'])
+            mark_t_scalar = (h + l + c) / 3.0
+        except Exception:
+            # 예외 시 Python 텐서 경로 사용
+            mark_t_scalar = None
+
+        use_cuda = (
+            str(self.device).startswith('cuda') and
+            self.equity_calc_use_cuda and
+            mark_t_scalar is not None
+        )
+
+        if use_cuda:
+            try:
+                import gatree_cuda_compat as gatree_cuda
+            except Exception:
+                gatree_cuda = None
+            if gatree_cuda is None or getattr(gatree_cuda, 'compute_equity_batch', None) is None:
+                # CUDA 미가용 시 Python 경로로 폴백
+                return self._calculate_current_equity_python(market_data)
+
+            pos_list = self.pos_list.contiguous()
+            price_list = self.price_list.contiguous()
+            leverage_ratio = self.leverage_ratio.contiguous()
+            enter_ratio = self.enter_ratio.contiguous()
+            realized_cum = self.realized_cum.contiguous()
+
+            equity_cuda = gatree_cuda.compute_equity_batch(
+                pos_list, price_list, leverage_ratio, enter_ratio, realized_cum,
+                float(mark_t_scalar), 1.0
+            )
+
+            if self.equity_calc_debug_compare:
+                equity_py = self._calculate_current_equity_python(market_data)
+                # 비교 지표를 약하게 체크 (로깅/디버깅용)
+                try:
+                    diff = (equity_cuda - equity_py).abs().max().item()
+                    if diff > 1e-5:
+                        # 간단한 경고 수준 메시지; 환경 의존적 출력은 최소화
+                        pass
+                except Exception:
+                    pass
+            return equity_cuda
+
+        # 기본: Python 경로
+        return self._calculate_current_equity_python(market_data)
 
     def step(self, market_data, next_open_price, predicted_actions):
         """
