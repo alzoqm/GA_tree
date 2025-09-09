@@ -601,3 +601,78 @@ void check_liquidation_batch_cuda(
         liq_clearance_fee_rate
     );
 }
+
+// ===============================================================
+// Compute equity (realized + unrealized) (thread-per-individual)
+// ===============================================================
+
+__global__ void compute_equity_kernel(
+    const int64_t* __restrict__ pos_list,
+    const float* __restrict__ price_list,
+    const int64_t* __restrict__ leverage_ratio,
+    const float* __restrict__ enter_ratio,
+    const float* __restrict__ realized_cum,
+    float mark_t,
+    float equity_base,
+    float* __restrict__ equity_out,
+    int B)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    const int64_t pos = pos_list[i];
+    const float entry = price_list[i];
+    const float er = enter_ratio[i];
+    const float levf = static_cast<float>(leverage_ratio[i]);
+
+    float unreal = 0.0f;
+    if (pos != 0 && entry > 0.0f && er > 0.0f && levf > 0.0f) {
+        const float denom = entry + 1e-9f;
+        const float side = (pos == 2) ? 1.0f : -1.0f; // 2: long, 1: short
+        const float pnl_pct = side * (mark_t - entry) / denom;
+        unreal = pnl_pct * levf * er;
+    }
+    equity_out[i] = equity_base + realized_cum[i] + unreal;
+}
+
+void compute_equity_batch_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    torch::Tensor realized_cum,
+    float mark_t,
+    float equity_base,
+    torch::Tensor equity_out)
+{
+    auto check_cuda_contig = [](const torch::Tensor& t, const char* name){
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA tensor");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+    };
+
+    check_cuda_contig(pos_list, "pos_list");
+    check_cuda_contig(price_list, "price_list");
+    check_cuda_contig(leverage_ratio, "leverage_ratio");
+    check_cuda_contig(enter_ratio, "enter_ratio");
+    check_cuda_contig(realized_cum, "realized_cum");
+    check_cuda_contig(equity_out, "equity_out");
+
+    const int B = static_cast<int>(pos_list.size(0));
+    if (B == 0) return;
+    TORCH_CHECK(price_list.size(0) == B, "shape mismatch");
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+
+    compute_equity_kernel<<<blocks, threads>>>(
+        pos_list.data_ptr<int64_t>(),
+        price_list.data_ptr<float>(),
+        leverage_ratio.data_ptr<int64_t>(),
+        enter_ratio.data_ptr<float>(),
+        realized_cum.data_ptr<float>(),
+        mark_t,
+        equity_base,
+        equity_out.data_ptr<float>(),
+        B
+    );
+}

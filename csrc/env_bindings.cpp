@@ -83,4 +83,30 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("maintenance_margin_rate"),
         py::arg("liq_clearance_fee_rate")
     );
+
+    m.def(
+        "compute_equity_batch",
+        [](torch::Tensor pos_list,
+           torch::Tensor price_list,
+           torch::Tensor leverage_ratio,
+           torch::Tensor enter_ratio,
+           torch::Tensor realized_cum,
+           float mark_t,
+           float equity_base) {
+            auto equity_out = torch::empty_like(realized_cum);
+            compute_equity_batch_cuda(
+                pos_list, price_list, leverage_ratio, enter_ratio, realized_cum,
+                mark_t, equity_base, equity_out
+            );
+            return equity_out;
+        },
+        "Compute equity (realized + unrealized) for a batch",
+        py::arg("pos_list"),
+        py::arg("price_list"),
+        py::arg("leverage_ratio"),
+        py::arg("enter_ratio"),
+        py::arg("realized_cum"),
+        py::arg("mark_t"),
+        py::arg("equity_base")
+    );
 }

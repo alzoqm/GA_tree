@@ -847,26 +847,34 @@ class TradingEnvironment:
         return True
 
     def _calculate_current_equity(self, market_data) -> torch.Tensor:
-        """현재 에쿼티 계산 (미실현 손익 포함)"""
-        curr_high = torch.tensor(market_data['High'], dtype=torch.float32, device=self.device)
-        curr_low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
-        curr_close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
-        mark_t = (curr_high + curr_low + curr_close) / 3.0
-        
-        # Calculate unrealized P&L for open positions
-        open_mask = self.pos_list != 0
-        unrealized_pnl = torch.zeros_like(self.realized_cum)
-        
-        if open_mask.any():
-            side = torch.where(self.pos_list == 2, 1.0, -1.0)  # long=+1, short=-1
-            entry = self.price_list
-            lev = self.leverage_ratio.float()
-            er = self.enter_ratio
-            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
-            unrealized_pnl[open_mask] = (pnl_pct * lev * er)[open_mask]
-        
-        # Total equity = realized + unrealized, starting from 1.0
-        equity = 1.0 + self.realized_cum + unrealized_pnl
+        """현재 에쿼티 계산 (미실현 손익 포함) - CUDA 전용 경로"""
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
+
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+        if gatree_cuda is None or getattr(gatree_cuda, 'compute_equity_batch', None) is None:
+            raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _calculate_current_equity는 제거되었습니다.")
+
+        # 스칼라 typical price 계산 (파이썬 스칼라만 사용)
+        h = float(market_data['High'])
+        l = float(market_data['Low'])
+        c = float(market_data['Close'])
+        mark_t_scalar = (h + l + c) / 3.0
+
+        # Ensure CUDA and contiguous tensors
+        pos_list = self.pos_list.contiguous()
+        price_list = self.price_list.contiguous()
+        leverage_ratio = self.leverage_ratio.contiguous()
+        enter_ratio = self.enter_ratio.contiguous()
+        realized_cum = self.realized_cum.contiguous()
+
+        equity = gatree_cuda.compute_equity_batch(
+            pos_list, price_list, leverage_ratio, enter_ratio, realized_cum,
+            float(mark_t_scalar), 1.0
+        )
         return equity
 
     def step(self, market_data, next_open_price, predicted_actions):
