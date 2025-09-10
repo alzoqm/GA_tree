@@ -103,6 +103,8 @@ def build_adjacency_list_cuda(population: GATreePop,
     per_tree_offsets = torch.zeros((B, N + 1), dtype=torch.int32, device=trees.device)
     per_tree_children = torch.zeros((B, max_edges), dtype=torch.int32, device=trees.device) if max_edges > 0 else torch.zeros((B, 0), dtype=torch.int32, device=trees.device)
 
+    print('start build adj loop')
+
     # 3) Populate per-tree CSR
     for b in range(B):
         # Flat offsets slice for this tree is [b*N : (b+1)*N] plus end sentinel at (b+1)*N
@@ -117,6 +119,9 @@ def build_adjacency_list_cuda(population: GATreePop,
             s = int(start_off.item())
             e = s + num_edges
             per_tree_children[b, :num_edges] = indices[s:e]
+
+
+    print('end build adj loop')
 
 
     if validate:
