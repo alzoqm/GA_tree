@@ -105,20 +105,50 @@ def build_adjacency_list_cuda(population: GATreePop,
 
     print('start build adj loop')
 
-    # 3) Populate per-tree CSR
-    for b in range(B):
-        # Flat offsets slice for this tree is [b*N : (b+1)*N] plus end sentinel at (b+1)*N
-        start_off = flat_offsets[b * N]
-        tree_offs = flat_offsets[b * N : (b + 1) * N + 1]
-        # Make offsets relative to the start of this tree so they index into per_tree_children[b]
-        per_tree_offsets[b, :] = tree_offs - start_off
+    # --- Reconstruct per-tree CSR for predict kernel ---
+    B, N = population.pop_size, population.max_nodes
 
-        # Fill children segment for this tree
-        num_edges = int(per_tree_offsets[b, N].item())
-        if num_edges > 0:
-            s = int(start_off.item())
-            e = s + num_edges
-            per_tree_children[b, :num_edges] = indices[s:e]
+    # 1) Per-tree total edge counts using boundary sentinels at [0, N, 2N, ...]
+    tree_boundaries = flat_offsets[::N]           # (B+1,)
+    edge_counts = tree_boundaries[1:] - tree_boundaries[:-1]  # (B,)
+    max_edges = int(edge_counts.max().item()) if edge_counts.numel() > 0 else 0
+
+    # 2) Allocate outputs
+    per_tree_offsets = torch.zeros((B, N + 1), dtype=torch.int32, device=trees.device)
+    per_tree_children = (
+        torch.zeros((B, max_edges), dtype=torch.int32, device=trees.device)
+        if max_edges > 0 else
+        torch.zeros((B, 0), dtype=torch.int32, device=trees.device)
+    )
+
+    # 3) Populate per-tree CSR (loop-free, memory-friendly)
+
+    # 3-1) per-tree offsets: 각 트리 시작 오프셋을 빼서 로컬화
+    if N > 0:
+        starts64 = tree_boundaries[:-1].to(torch.long)  # (B,)
+        # (B, N) 뷰로 만든 다음 각 행에 starts를 빼기
+        main = flat_offsets[:-1].reshape(B, N).to(torch.long) - starts64.view(B, 1)
+        per_tree_offsets[:, :N] = main.to(torch.int32)
+        per_tree_offsets[:, N]  = edge_counts.to(torch.int32)
+
+    # 3-2) per-tree children: (row, col) 그리드로 전역 indices에서 바로 gather
+    if max_edges > 0 and indices.numel() > 0:
+        starts64 = tree_boundaries[:-1].to(torch.long)          # (B,)
+        ec64     = edge_counts.to(torch.long)                   # (B,)
+        cols     = torch.arange(max_edges, device=trees.device, dtype=torch.long)  # (max_edges,)
+        # 각 트리의 전역 children 시작 위치 + 열 인덱스
+        idx_grid = starts64[:, None] + cols[None, :]            # (B, max_edges) 전역 인덱스
+        mask     = cols[None, :] < ec64[:, None]                # (B, max_edges) 유효 위치만 True
+
+        # 안전 인덱스(마스크 밖은 더미로 시작점 사용)
+        safe_idx_grid = torch.where(mask, idx_grid, starts64[:, None])
+
+        # 전역 indices에서 모양 그대로 gather (2D 인덱싱)
+        gathered = indices.to(torch.int32)[safe_idx_grid]       # (B, max_edges)
+
+        # 패딩 0 유지, 유효 위치만 채우기
+        per_tree_children.zero_()
+        per_tree_children[mask] = gathered[mask]
 
 
     print('end build adj loop')

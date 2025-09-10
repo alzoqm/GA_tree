@@ -69,4 +69,5 @@ class ReinitializeNodeMutation(BaseMutation):
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after reinit mutation.\n{traceback.format_exc()}")
 
+        print('complete reinit mut')
         return chromosomes
