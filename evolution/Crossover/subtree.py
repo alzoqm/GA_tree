@@ -87,6 +87,7 @@ class SubtreeCrossover(BaseCrossover):
         if clone_p2_mask.any():
             children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
 
+
         return children
 
 
@@ -100,17 +101,24 @@ class SubtreeCrossover(BaseCrossover):
         num_to_cross = p1_batch.shape[0]
         device = p1_batch.device
 
+        # Derive max_nodes from the actual tensor shape to avoid mismatch with config
+        max_nodes = int(p1_batch.size(1))
+        if int(p2_batch.size(1)) != max_nodes:
+            raise ValueError(
+                f"p1_batch and p2_batch must have same max_nodes. got {max_nodes} and {int(p2_batch.size(1))}"
+            )
+
         # 출력 및 임시 버퍼들을 모두 GPU에 생성
         child1_out = torch.empty_like(p1_batch)
         child2_out = torch.empty_like(p2_batch)
         
         # [중요 수정] CUDA 커널의 버퍼 오버플로우를 막기 위해 큐와 결과 버퍼 크기를 2배로 할당
-        bfs_queue_buffer = torch.empty((num_to_cross, 2 * self.max_nodes), dtype=torch.int32, device=device)
-        result_indices_buffer = torch.empty((num_to_cross, 2 * self.max_nodes), dtype=torch.int32, device=device)
+        bfs_queue_buffer = torch.empty((num_to_cross, 2 * max_nodes), dtype=torch.int32, device=device)
+        result_indices_buffer = torch.empty((num_to_cross, 2 * max_nodes), dtype=torch.int32, device=device)
         
-        old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-        p1_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-        p2_candidates_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+        old_to_new_map_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+        p1_candidates_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+        p2_candidates_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
 
         if self.mode == "context":
             branch_types = torch.tensor(self.BRANCH_TYPES, device=device, dtype=torch.int32)
@@ -124,7 +132,7 @@ class SubtreeCrossover(BaseCrossover):
         gatree_cuda.subtree_crossover_batch(
             child1_out, child2_out, p1_batch, p2_batch,
             1 if self.mode == "context" else 0,
-            int(self.max_nodes), int(self.max_retries),
+            int(max_nodes), int(self.max_retries),
             branch_perm, bfs_queue_buffer, result_indices_buffer,
             old_to_new_map_buffer, p1_candidates_buffer, p2_candidates_buffer
         )

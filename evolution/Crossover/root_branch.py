@@ -84,6 +84,13 @@ class RootBranchCrossover(BaseCrossover):
         num_to_cross = p1_batch.shape[0]
         device = p1_batch.device
 
+        # Derive max_nodes from tensors to ensure consistency with actual shapes
+        max_nodes = int(p1_batch.size(1))
+        if int(p2_batch.size(1)) != max_nodes:
+            raise ValueError(
+                f"p1_batch and p2_batch must have same max_nodes. got {max_nodes} and {int(p2_batch.size(1))}"
+            )
+
         # 모든 텐서를 GPU에 생성
         child_batch = torch.zeros_like(p1_batch)
         root_indices = torch.arange(3, device=device)
@@ -101,9 +108,9 @@ class RootBranchCrossover(BaseCrossover):
             # Create parent pool by concatenating p1 and p2 batches
             
             # Allocate buffers for new method
-            bfs_queue_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-            result_indices_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-            old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+            bfs_queue_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+            result_indices_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+            old_to_new_map_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
             
             # Call new sampling crossover kernel
             if hasattr(gatree_cuda, 'root_branch_sampling_crossover'):
@@ -128,9 +135,9 @@ class RootBranchCrossover(BaseCrossover):
             # Using original copy_branches_batch method as fallback
             donor_map = torch.randint(0, 2, (num_to_cross, 3), device=device, dtype=torch.int32)
             
-            bfs_queue_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-            result_indices_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
-            old_to_new_map_buffer = torch.empty((num_to_cross, self.max_nodes), dtype=torch.int32, device=device)
+            bfs_queue_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+            result_indices_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
+            old_to_new_map_buffer = torch.empty((num_to_cross, max_nodes), dtype=torch.int32, device=device)
             
             # GPU 텐서들로 CUDA 커널 호출 (입력 p1_batch, p2_batch는 이미 GPU에 있음)
             gatree_cuda.copy_branches_batch(

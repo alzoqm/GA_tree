@@ -159,4 +159,5 @@ def _validate_tree_constraints(trees: torch.Tensor) -> torch.Tensor:
         single_act_par | inter_violation | action_has_kids |
         depth_violation | root_orphan
     )
+
     return (~any_violation).view(B, N).all(dim=1)

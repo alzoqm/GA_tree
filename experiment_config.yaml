@@ -52,15 +52,15 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 10000
+    size: 100000
     max_nodes: 64
     max_depth: 6
     max_children: 10
   evolution_loop:
     generations: 3
-    parent_pool_size: 4000 # 교배 풀(Mating Pool) 크기
-    elite_size: 2000 # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 2000 # 최종까지 보관할 누적 베스트 개체 수
+    parent_pool_size: 40000 # 교배 풀(Mating Pool) 크기
+    elite_size: 20000 # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 20000 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0 # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정

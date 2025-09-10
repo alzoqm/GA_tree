@@ -81,7 +81,7 @@ class NodeCrossover(BaseCrossover):
         clone_p2_mask = rand_vals >= self.rate + (1.0 - self.rate) / 2.0
         if clone_p2_mask.any():
             children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
-            
+        
         return children
 
     def _perform_crossover_batch(self, p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:

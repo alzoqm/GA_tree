@@ -809,6 +809,7 @@ class GATreePop:
         except Exception as e:
             raise RuntimeError(f"validate_trees failed after init_population_cuda: {e}")
 
+        print('model init loop')
         # 7) Stitch Python objects to GPU views (no CPU traversal here)
         self.population = []
         for i in range(B):
@@ -821,6 +822,7 @@ class GATreePop:
             tree.initialized = True
             tree.set_next_idx()  # uses device tensor shape logically; do not CPU-iterate
             self.population.append(tree)
+        print('model init loop')
 
         self.initialized = True
         print("[CUDA] Population initialized and synchronized.")
@@ -910,6 +912,8 @@ class GATreePop:
         # 텐서를 새 디바이스로 이동 (새 텐서가 생성됨에 유의)
         self.population_tensor = self.population_tensor.to(device)
 
+        print('start model loop')
+
         # 각 트리의 data 뷰를 새 텐서 슬라이스로 재바인딩
         new_population = []
         for i in range(self.pop_size):
@@ -922,6 +926,8 @@ class GATreePop:
             tree.initialized = True
             tree.set_next_idx()
             new_population.append(tree)
+
+        print('end model loop')
 
         self.population = new_population
         self.initialized = True
