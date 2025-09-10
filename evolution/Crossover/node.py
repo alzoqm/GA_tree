@@ -82,7 +82,6 @@ class NodeCrossover(BaseCrossover):
         if clone_p2_mask.any():
             children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
         
-        print('complete node crossover')
         return children
 
     def _perform_crossover_batch(self, p1: torch.Tensor, p2: torch.Tensor) -> torch.Tensor:

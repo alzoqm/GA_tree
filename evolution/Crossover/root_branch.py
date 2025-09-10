@@ -71,7 +71,6 @@ class RootBranchCrossover(BaseCrossover):
         if clone_p2_mask.any():
             children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
             
-        print('complete root crossover')
         return children
 
     def _perform_crossover_batch(self, p1_batch: torch.Tensor, p2_batch: torch.Tensor) -> torch.Tensor:

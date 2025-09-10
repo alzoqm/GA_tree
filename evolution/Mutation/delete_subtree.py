@@ -115,5 +115,4 @@ class DeleteSubtreeMutation(BaseMutation):
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after delete_subtree mutation.\n{traceback.format_exc()}")
 
-        print('complete delete subtree mut')
         return trees

@@ -160,5 +160,4 @@ def _validate_tree_constraints(trees: torch.Tensor) -> torch.Tensor:
         depth_violation | root_orphan
     )
 
-    print('complete delete node mut')
     return (~any_violation).view(B, N).all(dim=1)

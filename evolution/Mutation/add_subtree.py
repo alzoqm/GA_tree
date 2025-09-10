@@ -222,5 +222,4 @@ class AddSubtreeMutation(BaseMutation):
                         f"Original error:\n{traceback.format_exc()}")
             raise RuntimeError(error_msg)
 
-        print('complete add subtree mut')
         return trees

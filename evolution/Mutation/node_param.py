@@ -67,5 +67,4 @@ class NodeParamMutation(BaseMutation):
             import traceback
             raise RuntimeError(f"gatree_cuda.validate_trees failed after node_param mutation.\n{traceback.format_exc()}")
         
-        print('complete node param mut')
         return chromosomes

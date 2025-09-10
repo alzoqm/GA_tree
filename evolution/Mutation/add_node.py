@@ -242,5 +242,4 @@ class AddNodeMutation(BaseMutation):
                         f"Original error:\n{traceback.format_exc()}")
             raise RuntimeError(error_msg)
 
-        print('complete add node mut')
         return trees
