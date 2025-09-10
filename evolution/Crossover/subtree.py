@@ -87,7 +87,6 @@ class SubtreeCrossover(BaseCrossover):
         if clone_p2_mask.any():
             children[clone_p2_mask] = p2_batch[clone_p2_mask].clone()
 
-        print('complete subtree crossover')
 
         return children
 
