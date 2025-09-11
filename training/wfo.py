@@ -7,6 +7,7 @@ import logging
 from typing import List, Tuple, Optional, Dict, Any
 
 from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+from analysis.stat_tests import window_level_dsr
 from utils.checkpoint_manager import CheckpointManager
 
 
@@ -189,8 +190,96 @@ class WalkForwardOptimizer:
         if candidate_id not in self.candidate_archives:
             raise ValueError(f"No results found for candidate {candidate_id}")
         window_results = self.candidate_archives[candidate_id]
-        window_objectives = np.array(list(window_results.values()))
-        return aggregate_oos_objectives(window_objectives, self.aggregate_config)
+        full_window_objectives = np.array(list(window_results.values()))
+
+        # Reorder/select base OOS columns to align with aggregate objectives naming (oos_*)
+        # Map oos_aggregate.objectives like ['oos_mean_return','oos_max_drawdown','oos_psr', 'oos_consistency']
+        # to base OOS names ['mean_return','max_drawdown','psr'] so that column i corresponds to aggregate objective i.
+        oos_obj_cfg = self.evaluation_config.get('oos_objectives', self.evaluation_config.get('objectives', {}))
+        oos_names = oos_obj_cfg.get('objectives', []) if isinstance(oos_obj_cfg, dict) else []
+        agg_obj_names = list(self.aggregate_config.get('objectives', []))
+
+        selected_cols = []
+        for agg_name in agg_obj_names:
+            if not isinstance(agg_name, str):
+                continue
+            if agg_name.startswith('oos_') and agg_name != 'oos_consistency':
+                base = agg_name[len('oos_'):]
+                if base in oos_names:
+                    idx = oos_names.index(base)
+                    selected_cols.append(idx)
+                else:
+                    # Base metric not present; skip (will be handled as missing by aggregator methods)
+                    pass
+            else:
+                # Special objectives like 'oos_consistency' are handled by aggregator methods
+                pass
+
+        if selected_cols:
+            window_objectives = full_window_objectives[:, selected_cols]
+        else:
+            window_objectives = full_window_objectives
+
+        # Base aggregation of requested OOS objectives
+        aggregated = aggregate_oos_objectives(window_objectives, self.aggregate_config)
+
+        # Optional: include DSR as additional aggregated objective
+        include_dsr = bool(self.aggregate_config.get('include_dsr', False)) and ('sharpe_ratio' in oos_names)
+        if include_dsr:
+            try:
+                sharpe_idx = oos_names.index('sharpe_ratio')
+                lookback_period = int(oos_obj_cfg.get('lookback_period', 252)) if isinstance(oos_obj_cfg, dict) else 252
+                scale = float(np.sqrt(max(1, lookback_period)))
+                n_obs = int(self.wfo_config.get('oos_bars', 1))
+                dsr_sr_bm = float(self.aggregate_config.get('dsr_sr_benchmark', 0.0))
+
+                dsr_per_window: list[float] = []
+                for w_idx in sorted(window_results.keys()):
+                    sr_all: list[float] = []
+                    sr_selected: Optional[float] = None
+                    for cid, win_map in self.candidate_archives.items():
+                        if w_idx in win_map and len(win_map[w_idx]) > sharpe_idx:
+                            val = float(win_map[w_idx][sharpe_idx])
+                            sr = val / scale  # convert to per-period SR
+                            sr_all.append(sr)
+                            if cid == candidate_id:
+                                sr_selected = sr
+                    if sr_selected is None or len(sr_all) == 0:
+                        continue
+                    dsr_val = window_level_dsr(
+                        sr_selected=float(sr_selected),
+                        n_obs=n_obs,
+                        sr_all_candidates=sr_all,
+                        sr_benchmark=dsr_sr_bm,
+                    )
+                    dsr_per_window.append(float(dsr_val))
+
+                if dsr_per_window:
+                    method = str(self.aggregate_config.get('dsr_method', 'mean')).lower()
+                    if method == 'median':
+                        agg_dsr = float(np.median(dsr_per_window))
+                    elif method == 'min':
+                        agg_dsr = float(np.min(dsr_per_window))
+                    elif method == 'max':
+                        agg_dsr = float(np.max(dsr_per_window))
+                    elif method.startswith('p'):
+                        try:
+                            percentile = float(method[1:])
+                            agg_dsr = float(np.percentile(dsr_per_window, percentile))
+                        except Exception:
+                            agg_dsr = float(np.mean(dsr_per_window))
+                    else:
+                        agg_dsr = float(np.mean(dsr_per_window))
+                else:
+                    dsr_minimize = bool(self.aggregate_config.get('dsr_minimize', False))
+                    agg_dsr = (1e9 if dsr_minimize else -1e9)
+
+                aggregated = np.append(aggregated, agg_dsr)
+            except Exception:
+                # On failure, keep base aggregated only
+                pass
+
+        return aggregated
 
     def get_final_rankings(self, device: str | torch.device | None = None) -> Tuple[List[int], np.ndarray]:
         if not self.candidate_archives:
@@ -203,8 +292,22 @@ class WalkForwardOptimizer:
             aggregated_matrix.append(agg_obj)
         aggregated_matrix = np.array(aggregated_matrix)
 
-        agg_evaluator = MultiObjectiveFitnessEvaluator(self.aggregate_config)
-        ranks, distances = agg_evaluator.pareto_rank(aggregated_matrix, device=device)
+        # Convert to minimization space based on config
+        minimize_flags = list(self.aggregate_config.get('minimize', []))
+        include_dsr = bool(self.aggregate_config.get('include_dsr', False))
+        if include_dsr and len(minimize_flags) < aggregated_matrix.shape[1]:
+            dsr_minimize = bool(self.aggregate_config.get('dsr_minimize', False))
+            minimize_flags = minimize_flags + [dsr_minimize]
+        if len(minimize_flags) < aggregated_matrix.shape[1]:
+            minimize_flags = minimize_flags + [False] * (aggregated_matrix.shape[1] - len(minimize_flags))
+
+        agg_for_min = aggregated_matrix.copy()
+        for j in range(agg_for_min.shape[1]):
+            if not minimize_flags[j]:
+                agg_for_min[:, j] = -agg_for_min[:, j]
+
+        agg_evaluator = MultiObjectiveFitnessEvaluator({'objectives': ['agg']*agg_for_min.shape[1], 'minimize': [True]*agg_for_min.shape[1]})
+        ranks, distances = agg_evaluator.pareto_rank(agg_for_min, device=device)
         sort_indices = np.lexsort((-distances, ranks))
         ranked_candidates = [candidate_ids[i] for i in sort_indices]
         return ranked_candidates, aggregated_matrix[sort_indices]

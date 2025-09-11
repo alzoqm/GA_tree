@@ -1315,7 +1315,9 @@ class TradingEnvironment:
             omega_ratios = self._calculate_omega_ratio(self.returns_history, self.mar)
             information_ratios = self._calculate_information_ratio(self.returns_history, self.bench_returns_history)
             # Advanced statistical metrics
-            psr_vals = self._calculate_psr(self.returns_history, sr_benchmark=0.0)
+            # PSR benchmark SR* can be tuned via objectives_config (default 0.0)
+            psr_sr_benchmark = float(self.objectives_config.get('psr_sr_benchmark', 0.0))
+            psr_vals = self._calculate_psr(self.returns_history, sr_benchmark=psr_sr_benchmark)
             t_stats = self._calculate_t_stat(self.returns_history)
         else:
             # Fallback for insufficient data

@@ -174,6 +174,8 @@ evaluation:
     minimize: [false, true, false, false]
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
+    psr_sr_benchmark: 0.0
     # Advanced metrics params (optional)
     mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
     benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
@@ -185,6 +187,8 @@ evaluation:
     objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
     minimize: [false, true, false, true]
     normalization: "minmax"
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.0
     
   # Simulator-side complexity composition
   complexity:
@@ -228,6 +232,8 @@ evaluation:
     normalization: "minmax"
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.0
     # Advanced metrics params (optional)
     mar: 0.0
     benchmark_mode: "close_to_next_open"
@@ -238,6 +244,11 @@ evaluation:
     objectives: ["oos_mean_return", "oos_max_drawdown", "oos_psr", "oos_consistency"]
     minimize: [false, true, false, false]
     methods: ["mean", "max", "mean", "hit_rate"]
+    # Include Deflated Sharpe Ratio (DSR) in final selection
+    include_dsr: true
+    dsr_method: "mean"          # mean | median | min | max | pXX
+    dsr_minimize: false          # DSR is a maximize metric
+    dsr_sr_benchmark: 0.0        # Optional SR* for DSR
     # 일관성(hit_rate) 임계값
     thresholds:
       min_return: 0.0       # 최소 수익률 임계값

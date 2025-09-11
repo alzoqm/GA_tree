@@ -21,14 +21,17 @@ import math
 from typing import Iterable, Tuple, Optional
 
 import numpy as np
-from numpy import special as nps
+# Avoid optional numpy.special dependency; use math.erf and a lightweight erfinv
 
 
 def _normal_cdf(x: np.ndarray | float) -> np.ndarray | float:
+    """Standard normal CDF using math.erf; vectorized for arrays."""
     if np.isscalar(x):
         return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
     arr = np.asarray(x, dtype=float)
-    return 0.5 * (1.0 + nps.erf(arr / np.sqrt(2.0)))
+    # Vectorize math.erf for array inputs
+    vec_erf = np.vectorize(lambda t: math.erf(float(t)))
+    return 0.5 * (1.0 + vec_erf(arr / np.sqrt(2.0)))
 
 
 def probabilistic_sharpe_ratio(
@@ -137,17 +140,13 @@ def deflated_sharpe_ratio(
 
 def erfinv_clamped(x: float) -> float:
     """Approximate inverse error function with domain clamp to (-1,1)."""
-    # Fallback approximation using numpy if available
+    # Winitzki approximation (no numpy.special dependency)
     x = max(-0.999999, min(0.999999, float(x)))
-    try:
-        return float(nps.erfinv(x))
-    except Exception:
-        # Winitzki approximation for erfinv
-        a = 0.147
-        ln = math.log((1.0 - x) * (1.0 + x))
-        s = (2.0 / (math.pi * a)) + (ln / 2.0)
-        res = math.copysign(math.sqrt(math.sqrt(s * s - (ln / a)) - s), x)
-        return res
+    a = 0.147
+    ln = math.log((1.0 - x) * (1.0 + x))
+    s = (2.0 / (math.pi * a)) + (ln / 2.0)
+    res = math.copysign(math.sqrt(math.sqrt(s * s - (ln / a)) - s), x)
+    return res
 
 
 def window_level_dsr(
@@ -157,6 +156,7 @@ def window_level_dsr(
     skew: float = 0.0,
     kurtosis: float = 3.0,
     rho: float = 0.0,
+    sr_benchmark: float = 0.0,
 ) -> float:
     """Convenience wrapper to compute DSR for a window using all candidates' SRs.
 
@@ -180,5 +180,5 @@ def window_level_dsr(
         kurtosis=kurtosis,
         n_trials=max(n_trials, 1),
         rho=rho,
-        sr_benchmark=0.0,
+        sr_benchmark=sr_benchmark,
     )
