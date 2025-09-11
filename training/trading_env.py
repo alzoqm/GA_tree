@@ -4,6 +4,7 @@
 import torch
 import numpy as np
 import pandas as pd
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
@@ -57,9 +58,17 @@ class TradingEnvironment:
             self.atr_ma_window = slippage_config.get('atr_ma_window', 50)
             self.min_slippage = slippage_config.get('min_slippage', 0.00005)
             self.max_slippage = slippage_config.get('max_slippage', 0.002)
-            # 기본 ATR 컬럼명 설정 (ATR_14가 가장 일반적)
-            self.atr_column = 'ATR_14'
-            self.atr_ma_column = f'ATR_14_MA_{self.atr_ma_window}'
+            
+            # ATR 컬럼 설정 (사용자 지정 또는 자동 감지)
+            self.atr_column_config = slippage_config.get('atr_column')
+            self.atr_ma_column_config = slippage_config.get('atr_ma_column')
+            self.atr_pattern = slippage_config.get('atr_pattern', r'ATR_\d+.*')
+            self.atr_ma_pattern = slippage_config.get('atr_ma_pattern', r'ATR_\d+.*_MA_\d+')
+            
+            # 실제 컬럼명은 첫 번째 step에서 감지됨
+            self.atr_column = None
+            self.atr_ma_column = None
+            self._columns_detected = False
         else:
             raise ValueError(f"Unknown slippage mode: {self.slippage_mode}")
         
@@ -347,6 +356,98 @@ class TradingEnvironment:
         self.profit.zero_()
         self.last_timestamp = timestamp
 
+    def _detect_atr_columns(self, market_data_row) -> Tuple[str, str]:
+        """
+        시장 데이터에서 사용 가능한 ATR 및 ATR-MA 컬럼을 자동 감지합니다.
+        
+        Args:
+            market_data_row: 시장 데이터 행 (pandas Series)
+            
+        Returns:
+            Tuple[str, str]: (atr_column_name, atr_ma_column_name)
+            
+        Raises:
+            ValueError: 적절한 ATR 컬럼을 찾지 못한 경우
+        """
+        available_columns = list(market_data_row.index)
+        
+        # 1. 사용자가 명시적으로 지정한 컬럼 사용
+        if self.atr_column_config and self.atr_ma_column_config:
+            if (self.atr_column_config in available_columns and 
+                self.atr_ma_column_config in available_columns):
+                print(f"Using user-specified ATR columns: {self.atr_column_config}, {self.atr_ma_column_config}")
+                return self.atr_column_config, self.atr_ma_column_config
+            else:
+                print(f"Warning: User-specified columns not found. Falling back to auto-detection.")
+        
+        # 2. 패턴 매칭을 통한 자동 감지
+        atr_candidates = [col for col in available_columns if re.match(self.atr_pattern, col)]
+        atr_ma_candidates = [col for col in available_columns if re.match(self.atr_ma_pattern, col)]
+        
+        if not atr_candidates:
+            raise ValueError(
+                f"No ATR columns found matching pattern '{self.atr_pattern}'. "
+                f"Available columns: {[col for col in available_columns if 'ATR' in col]}"
+            )
+        
+        if not atr_ma_candidates:
+            raise ValueError(
+                f"No ATR-MA columns found matching pattern '{self.atr_ma_pattern}'. "
+                f"Available ATR-related columns: {[col for col in available_columns if 'ATR' in col]}"
+            )
+        
+        # 3. 최적의 ATR/ATR-MA 쌍 찾기
+        best_atr = None
+        best_atr_ma = None
+        
+        # ATR 컬럼 우선순위 (일반적인 윈도우 크기 순서)
+        preferred_windows = [14, 7, 21, 28, 20, 10]
+        
+        for window in preferred_windows:
+            for atr_col in atr_candidates:
+                if f'_{window}' in atr_col or atr_col.endswith(str(window)):
+                    # 해당 ATR에 맞는 MA 컬럼 찾기 (정확한 prefix 매칭)
+                    matching_ma = [ma_col for ma_col in atr_ma_candidates 
+                                   if ma_col.startswith(atr_col + '_MA_')]
+                    
+                    # 우선적으로 설정된 MA 윈도우와 일치하는 컬럼 찾기
+                    preferred_ma = [ma_col for ma_col in matching_ma 
+                                    if f'_MA_{self.atr_ma_window}' in ma_col]
+                    
+                    if preferred_ma:
+                        best_atr = atr_col
+                        best_atr_ma = preferred_ma[0]
+                        break
+                    elif matching_ma:
+                        # 선호하는 MA 윈도우가 없으면 첫 번째 매칭 사용
+                        best_atr = atr_col
+                        best_atr_ma = matching_ma[0]
+                        break
+            
+            if best_atr and best_atr_ma:
+                break
+        
+        # 4. 기본 매칭 시도 (우선순위 매칭이 실패한 경우)
+        if not best_atr or not best_atr_ma:
+            # 첫 번째 ATR 컬럼과 매칭되는 MA 컬럼 찾기
+            for atr_col in sorted(atr_candidates):
+                # ATR 컬럼에서 기본 부분 추출 (예: ATR_7_5m -> ATR_7_5m)
+                matching_ma = [ma_col for ma_col in atr_ma_candidates 
+                               if ma_col.startswith(atr_col + '_MA_')]
+                if matching_ma:
+                    best_atr = atr_col
+                    best_atr_ma = matching_ma[0]
+                    break
+        
+        if not best_atr or not best_atr_ma:
+            raise ValueError(
+                f"Could not find matching ATR/ATR-MA column pair. "
+                f"ATR candidates: {atr_candidates}, ATR-MA candidates: {atr_ma_candidates}"
+            )
+        
+        print(f"Auto-detected ATR columns: {best_atr}, {best_atr_ma}")
+        return best_atr, best_atr_ma
+
     def _calculate_dynamic_slippage(self, market_data_row) -> float:
         """
         상대 변동성 기반 동적 슬리피지를 계산합니다.
@@ -359,6 +460,16 @@ class TradingEnvironment:
         """
         if self.slippage_mode != 'relative_volatility':
             return self.fixed_slippage_rate
+        
+        # 첫 번째 호출 시 컬럼 감지
+        if not self._columns_detected:
+            try:
+                self.atr_column, self.atr_ma_column = self._detect_atr_columns(market_data_row)
+                self._columns_detected = True
+            except ValueError as e:
+                print(f"ATR column detection failed: {e}")
+                print("Falling back to fixed slippage mode.")
+                return self.fixed_slippage_rate
         
         try:
             # ATR과 ATR 이동평균 값 추출
