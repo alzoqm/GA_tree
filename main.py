@@ -1,6 +1,7 @@
 # main.py
 import os
 import sys
+import argparse
 import yaml  # YAML 로드를 위해 추가
 from tqdm import tqdm
 import torch
@@ -10,7 +11,7 @@ import random
 import numpy as np
 import json
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
@@ -24,6 +25,7 @@ from evolution.Mutation import (
 from training.runner import generation_training, generation_test
 from training.wfo import WalkForwardOptimizer as _WFO
 from tools import wandb_logger
+from utils.checkpoint_manager import CheckpointManager, detect_resumable_training
 
 try:
     import gatree_cuda_compat as gatree_cuda
@@ -89,10 +91,35 @@ def setup_environment(output_dir):
     logging.info(f"Output directory created at: {output_dir}")
 
 
+def parse_arguments():
+    """Parse command line arguments for resumption support."""
+    parser = argparse.ArgumentParser(description="GA Tree Training with Resumption Support")
+    parser.add_argument(
+        "--resume", 
+        action="store_true", 
+        help="Resume training from the latest checkpoint if available"
+    )
+    parser.add_argument(
+        "--config", 
+        type=str, 
+        default="experiment_config.yaml",
+        help="Path to the experiment configuration file"
+    )
+    parser.add_argument(
+        "--clear-checkpoints", 
+        action="store_true", 
+        help="Clear all checkpoints and start fresh (use with caution!)"
+    )
+    return parser.parse_args()
+
+
 def main():
     """전체 학습 파이프라인을 실행하는 메인 함수"""
+    # --- Parse command line arguments ---
+    args = parse_arguments()
+    
     # --- 설정 로드 ---
-    config = load_config()
+    config = load_config(args.config)
 
     # --- 환경 설정 ---
     env_cfg = config['environment']
@@ -105,12 +132,48 @@ def main():
     set_seed(env_cfg['seed'])
     setup_environment(env_cfg['output_dir'])
 
+    # --- Initialize Checkpoint Manager ---
+    checkpoint_manager = CheckpointManager(env_cfg['output_dir'], config)
+    
+    # Handle checkpoint clearing if requested
+    if args.clear_checkpoints:
+        logging.info("Clearing all checkpoints...")
+        checkpoint_manager.clear_checkpoints()
+    
+    # Check for resumable training
+    resume_run_id = None
+    resumption_cfg = config.get('resumption', {})
+    if args.resume or resumption_cfg.get('auto_resume', False):
+        if checkpoint_manager.is_resumable():
+            main_checkpoint = checkpoint_manager.load_main_checkpoint()
+            resume_run_id = main_checkpoint.get('wandb_run_id') if main_checkpoint else None
+            if resume_run_id:
+                logging.info(f"Found resumable training with wandb run ID: {resume_run_id}")
+            else:
+                logging.info("Found resumable training (no wandb run ID)")
+                
+            # Clean up old checkpoints if requested
+            if resumption_cfg.get('cleanup_old_checkpoints', True):
+                keep_n = resumption_cfg.get('keep_last_n_generations', 5)
+                checkpoint_manager.cleanup_old_checkpoints(keep_n)
+        elif args.resume:
+            logging.warning("Resume requested but no valid checkpoint found. Starting fresh.")
+    
     # --- Initialize Weights & Biases (optional) ---
     wandb_cfg = config.get('wandb', {})
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
     run_name = f"{data_cfg.get('symbol','SYM')}-{data_cfg.get('interval','int')}-{env_cfg.get('seed',0)}-{ts}"
     try:
-        wandb_logger.init_run(wandb_cfg, run_name, env_cfg['output_dir'], full_config=config)
+        wandb_logger.init_run(wandb_cfg, run_name, env_cfg['output_dir'], full_config=config, resume_run_id=resume_run_id)
+        # Update checkpoint with current wandb run ID
+        current_run_id = wandb_logger.get_run_id()
+        if current_run_id:
+            checkpoint_manager.save_main_checkpoint(
+                current_window=0,
+                total_windows=0,
+                completed_generations=0,
+                wandb_run_id=current_run_id,
+            )
     except Exception:
         pass
 
@@ -286,6 +349,7 @@ def main():
         wfo_cfg=wfo_cfg,
         wandb_cfg=wandb_cfg,
         output_dir=env_cfg['output_dir'],
+        checkpoint_manager=checkpoint_manager,
     )
     if not windows:
         logging.error("No valid WFO windows could be generated. Check your configuration.")

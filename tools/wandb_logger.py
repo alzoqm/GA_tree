@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -49,10 +50,11 @@ def _import_wandb():
         return _NoopWandb()
 
 
-def init_run(cfg: Dict[str, Any], run_name: str, out_dir: str, full_config: Optional[Dict[str, Any]] = None) -> None:
+def init_run(cfg: Dict[str, Any], run_name: str, out_dir: str, full_config: Optional[Dict[str, Any]] = None, resume_run_id: Optional[str] = None) -> None:
     """Initialize wandb if enabled, loading API key from .env.
 
     cfg keys (optional): enabled, project, entity, group, job_type, tags, dir, mode
+    resume_run_id: If provided, resume an existing run with this ID
     """
     enabled = bool(cfg.get("enabled", False))
     _state["enabled"] = enabled
@@ -85,17 +87,33 @@ def init_run(cfg: Dict[str, Any], run_name: str, out_dir: str, full_config: Opti
 
     run = None
     try:
-        run = wandb.init(
-            project=cfg.get("project", "GA_tree"),
-            entity=cfg.get("entity", None),
-            group=cfg.get("group", None),
-            job_type=cfg.get("job_type", "train"),
-            tags=cfg.get("tags", []),
-            name=run_name,
-            dir=dir_path,
-            config=full_config or {},
-            reinit=True,
-        )
+        # Prepare init arguments
+        init_kwargs = {
+            "project": cfg.get("project", "GA_tree"),
+            "entity": cfg.get("entity", None),
+            "group": cfg.get("group", None),
+            "job_type": cfg.get("job_type", "train"),
+            "tags": cfg.get("tags", []),
+            "name": run_name,
+            "dir": dir_path,
+            "config": full_config or {},
+            "reinit": True,
+        }
+        
+        # Handle resumption
+        if resume_run_id:
+            try:
+                init_kwargs["id"] = resume_run_id
+                init_kwargs["resume"] = "must"
+                
+                logging.info(f"Resuming wandb run: {resume_run_id}")
+            except Exception as e:
+                logging.warning(f"Failed to resume wandb run {resume_run_id}, starting new run: {e}")
+                # Fall back to new run without resume parameters
+                init_kwargs.pop("id", None)
+                init_kwargs.pop("resume", None)
+        
+        run = wandb.init(**init_kwargs)
         # Define custom step metrics so plots use logical x-axes
         try:
             # Generation-level metrics keyed by gen/index
@@ -170,3 +188,27 @@ def log_artifacts(files: List[str], name: str, type_: str = "dataset") -> None:
             _state["run"].log_artifact(art)
     except Exception:
         pass
+
+
+def get_run_id() -> Optional[str]:
+    """Get the current wandb run ID for checkpoint saving."""
+    if not _state.get("enabled", False):
+        return None
+    try:
+        run = _state.get("run")
+        if run and hasattr(run, "id"):
+            return run.id
+        return None
+    except Exception:
+        return None
+
+
+def is_run_active() -> bool:
+    """Check if there's an active wandb run."""
+    if not _state.get("enabled", False):
+        return False
+    try:
+        run = _state.get("run")
+        return run is not None
+    except Exception:
+        return False
