@@ -553,7 +553,7 @@ def create_multi_objective_evaluator(objectives_config: dict) -> MultiObjectiveF
 # Predefined objective configurations
 PRESET_OBJECTIVES = {
     'balanced': {
-        'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
+        'objectives': ['mean_return', 'max_drawdown', 'psr', 'win_rate'],
         'minimize': [False, True, False, False],
         'weights': [0.3, 0.3, 0.2, 0.2],
         'normalization': 'minmax'
@@ -567,14 +567,14 @@ PRESET_OBJECTIVES = {
     },
     
     'risk_focused': {
-        'objectives': ['max_drawdown', 'volatility', 'sharpe_ratio', 'sortino_ratio'],
+        'objectives': ['max_drawdown', 'volatility', 'psr', 'sortino_ratio'],
         'minimize': [True, True, False, False],
         'weights': [0.3, 0.2, 0.25, 0.25],
         'normalization': 'minmax'
     },
     
     'comprehensive': {
-        'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate', 'profit_factor', 'calmar_ratio'],
+        'objectives': ['mean_return', 'max_drawdown', 'psr', 'win_rate', 'profit_factor', 'calmar_ratio'],
         'minimize': [False, True, False, False, False, False],
         'weights': [0.2, 0.2, 0.2, 0.15, 0.15, 0.1],
         'normalization': 'minmax'

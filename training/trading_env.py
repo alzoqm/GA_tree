@@ -128,7 +128,7 @@ class TradingEnvironment:
         # === 다중 목표 최적화 추가 기능 ===
         if objectives_config is None:
             objectives_config = {
-                'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
+                'objectives': ['mean_return', 'max_drawdown', 'psr', 'win_rate'],
                 'minimize': [False, True, False, False],
                 'risk_free_rate': 0.0,
                 'volatility_lookback': 30
@@ -136,7 +136,7 @@ class TradingEnvironment:
         
         self.objectives_config = objectives_config
         self.objective_names = objectives_config.get('objectives', [
-            'mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'
+            'mean_return', 'max_drawdown', 'psr', 'win_rate'
         ])
         self.minimize_objectives = objectives_config.get('minimize', [
             False, True, False, False  # minimize drawdown, maximize others
@@ -1314,6 +1314,9 @@ class TradingEnvironment:
             sortino_ratios = self._calculate_sortino_ratio(self.returns_history)
             omega_ratios = self._calculate_omega_ratio(self.returns_history, self.mar)
             information_ratios = self._calculate_information_ratio(self.returns_history, self.bench_returns_history)
+            # Advanced statistical metrics
+            psr_vals = self._calculate_psr(self.returns_history, sr_benchmark=0.0)
+            t_stats = self._calculate_t_stat(self.returns_history)
         else:
             # Fallback for insufficient data
             sharpe_ratios = torch.zeros_like(mean_returns)
@@ -1322,6 +1325,8 @@ class TradingEnvironment:
             sortino_ratios = torch.zeros_like(mean_returns)
             omega_ratios = torch.zeros_like(mean_returns)
             information_ratios = torch.zeros_like(mean_returns)
+            psr_vals = torch.zeros_like(mean_returns)
+            t_stats = torch.zeros_like(mean_returns)
         
         # Build objective dictionary
         available_objectives = {
@@ -1336,7 +1341,10 @@ class TradingEnvironment:
             'calmar_ratio': calmar_ratios,
             'sortino_ratio': sortino_ratios,
             'omega_ratio': omega_ratios,
-            'information_ratio': information_ratios
+            'information_ratio': information_ratios,
+            # Added advanced statistical objectives
+            'psr': psr_vals,           # Probabilistic Sharpe Ratio (0..1)
+            't_stat': t_stats          # t-statistic of per-step returns
         }
         
         # Select and arrange objectives according to configuration

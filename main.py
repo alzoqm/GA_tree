@@ -417,7 +417,7 @@ def main():
         # === WFO Mode: Save aggregated results and best population ===
         logging.info("=== WFO Mode: Saving aggregated results & best model ===")
         
-        # Save WFO results summary
+        # Save WFO results summary (+ DSR post-analysis for Top-1 if possible)
         wfo_results_path = os.path.join(env_cfg['output_dir'], "wfo_results.json")
         wfo_results = {
             'num_windows': len(windows) if 'windows' in locals() else 0,
@@ -427,6 +427,59 @@ def main():
             'minimize_directions': eval_cfg.get('oos_aggregate', {}).get('minimize', []),
             'wfo_config': wfo_cfg
         }
+
+        # Attempt DSR computation for Top-1 candidate across windows
+        try:
+            from analysis.stat_tests import window_level_dsr
+            # Identify Top-1 candidate ID by matching chromosome tensor
+            top1_id = None
+            if best_chromosomes is not None and len(best_chromosomes) > 0:
+                top1_chrom = best_chromosomes[0]
+                for cid, chrom in getattr(wfo_optimizer, 'candidate_chromosomes', {}).items():
+                    try:
+                        if torch.equal(chrom, top1_chrom):
+                            top1_id = cid
+                            break
+                    except Exception:
+                        continue
+            # Compute per-window DSRs if we found the candidate
+            dsr_per_window = []
+            oos_obj_cfg = eval_cfg.get('oos_objectives', eval_cfg.get('objectives', {}))
+            oos_names = oos_obj_cfg.get('objectives', []) if isinstance(oos_obj_cfg, dict) else []
+            sharpe_idx = oos_names.index('sharpe_ratio') if 'sharpe_ratio' in oos_names else None
+            if top1_id is not None and sharpe_idx is not None:
+                # n_obs approximated by OOS bars
+                n_obs = int(wfo_cfg.get('oos_bars', 1))
+                lookback_period = int(oos_obj_cfg.get('lookback_period', 252)) if isinstance(oos_obj_cfg, dict) else 252
+                scale = np.sqrt(max(1, lookback_period))
+                for w_idx, _win in enumerate(windows):
+                    # Collect all candidates' Sharpe for this window
+                    sr_all = []
+                    sr_selected = None
+                    for cid, win_map in wfo_optimizer.candidate_archives.items():
+                        if w_idx in win_map:
+                            val = win_map[w_idx][sharpe_idx]
+                            # Convert from annualized SR to per-period SR for DSR
+                            sr_all.append(float(val) / scale)
+                            if cid == top1_id:
+                                sr_selected = float(val) / scale
+                    if sr_selected is None or len(sr_all) == 0:
+                        dsr_per_window.append(float('nan'))
+                    else:
+                        dsr_val = window_level_dsr(sr_selected=float(sr_selected), n_obs=n_obs, sr_all_candidates=sr_all)
+                        dsr_per_window.append(float(dsr_val))
+                # Summarize
+                dsr_valid = [x for x in dsr_per_window if x == x]
+                if dsr_valid:
+                    wfo_results['dsr_summary'] = {
+                        'mean': float(np.mean(dsr_valid)),
+                        'median': float(np.median(dsr_valid)),
+                        'min': float(np.min(dsr_valid)),
+                        'num_windows': int(len(dsr_valid)),
+                    }
+                wfo_results['dsr_per_window'] = dsr_per_window
+        except Exception:
+            pass
         
         with open(wfo_results_path, 'w') as f:
             json.dump(wfo_results, f, indent=2)
