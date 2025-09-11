@@ -143,8 +143,8 @@ evaluation:
       min_slippage: 0.00005       # Floor cap (0.005%)
       max_slippage: 0.002         # Ceiling cap (0.2%)
       # ATR column configuration (optional - auto-detect if not specified)
-      atr_column: null            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
-      atr_ma_column: null         # e.g., 'ATR_7_5m_MA_50' - auto-detect if null  
+      atr_column: ATR_7_5m            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
+      atr_ma_column: ATR_7_5m_MA_14         # e.g., 'ATR_7_5m_MA_50' - auto-detect if null  
       # Auto-detection patterns (used when columns are null)
       atr_pattern: 'ATR_\\d+.*'   # Regex pattern to match ATR columns
       atr_ma_pattern: 'ATR_\\d+.*_MA_\\d+' # Regex pattern to match ATR-MA columns
