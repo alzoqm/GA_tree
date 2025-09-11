@@ -3,14 +3,15 @@
 
 import torch
 import numpy as np
-from typing import Tuple, Optional, Union, List, Dict
-from copy import deepcopy
+from typing import Tuple, Optional, List, Dict
 
 from models.model import GATreePop
 from .Selection.base import BaseSelection
 from .Selection.ppts import PPTSSelection
 from .Crossover.base import BaseCrossover
 from .Mutation.base import BaseMutation
+# [변경] 최적화된 Pareto 랭킹을 위해 MultiObjectiveFitnessEvaluator 임포트
+from training.multi_objective_fitness import MultiObjectiveFitnessEvaluator
 
 
 class Evolution:
@@ -76,6 +77,10 @@ class Evolution:
         # === 다중 목표 최적화 추가 기능 ===
         self.archive_size = archive_size
         self.diversity_preservation = diversity_preservation
+        
+        # [신규] Pareto 계산을 위한 유틸리티 평가기 인스턴스화
+        # 랭킹 계산 자체는 objective 이름/방향 설정과 무관하므로 빈 설정으로 초기화
+        self.evaluator = MultiObjectiveFitnessEvaluator({'objectives': [], 'minimize': []})
         
         # External archive for storing non-dominated solutions
         self.archive_objectives = None  # [archive_size, num_objectives]
@@ -188,44 +193,48 @@ class Evolution:
         Returns:
             stats: 세대 통계 딕셔너리
         """
-        objectives_np = objectives.cpu().numpy()
+        # [변경] NumPy 변환을 GPU에서 바로 처리 가능한 PyTorch 텐서로 유지
+        objectives_tensor = objectives
         
         # Basic statistics
         stats = {
-            'population_size': len(objectives_np),
-            'num_objectives': objectives_np.shape[1] if objectives_np.ndim > 1 else 1,
+            'population_size': len(objectives_tensor),
+            'num_objectives': objectives_tensor.shape[1] if objectives_tensor.ndim > 1 else 1,
             'generation': len(self.generation_stats),
         }
         
         # Handle invalid individuals
-        if objectives_np.ndim > 1:
-            valid_mask = ~np.any(np.isin(objectives_np, [-1e9, 1e9]), axis=1)
+        if objectives_tensor.ndim > 1:
+            valid_mask = ~torch.any(torch.isin(objectives_tensor, torch.tensor([-1e9, 1e9], device=objectives_tensor.device)), dim=1)
         else:
-            valid_mask = ~np.isin(objectives_np, [-1e9, 1e9])
+            valid_mask = ~torch.isin(objectives_tensor, torch.tensor([-1e9, 1e9], device=objectives_tensor.device))
         
-        stats['valid_individuals'] = int(np.sum(valid_mask))
+        stats['valid_individuals'] = int(torch.sum(valid_mask).item())
         
         if stats['valid_individuals'] > 0:
-            valid_objectives = objectives_np[valid_mask]
+            valid_objectives = objectives_tensor[valid_mask]
             
-            if valid_objectives.ndim == 1:
-                valid_objectives = valid_objectives.reshape(-1, 1)
+            if valid_objectives.dim() == 1:
+                valid_objectives = valid_objectives.view(-1, 1)
             
             # Per-objective statistics
             stats['objective_stats'] = {}
             for i in range(valid_objectives.shape[1]):
                 obj_values = valid_objectives[:, i]
                 stats['objective_stats'][f'obj_{i}'] = {
-                    'mean': float(np.mean(obj_values)),
-                    'std': float(np.std(obj_values)),
-                    'min': float(np.min(obj_values)),
-                    'max': float(np.max(obj_values)),
-                    'median': float(np.median(obj_values))
+                    'mean': float(obj_values.mean().item()),
+                    'std': float(obj_values.std().item()),
+                    'min': float(obj_values.min().item()),
+                    'max': float(obj_values.max().item()),
+                    'median': float(torch.median(obj_values).item())
                 }
             
             # Pareto front analysis for multi-objective
             if valid_objectives.shape[1] > 1:
-                pareto_front_mask = self._find_pareto_front(valid_objectives)
+                # [변경] 느린 _find_pareto_front 대신 최적화된 pareto_rank 사용
+                ranks, _ = self.evaluator.pareto_rank(valid_objectives.cpu().numpy(), device=valid_objectives.device)
+                pareto_front_mask = (ranks == 0)
+                
                 stats['pareto_front_size'] = int(np.sum(pareto_front_mask))
                 stats['pareto_front_ratio'] = stats['pareto_front_size'] / stats['valid_individuals']
                 
@@ -235,14 +244,14 @@ class Evolution:
                     for i in range(pareto_objectives.shape[1]):
                         obj_values = pareto_objectives[:, i]
                         stats['pareto_front_stats'][f'obj_{i}'] = {
-                            'mean': float(np.mean(obj_values)),
-                            'min': float(np.min(obj_values)),
-                            'max': float(np.max(obj_values))
+                            'mean': float(obj_values.mean().item()),
+                            'min': float(obj_values.min().item()),
+                            'max': float(obj_values.max().item())
                         }
             else:
                 # Single objective - best individual
-                best_idx = np.argmin(valid_objectives[:, 0])
-                stats['best_objective'] = float(valid_objectives[best_idx, 0])
+                best_idx = torch.argmin(valid_objectives[:, 0])
+                stats['best_objective'] = float(valid_objectives[best_idx, 0].item())
         
         return stats
     
@@ -256,25 +265,26 @@ class Evolution:
         if objectives.dim() == 1:
             return  # Single-objective에서는 아카이브 사용 안함
         
-        objectives_np = objectives.cpu().numpy()
-        population_tensor_np = self.population.population_tensor.cpu().numpy()
-        
+        population_tensor = self.population.population_tensor
+        device = objectives.device
+
         # Filter valid individuals
-        valid_mask = ~np.any(np.isin(objectives_np, [-1e9, 1e9]), axis=1)
-        if not np.any(valid_mask):
+        valid_mask = ~torch.any(torch.isin(objectives, torch.tensor([-1e9, 1e9], device=device)), dim=1)
+        if not torch.any(valid_mask):
             return
         
-        valid_objectives = objectives_np[valid_mask]
-        valid_individuals = population_tensor_np[valid_mask]
+        valid_objectives = objectives[valid_mask]
+        valid_individuals = population_tensor[valid_mask]
         
         # Initialize archive if first time
         if self.archive_objectives is None:
-            max_archive = min(self.archive_size, len(valid_objectives))
-            self.archive_objectives = np.full((self.archive_size, objectives_np.shape[1]), 1e9)
-            self.archive_individuals = np.zeros((self.archive_size, *population_tensor_np.shape[1:]))
+            self.archive_objectives = torch.full((self.archive_size, objectives.shape[1]), 1e9, device=device)
+            self.archive_individuals = torch.zeros((self.archive_size, *population_tensor.shape[1:]), device=device)
             
-            # Add initial non-dominated solutions
-            pareto_mask = self._find_pareto_front(valid_objectives)
+            # [변경] 최적화된 pareto_rank 사용
+            ranks, _ = self.evaluator.pareto_rank(valid_objectives.cpu().numpy(), device=device)
+            pareto_mask = torch.from_numpy(ranks == 0).to(device)
+            
             pareto_objectives = valid_objectives[pareto_mask]
             pareto_individuals = valid_individuals[pareto_mask]
             
@@ -289,17 +299,22 @@ class Evolution:
         current_archive_objectives = self.archive_objectives[:self.archive_count]
         current_archive_individuals = self.archive_individuals[:self.archive_count]
         
-        combined_objectives = np.vstack([current_archive_objectives, valid_objectives])
-        combined_individuals = np.vstack([current_archive_individuals, valid_individuals])
+        combined_objectives = torch.cat([current_archive_objectives, valid_objectives], dim=0)
+        combined_individuals = torch.cat([current_archive_individuals, valid_individuals], dim=0)
         
-        # Find non-dominated solutions in combined set
-        pareto_mask = self._find_pareto_front(combined_objectives)
+        # [변경] 최적화된 pareto_rank 및 crowding distance 사용
+        ranks, distances = self.evaluator.pareto_rank(combined_objectives.cpu().numpy(), device=device)
+        pareto_mask = torch.from_numpy(ranks == 0).to(device)
+        
         pareto_objectives = combined_objectives[pareto_mask]
         pareto_individuals = combined_individuals[pareto_mask]
+        pareto_distances = torch.from_numpy(distances[pareto_mask.cpu().numpy()]).to(device)
         
-        # If we have too many, use diversity-based selection
+        # If we have too many, use diversity-based selection (crowding distance)
         if len(pareto_objectives) > self.archive_size:
-            selected_indices = self._select_diverse_subset(pareto_objectives, self.archive_size)
+            # Sort by distance (descending) and take top `archive_size`
+            sorted_indices = torch.argsort(pareto_distances, descending=True)
+            selected_indices = sorted_indices[:self.archive_size]
             pareto_objectives = pareto_objectives[selected_indices]
             pareto_individuals = pareto_individuals[selected_indices]
         
@@ -312,79 +327,10 @@ class Evolution:
         if self.archive_count < self.archive_size:
             self.archive_objectives[self.archive_count:] = 1e9
     
-    def _find_pareto_front(self, objectives: np.ndarray) -> np.ndarray:
-        """
-        고속 비지배 정렬을 사용한 파레토 프론트 찾기
-        
-        Args:
-            objectives: [population_size, num_objectives] 목표 값들
-            
-        Returns:
-            pareto_mask: [population_size] 파레토 프론트 멤버의 불린 마스크
-        """
-        n = len(objectives)
-        pareto_mask = np.ones(n, dtype=bool)
-        
-        for i in range(n):
-            if not pareto_mask[i]:
-                continue
-            for j in range(n):
-                if i != j and pareto_mask[j]:
-                    if self._dominates(objectives[j], objectives[i]):
-                        pareto_mask[i] = False
-                        break
-        
-        return pareto_mask
+    # [삭제] 아래의 느린 Python 기반 Pareto 및 거리 계산 함수들을 제거합니다.
+    # _find_pareto_front, _dominates, _select_diverse_subset, _calculate_crowding_distances
     
-    def _dominates(self, obj1: np.ndarray, obj2: np.ndarray) -> bool:
-        """obj1이 obj2를 파레토 지배하는지 확인 (최소화 기준)"""
-        return np.all(obj1 <= obj2) and np.any(obj1 < obj2)
-    
-    def _select_diverse_subset(self, objectives: np.ndarray, target_size: int) -> np.ndarray:
-        """
-        크라우딩 거리를 사용한 다양한 부분집합 선택
-        
-        Args:
-            objectives: [population_size, num_objectives] 목표 값들
-            target_size: 선택할 솔루션 수
-            
-        Returns:
-            selected_indices: 선택된 솔루션들의 인덱스
-        """
-        if len(objectives) <= target_size:
-            return np.arange(len(objectives))
-        
-        # Calculate crowding distances
-        distances = self._calculate_crowding_distances(objectives)
-        
-        # Select individuals with highest crowding distances
-        selected_indices = np.argsort(distances)[-target_size:]
-        
-        return selected_indices
-    
-    def _calculate_crowding_distances(self, objectives: np.ndarray) -> np.ndarray:
-        """다양성 추정을 위한 크라우딩 거리 계산"""
-        n, m = objectives.shape
-        distances = np.zeros(n)
-        
-        for obj_idx in range(m):
-            sorted_indices = np.argsort(objectives[:, obj_idx])
-            
-            # Boundary points get maximum distance
-            distances[sorted_indices[0]] = float('inf')
-            distances[sorted_indices[-1]] = float('inf')
-            
-            # Normalize by range
-            obj_range = objectives[sorted_indices[-1], obj_idx] - objectives[sorted_indices[0], obj_idx]
-            if obj_range > 1e-8:
-                for i in range(1, n - 1):
-                    distance = (objectives[sorted_indices[i + 1], obj_idx] - 
-                              objectives[sorted_indices[i - 1], obj_idx]) / obj_range
-                    distances[sorted_indices[i]] += distance
-        
-        return distances
-    
-    def _enhance_diversity(self, offspring: torch.Tensor, elites: torch.Tensor, device: str) -> torch.Tensor:
+    def _enhance_diversity(self, offspring: torch.Tensor, elites: torch.Tensor, device: torch.device) -> torch.Tensor:
         """
         추가 메커니즘을 통한 집단 다양성 향상
         
@@ -447,19 +393,19 @@ class Evolution:
         
         return diversity_score
     
-    def get_archive_solutions(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def get_archive_solutions(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         외부 아카이브에서 솔루션들 가져오기
         
         Returns:
-            archive_objectives: [archive_count, num_objectives] 아카이브 목표값들
-            archive_individuals: [archive_count, ...] 아카이브 개체들
+            archive_objectives: [archive_count, num_objectives] 아카이브 목표값들 (Tensor)
+            archive_individuals: [archive_count, ...] 아카이브 개체들 (Tensor)
         """
         if self.archive_objectives is None or self.archive_count == 0:
             return None, None
         
-        return (self.archive_objectives[:self.archive_count].copy(),
-                self.archive_individuals[:self.archive_count].copy())
+        return (self.archive_objectives[:self.archive_count].clone(),
+                self.archive_individuals[:self.archive_count].clone())
     
     def get_generation_statistics(self) -> List[Dict]:
         """모든 세대 통계 가져오기"""
@@ -475,8 +421,8 @@ class Evolution:
         """아카이브를 포함한 진화 상태 저장"""
         state = {
             'population_tensor': self.population.population_tensor,
-            'archive_objectives': self.archive_objectives,
-            'archive_individuals': self.archive_individuals,
+            'archive_objectives': self.archive_objectives.cpu() if self.archive_objectives is not None else None,
+            'archive_individuals': self.archive_individuals.cpu() if self.archive_individuals is not None else None,
             'archive_count': self.archive_count,
             'generation_stats': self.generation_stats,
             'archive_size': self.archive_size,
@@ -487,10 +433,11 @@ class Evolution:
     def load_state(self, filepath: str):
         """아카이브를 포함한 진화 상태 로드"""
         state = torch.load(filepath)
+        device = self.population.population_tensor.device
         
-        self.population.population_tensor = state['population_tensor']
-        self.archive_objectives = state.get('archive_objectives')
-        self.archive_individuals = state.get('archive_individuals')
+        self.population.population_tensor = state['population_tensor'].to(device)
+        self.archive_objectives = state.get('archive_objectives').to(device) if state.get('archive_objectives') is not None else None
+        self.archive_individuals = state.get('archive_individuals').to(device) if state.get('archive_individuals') is not None else None
         self.archive_count = state.get('archive_count', 0)
         self.generation_stats = state.get('generation_stats', [])
         

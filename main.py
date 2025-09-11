@@ -200,8 +200,8 @@ def main():
             max_nodes=ga_cfg['population']['max_nodes'],
             mode=op_cfg['crossover']['subtree_crossover']['mode']
         ),
+        RootBranchCrossover(max_nodes=ga_cfg['population']['max_nodes']),
         NodeCrossover(mode=op_cfg['crossover']['node_crossover']['mode']),
-        RootBranchCrossover(max_nodes=ga_cfg['population']['max_nodes'])
     ]
     crossover_op = ChainCrossover(crossovers=crossover_ops, weights=op_cfg['crossover']['weights'])
 
