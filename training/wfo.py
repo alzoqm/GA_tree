@@ -3,9 +3,11 @@
 import numpy as np
 import torch
 import pandas as pd
+import logging
 from typing import List, Tuple, Optional, Dict, Any
 
 from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+from utils.checkpoint_manager import CheckpointManager
 
 
 def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config: dict) -> np.ndarray:
@@ -207,6 +209,82 @@ class WalkForwardOptimizer:
         ranked_candidates = [candidate_ids[i] for i in sort_indices]
         return ranked_candidates, aggregated_matrix[sort_indices]
 
+    def save_wfo_state(self, checkpoint_manager: CheckpointManager, current_window: int, total_windows: int) -> None:
+        """Save WFO state for resumption."""
+        wfo_state = {
+            "candidate_archives": {
+                str(k): {str(win_k): win_v.tolist() for win_k, win_v in v.items()}
+                for k, v in self.candidate_archives.items()
+            },
+            "candidate_chromosomes_keys": list(self.candidate_chromosomes.keys()),
+            "window_results": self.window_results,
+            "current_window": current_window,
+            "total_windows": total_windows,
+        }
+        
+        try:
+            checkpoint_manager.save_main_checkpoint(
+                current_window=current_window,
+                total_windows=total_windows,
+                completed_generations=0,  # Will be updated by generation training
+                wfo_state=wfo_state,
+            )
+            
+            # Save candidate chromosomes separately
+            for candidate_id, chromosome in self.candidate_chromosomes.items():
+                checkpoint_path = checkpoint_manager.checkpoint_dir / f"candidate_{candidate_id}.pth"
+                torch.save(chromosome, checkpoint_path)
+                
+        except Exception as e:
+            logging.error(f"Failed to save WFO state: {e}")
+
+    def load_wfo_state(self, checkpoint_manager: CheckpointManager) -> Optional[Tuple[int, int]]:
+        """Load WFO state for resumption. Returns (current_window, total_windows) if successful."""
+        try:
+            main_checkpoint = checkpoint_manager.load_main_checkpoint()
+            if not main_checkpoint:
+                return None
+            
+            wfo_state = main_checkpoint.get("wfo_state", {})
+            if not wfo_state:
+                return None
+            
+            # Restore candidate archives
+            self.candidate_archives = {}
+            for cand_id_str, win_dict in wfo_state.get("candidate_archives", {}).items():
+                cand_id = int(cand_id_str)
+                self.candidate_archives[cand_id] = {}
+                for win_idx_str, objectives_list in win_dict.items():
+                    win_idx = int(win_idx_str)
+                    self.candidate_archives[cand_id][win_idx] = np.array(objectives_list)
+            
+            # Restore candidate chromosomes
+            self.candidate_chromosomes = {}
+            for candidate_id in wfo_state.get("candidate_chromosomes_keys", []):
+                checkpoint_path = checkpoint_manager.checkpoint_dir / f"candidate_{candidate_id}.pth"
+                if checkpoint_path.exists():
+                    self.candidate_chromosomes[candidate_id] = torch.load(checkpoint_path, weights_only=False)
+            
+            # Restore other state
+            self.window_results = wfo_state.get("window_results", [])
+            
+            current_window = wfo_state.get("current_window", 0)
+            total_windows = wfo_state.get("total_windows", 0)
+            
+            logging.info(f"Restored WFO state: window {current_window}/{total_windows}, "
+                        f"{len(self.candidate_archives)} candidates")
+            
+            return current_window, total_windows
+            
+        except Exception as e:
+            logging.error(f"Failed to load WFO state: {e}")
+            return None
+
+    def should_skip_window(self, window_idx: int, checkpoint_manager: CheckpointManager) -> bool:
+        """Check if a window should be skipped during resumption."""
+        completed_windows = checkpoint_manager.get_completed_windows()
+        return window_idx in completed_windows
+
     # --- High-level orchestration moved from main.py ---
     def run(
         self,
@@ -218,6 +296,7 @@ class WalkForwardOptimizer:
         wfo_cfg: dict,
         wandb_cfg: Optional[dict] = None,
         output_dir: Optional[str] = None,
+        checkpoint_manager: Optional[CheckpointManager] = None,
     ) -> Tuple[Optional['torch.Tensor'], Optional[np.ndarray], List[Tuple[int, int, int, int]]]:
         """Execute Walk-Forward Optimization and return best chromosomes and metrics.
 
@@ -236,8 +315,23 @@ class WalkForwardOptimizer:
             return None, None, []
 
         population = evolution_engine.population
+        
+        # Handle resumption if checkpoint manager is provided
+        start_window_idx = 0
+        if checkpoint_manager is not None:
+            resumption_state = self.load_wfo_state(checkpoint_manager)
+            if resumption_state is not None:
+                current_window, total_windows = resumption_state
+                if current_window < len(windows):
+                    start_window_idx = current_window
+                    logging.info(f"Resuming WFO from window {start_window_idx}")
+                else:
+                    logging.info("All windows already completed, starting final aggregation")
+                    start_window_idx = len(windows)
+            else:
+                logging.info("No valid checkpoint found, starting from beginning")
 
-        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows, desc="WFO Windows")):
+        for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows[start_window_idx:], desc="WFO Windows", initial=start_window_idx, total=len(windows)), start=start_window_idx):
             # Per-window checkpoint directory
             window_checkpoint_dir = os.path.join(output_dir or env_cfg['output_dir'], 'checkpoints', f'wf_window_{window_idx}')
             os.makedirs(window_checkpoint_dir, exist_ok=True)
@@ -266,6 +360,8 @@ class WalkForwardOptimizer:
                 evaluation_config=window_eval_config,
                 output_dir=window_checkpoint_dir,
                 wandb_config=wandb_cfg,
+                checkpoint_manager=checkpoint_manager,
+                window_idx=window_idx,
             )
 
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:
@@ -311,6 +407,10 @@ class WalkForwardOptimizer:
                 population.population_tensor[:elite_size].copy_(window_best_chromosomes[:elite_size])
                 population.set_next_idx()
                 population.initialized = True
+            
+            # Save WFO checkpoint after completing each window
+            if checkpoint_manager is not None:
+                self.save_wfo_state(checkpoint_manager, window_idx + 1, len(windows))
 
         # Final aggregation
         if not self.candidate_archives:

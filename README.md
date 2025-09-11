@@ -22,6 +22,22 @@ python main.py
 ```
 Executes the complete training pipeline including data download, feature generation, GA population initialization, evolution, and testing. All configuration is controlled via `experiment_config.yaml`.
 
+### Training Resumption
+Resume training from the latest checkpoint:
+```bash
+python main.py --resume
+```
+
+Clear all checkpoints and start fresh:
+```bash
+python main.py --clear-checkpoints
+```
+
+Use custom configuration file:
+```bash
+python main.py --config my_config.yaml --resume
+```
+
 ### Run Individual Tests
 ```bash
 python test_code/test_predict.py  # Test prediction functionality
@@ -106,6 +122,7 @@ python tools/analyze_best.py -c experiment_config.yaml
 - Feature classification rules (feature_num, feature_comparison, feature_bool)
 - Data paths and training/test split ratios
 - Environment settings (device, seed, output directories)
+- Training resumption settings (auto_resume, checkpoint_frequency, cleanup options)
 
 **data/feature_config.yaml**
 - Technical indicator configurations
@@ -161,6 +178,15 @@ Trading actions include:
 - Best population saved as `best_population.pth` for evaluation
 - Resumable experiments via checkpoint loading
 
+### Training Resumption System
+- **Hierarchical Checkpoints**: Main training state → WFO windows → Generation-level saves
+- **Robust Recovery**: Resume from any completed generation or WFO window
+- **WFO Continuity**: Preserves candidate archives and window progress across interruptions
+- **Wandb Integration**: Automatically resumes original experiment runs for seamless logging
+- **Configuration Validation**: Ensures compatibility between checkpoints and current config
+- **Memory Efficient**: Separate tensor storage with automatic cleanup of old checkpoints
+- **Production Ready**: Full CUDA support with graceful error handling
+
 ## File Structure Notes
 
 - `csrc/`: C++/CUDA source files for GPU acceleration
@@ -182,6 +208,49 @@ Trading actions include:
 - Model configuration: `model_test_config.yaml`
 - Results saved to `output_dir` (default: `results/exp_default/`)
 - Checkpoints and best population preserved for analysis
+
+## Training Resumption Configuration
+
+Add the following section to your `experiment_config.yaml`:
+
+```yaml
+# Training Resumption Settings
+resumption:
+  auto_resume: false              # Automatically detect and resume if possible
+  checkpoint_frequency: 1         # Save checkpoints every N generations
+  cleanup_old_checkpoints: true   # Automatically clean up old checkpoints
+  keep_last_n_generations: 5     # Number of recent generation checkpoints to keep
+  strict_validation: true         # Enable strict config/data compatibility checking
+```
+
+### Checkpoint Structure
+```
+results/exp_default/checkpoints/
+├── main_checkpoint.json              # Main training state
+├── candidate_*.pth                   # WFO candidate chromosomes
+└── wf_window_*/                      # Per-window checkpoints
+    ├── generation_*.json             # Generation metadata
+    ├── population_*_gen_*.pth        # Population tensors
+    ├── best_chromosomes_gen_*.pth    # Best chromosomes
+    └── best_objectives_gen_*.pth     # Best objectives
+```
+
+### Resumption Process
+1. **Detection**: System checks for existing checkpoints in output directory
+2. **Validation**: Verifies configuration and data compatibility  
+3. **Restoration**: Loads WFO state, population, and training progress
+4. **Continuation**: Resumes training from the last completed window/generation
+
+### Testing Resumption
+Run the resumption test suite:
+```bash
+python test_resumption.py
+```
+
+### Troubleshooting
+- **"No valid checkpoint found"**: Ensure checkpoint directory exists and has proper permissions
+- **"Configuration has changed"**: Set `strict_validation: false` for minor config changes
+- **"Wandb run not accessible"**: System will automatically create new run as fallback
 
 ## Dependencies
 

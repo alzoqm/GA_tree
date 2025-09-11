@@ -4,12 +4,14 @@ import os
 import numpy as np
 import torch
 import pandas as pd
+import logging
 from typing import Optional, Tuple, Dict, Any
 from tqdm import tqdm
 
 from models.model import GATreePop
 from training.predictor import build_adjacency_list_cuda
 from fitness.simulator import FitnessSimulator
+from utils.checkpoint_manager import CheckpointManager
 
 
 # --- Internal helpers to keep responsibilities separated ---
@@ -156,7 +158,11 @@ def _save_generation_checkpoint(
     generation_summary: Dict,
     objectives_config: dict,
     evolution: Any,
+    checkpoint_manager: Optional[CheckpointManager] = None,
+    window_idx: Optional[int] = None,
 ) -> None:
+    """Save generation checkpoint with enhanced resumption support."""
+    # Legacy checkpoint format for compatibility
     checkpoint_data = {
         "generation": gen_idx,
         "population_state_dict": population.population_tensor.cpu(),
@@ -168,6 +174,94 @@ def _save_generation_checkpoint(
     }
     checkpoint_path = os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt')
     torch.save(checkpoint_data, checkpoint_path)
+    
+    # Enhanced checkpoint using CheckpointManager
+    if checkpoint_manager is not None and window_idx is not None:
+        try:
+            # Prepare population state for serialization
+            population_state = {
+                "population_tensor": population.population_tensor.cpu(),
+                "pop_size": population.pop_size,
+                "max_nodes": population.max_nodes,
+                "max_depth": population.max_depth,
+                "max_children": population.max_children,
+                "initialized": population.initialized,
+                "feature_num": population.feature_num,
+                "feature_comparison_map": population.feature_comparison_map,
+                "feature_bool": population.feature_bool,
+                "all_features": population.all_features,
+            }
+            
+            # Prepare evolution state
+            evolution_state = {
+                "generation_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {},
+                "parent_size": getattr(evolution, 'parent_size', None),
+                "num_elites": getattr(evolution, 'num_elites', None),
+            }
+            
+            checkpoint_manager.save_window_checkpoint(
+                window_idx=window_idx,
+                generation=gen_idx,
+                population_state=population_state,
+                best_chromosomes=best_chromosomes.cpu() if best_chromosomes is not None else None,
+                best_objectives=best_objectives,
+                evolution_state=evolution_state,
+                generation_stats=generation_summary,
+                objectives_config=objectives_config,
+            )
+        except Exception as e:
+            logging.warning(f"Failed to save enhanced checkpoint: {e}")
+
+
+def load_generation_checkpoint(
+    checkpoint_manager: CheckpointManager,
+    window_idx: int,
+    generation: int,
+    config: Dict[str, Any]
+) -> Optional[Tuple[GATreePop, Optional[torch.Tensor], Optional[np.ndarray], Dict]]:
+    """Load generation checkpoint for resumption."""
+    try:
+        checkpoint_data = checkpoint_manager.load_window_checkpoint(window_idx, generation)
+        if checkpoint_data is None:
+            return None
+        
+        # Reconstruct population
+        population_state = checkpoint_data.get("population_state", {})
+        if not population_state:
+            logging.error(f"No population state found in checkpoint window {window_idx}, gen {generation}")
+            return None
+        
+        # Create new population instance
+        population = GATreePop(
+            pop_size=population_state["pop_size"],
+            max_nodes=population_state["max_nodes"],
+            max_depth=population_state["max_depth"],
+            max_children=population_state["max_children"],
+            feature_num=population_state["feature_num"],
+            feature_comparison_map=population_state["feature_comparison_map"],
+            feature_bool=population_state["feature_bool"],
+            all_features=population_state["all_features"],
+        )
+        
+        # Load population tensor
+        population.population_tensor = population_state["population_tensor"]
+        population.initialized = population_state.get("initialized", True)
+        population.set_next_idx()
+        
+        # Load best chromosomes and objectives
+        best_chromosomes = checkpoint_data.get("best_chromosomes")
+        best_objectives = checkpoint_data.get("best_objectives")
+        
+        # Load evolution state
+        evolution_state = checkpoint_data.get("evolution_state", {})
+        
+        logging.info(f"Successfully loaded checkpoint: window {window_idx}, generation {generation}")
+        
+        return population, best_chromosomes, best_objectives, evolution_state
+        
+    except Exception as e:
+        logging.error(f"Failed to load generation checkpoint: {e}")
+        return None
 
 
 def generation_training(
@@ -187,6 +281,8 @@ def generation_training(
     best_archive=None,
     start_gen: int = 0,
     wandb_config: Optional[Dict] = None,
+    checkpoint_manager: Optional[CheckpointManager] = None,
+    window_idx: Optional[int] = None,
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """
     Generation training loop using the decoupled FitnessSimulator.
@@ -267,6 +363,8 @@ def generation_training(
             generation_summary=generation_summary,
             objectives_config=objectives_config,
             evolution=evolution,
+            checkpoint_manager=checkpoint_manager,
+            window_idx=window_idx,
         )
 
         evolution.evolve(train_objectives_tensor)
