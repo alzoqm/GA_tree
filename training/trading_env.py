@@ -4,6 +4,7 @@
 import torch
 import numpy as np
 import pandas as pd
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
@@ -43,7 +44,37 @@ class TradingEnvironment:
         # === 원본 거래 환경 설정 완전 보존 ===
         self.taker_fee_rate = env_config['taker_fee_rate']
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
-        self.fixed_slippage_rate = env_config['fixed_slippage_rate']
+        
+        # === 슬리피지 설정 (동적 슬리피지 지원) ===
+        slippage_config = env_config.get('slippage', {})
+        self.slippage_mode = slippage_config.get('mode', 'fixed')
+        
+        if self.slippage_mode == 'fixed':
+            # 기존 고정 슬리피지 (backward compatibility)
+            self.fixed_slippage_rate = slippage_config.get('fixed_rate', env_config.get('fixed_slippage_rate', 0.0005))
+        elif self.slippage_mode == 'relative_volatility':
+            # 상대 변동성 기반 동적 슬리피지
+            self.base_slippage_rate = slippage_config.get('base_rate', 0.0001)
+            self.atr_ma_window = slippage_config.get('atr_ma_window', 50)
+            self.min_slippage = slippage_config.get('min_slippage', 0.00005)
+            self.max_slippage = slippage_config.get('max_slippage', 0.002)
+            
+            # ATR 컬럼 설정 (사용자 지정 또는 자동 감지)
+            self.atr_column_config = slippage_config.get('atr_column')
+            self.atr_ma_column_config = slippage_config.get('atr_ma_column')
+            self.atr_pattern = slippage_config.get('atr_pattern', r'ATR_\d+.*')
+            self.atr_ma_pattern = slippage_config.get('atr_ma_pattern', r'ATR_\d+.*_MA_\d+')
+            
+            # 실제 컬럼명은 첫 번째 step에서 감지됨
+            self.atr_column = None
+            self.atr_ma_column = None
+            self._columns_detected = False
+        else:
+            raise ValueError(f"Unknown slippage mode: {self.slippage_mode}")
+        
+        # 기존 호환성을 위해 fixed_slippage_rate를 유지 (fixed 모드에서만 사용)
+        if not hasattr(self, 'fixed_slippage_rate'):
+            self.fixed_slippage_rate = 0.0005
         # Mark price / equity options
         self.use_real_mark_price = env_config.get('use_real_mark_price', False)
         self.equity_mtm_basis = env_config.get('equity_mtm_basis', 'mark_proxy')  # 'mark_price' | 'mark_proxy'
@@ -221,9 +252,14 @@ class TradingEnvironment:
     def _snapshot_state_for_dedup(self) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.pos_list.clone(), self.enter_ratio.clone()
 
-    def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price):
+    def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price, market_data_row=None):
+        # 동적 슬리피지 계산 (market_data_row가 제공된 경우)
+        slippage_rate = None
+        if market_data_row is not None:
+            slippage_rate = self._calculate_dynamic_slippage(market_data_row)
+        
         if str(self.device).startswith('cuda'):
-            used_cuda = self._execute_actions(actions, exec_base_price)
+            used_cuda = self._execute_actions(actions, exec_base_price, slippage_rate)
             if not used_cuda:
                 raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
         else:
@@ -319,6 +355,149 @@ class TradingEnvironment:
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
         self.profit.zero_()
         self.last_timestamp = timestamp
+
+    def _detect_atr_columns(self, market_data_row) -> Tuple[str, str]:
+        """
+        시장 데이터에서 사용 가능한 ATR 및 ATR-MA 컬럼을 자동 감지합니다.
+        
+        Args:
+            market_data_row: 시장 데이터 행 (pandas Series)
+            
+        Returns:
+            Tuple[str, str]: (atr_column_name, atr_ma_column_name)
+            
+        Raises:
+            ValueError: 적절한 ATR 컬럼을 찾지 못한 경우
+        """
+        available_columns = list(market_data_row.index)
+        
+        # 1. 사용자가 명시적으로 지정한 컬럼 사용
+        if self.atr_column_config and self.atr_ma_column_config:
+            if (self.atr_column_config in available_columns and 
+                self.atr_ma_column_config in available_columns):
+                print(f"Using user-specified ATR columns: {self.atr_column_config}, {self.atr_ma_column_config}")
+                return self.atr_column_config, self.atr_ma_column_config
+            else:
+                print(f"Warning: User-specified columns not found. Falling back to auto-detection.")
+        
+        # 2. 패턴 매칭을 통한 자동 감지
+        atr_candidates = [col for col in available_columns if re.match(self.atr_pattern, col)]
+        atr_ma_candidates = [col for col in available_columns if re.match(self.atr_ma_pattern, col)]
+        
+        if not atr_candidates:
+            raise ValueError(
+                f"No ATR columns found matching pattern '{self.atr_pattern}'. "
+                f"Available columns: {[col for col in available_columns if 'ATR' in col]}"
+            )
+        
+        if not atr_ma_candidates:
+            raise ValueError(
+                f"No ATR-MA columns found matching pattern '{self.atr_ma_pattern}'. "
+                f"Available ATR-related columns: {[col for col in available_columns if 'ATR' in col]}"
+            )
+        
+        # 3. 최적의 ATR/ATR-MA 쌍 찾기
+        best_atr = None
+        best_atr_ma = None
+        
+        # ATR 컬럼 우선순위 (일반적인 윈도우 크기 순서)
+        preferred_windows = [14, 7, 21, 28, 20, 10]
+        
+        for window in preferred_windows:
+            for atr_col in atr_candidates:
+                if f'_{window}' in atr_col or atr_col.endswith(str(window)):
+                    # 해당 ATR에 맞는 MA 컬럼 찾기 (정확한 prefix 매칭)
+                    matching_ma = [ma_col for ma_col in atr_ma_candidates 
+                                   if ma_col.startswith(atr_col + '_MA_')]
+                    
+                    # 우선적으로 설정된 MA 윈도우와 일치하는 컬럼 찾기
+                    preferred_ma = [ma_col for ma_col in matching_ma 
+                                    if f'_MA_{self.atr_ma_window}' in ma_col]
+                    
+                    if preferred_ma:
+                        best_atr = atr_col
+                        best_atr_ma = preferred_ma[0]
+                        break
+                    elif matching_ma:
+                        # 선호하는 MA 윈도우가 없으면 첫 번째 매칭 사용
+                        best_atr = atr_col
+                        best_atr_ma = matching_ma[0]
+                        break
+            
+            if best_atr and best_atr_ma:
+                break
+        
+        # 4. 기본 매칭 시도 (우선순위 매칭이 실패한 경우)
+        if not best_atr or not best_atr_ma:
+            # 첫 번째 ATR 컬럼과 매칭되는 MA 컬럼 찾기
+            for atr_col in sorted(atr_candidates):
+                # ATR 컬럼에서 기본 부분 추출 (예: ATR_7_5m -> ATR_7_5m)
+                matching_ma = [ma_col for ma_col in atr_ma_candidates 
+                               if ma_col.startswith(atr_col + '_MA_')]
+                if matching_ma:
+                    best_atr = atr_col
+                    best_atr_ma = matching_ma[0]
+                    break
+        
+        if not best_atr or not best_atr_ma:
+            raise ValueError(
+                f"Could not find matching ATR/ATR-MA column pair. "
+                f"ATR candidates: {atr_candidates}, ATR-MA candidates: {atr_ma_candidates}"
+            )
+        
+        print(f"Auto-detected ATR columns: {best_atr}, {best_atr_ma}")
+        return best_atr, best_atr_ma
+
+    def _calculate_dynamic_slippage(self, market_data_row) -> float:
+        """
+        상대 변동성 기반 동적 슬리피지를 계산합니다.
+        
+        Args:
+            market_data_row: 현재 시점의 시장 데이터 행 (pandas Series)
+        
+        Returns:
+            float: 계산된 슬리피지 비율
+        """
+        if self.slippage_mode != 'relative_volatility':
+            return self.fixed_slippage_rate
+        
+        # 첫 번째 호출 시 컬럼 감지
+        if not self._columns_detected:
+            try:
+                self.atr_column, self.atr_ma_column = self._detect_atr_columns(market_data_row)
+                self._columns_detected = True
+            except ValueError as e:
+                print(f"ATR column detection failed: {e}")
+                print("Falling back to fixed slippage mode.")
+                return self.fixed_slippage_rate
+        
+        try:
+            # ATR과 ATR 이동평균 값 추출
+            current_atr = market_data_row.get(self.atr_column)
+            atr_ma = market_data_row.get(self.atr_ma_column)
+            
+            # 데이터 유효성 검사
+            if current_atr is None or atr_ma is None:
+                print(f"Warning: Missing ATR data columns ({self.atr_column}, {self.atr_ma_column}). Using base slippage rate.")
+                return self.base_slippage_rate
+            
+            if pd.isna(current_atr) or pd.isna(atr_ma) or atr_ma <= 0:
+                return self.base_slippage_rate
+            
+            # 변동성 비율 계산: 현재 ATR / ATR 이동평균
+            volatility_ratio = float(current_atr) / float(atr_ma)
+            
+            # 동적 슬리피지 계산: 기본 비율 * 변동성 비율
+            dynamic_slippage = self.base_slippage_rate * volatility_ratio
+            
+            # 최소/최대 한계 적용
+            final_slippage = max(self.min_slippage, min(self.max_slippage, dynamic_slippage))
+            
+            return final_slippage
+            
+        except Exception as e:
+            print(f"Error in dynamic slippage calculation: {e}. Using base slippage rate.")
+            return self.base_slippage_rate
 
     def _update_dedup_buffers_after_exec(
         self,
@@ -806,7 +985,7 @@ class TradingEnvironment:
             self.trade_realized_pnl[flip_to_long_mask] = 0.0
 
 
-    def _execute_actions(self, actions_tensor, exec_base_price):
+    def _execute_actions(self, actions_tensor, exec_base_price, slippage_rate=None):
         """CUDA 커널로 액션 실행 (Thread-per-individual)."""
         try:
             import gatree_cuda_compat as gatree_cuda
@@ -820,10 +999,14 @@ class TradingEnvironment:
         if not str(self.device).startswith('cuda'):
             return False
 
+        # Use provided slippage rate or fall back to fixed rate
+        if slippage_rate is None:
+            slippage_rate = self.fixed_slippage_rate
+
         # Ensure tensors are on CUDA and contiguous
         actions = actions_tensor.to(self.device).contiguous()
-        buy_exec_price = float((exec_base_price * (1 + self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 + self.fixed_slippage_rate))
-        sell_exec_price = float((exec_base_price * (1 - self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 - self.fixed_slippage_rate))
+        buy_exec_price = float((exec_base_price * (1 + slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 + slippage_rate))
+        sell_exec_price = float((exec_base_price * (1 - slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 - slippage_rate))
 
         # CPU 비교 디버그는 제거됨 (Python 경로 삭제)
 
@@ -887,7 +1070,7 @@ class TradingEnvironment:
         self._check_liquidation(state.low, state.high)
         actions, raw_actions = self._prepare_and_deduplicate_actions(predicted_actions)
         pos_before, er_before = self._snapshot_state_for_dedup()
-        self._execute_actions_wrapper(actions, state.exec_base_price)
+        self._execute_actions_wrapper(actions, state.exec_base_price, market_data)
         self._update_holding_periods()
         self._accumulate_realized_pnl_and_stats()
         total_unreal = self._compute_unrealized_pnl(state.mark_t)

@@ -101,6 +101,11 @@
     - {window: 7}
     - {window: 14}
     - {window: 28}
+  calculate_atr_moving_average:
+    - {atr_window: 7, ma_window: 14}   # Match user's ATR_7_5m_MA_14 pattern
+    - {atr_window: 7, ma_window: 50}   # Alternative for ATR_7
+    - {atr_window: 14, ma_window: 50}  # Primary ATR-MA for dynamic slippage
+    - {atr_window: 28, ma_window: 50}  # Alternative ATR-MA
   calculate_natr:
     - {window: 14}
     - {window: 28}
@@ -245,6 +250,10 @@
     - {window: 7}
     - {window: 14}
     - {window: 28}
+  calculate_atr_moving_average:
+    - {atr_window: 7, ma_window: 14}   # For timeframe-specific patterns
+    - {atr_window: 14, ma_window: 50}  # Standard ATR-MA
+    - {atr_window: 28, ma_window: 50}  # Alternative ATR-MA
   calculate_natr:
     - {window: 14}
     - {window: 28}
@@ -390,6 +399,10 @@
     - {window: 14}
     - {window: 20}
     - {window: 28}
+  calculate_atr_moving_average:
+    - {atr_window: 14, ma_window: 50}  # Standard ATR-MA for 1h timeframe
+    - {atr_window: 20, ma_window: 50}  # Alternative ATR-MA 
+    - {atr_window: 28, ma_window: 50}  # Long-term ATR-MA
   calculate_natr:
     - {window: 14}
     - {window: 28}

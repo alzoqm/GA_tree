@@ -132,7 +132,22 @@ evaluation:
   simulation_env:
     taker_fee_rate: 0.0004
     maintenance_margin_rate: 0.005
-    fixed_slippage_rate: 0.0005
+    # === Slippage Configuration ===
+    slippage:
+      mode: 'relative_volatility'  # 'fixed' or 'relative_volatility'
+      # Fixed mode parameters (backward compatibility)
+      fixed_rate: 0.0005
+      # Relative volatility mode parameters
+      base_rate: 0.0001           # Minimum slippage in calm markets (0.01%)
+      atr_ma_window: 50           # Lookback period for ATR moving average
+      min_slippage: 0.00005       # Floor cap (0.005%)
+      max_slippage: 0.002         # Ceiling cap (0.2%)
+      # ATR column configuration (optional - auto-detect if not specified)
+      atr_column: ATR_7_5m            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
+      atr_ma_column: ATR_7_5m_MA_14         # e.g., 'ATR_7_5m_MA_50' - auto-detect if null  
+      # Auto-detection patterns (used when columns are null)
+      atr_pattern: 'ATR_\\d+.*'   # Regex pattern to match ATR columns
+      atr_ma_pattern: 'ATR_\\d+.*_MA_\\d+' # Regex pattern to match ATR-MA columns
     # Leverage bounds
     max_leverage: 100
     # Mark price / equity options

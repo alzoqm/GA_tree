@@ -312,6 +312,31 @@ def calculate_natr(df, window):
     df[col_name] = talib.NATR(high_price, low_price, close_price, timeperiod=window)
     return df, [col_name]
 
+def calculate_atr_moving_average(df, atr_window, ma_window):
+    """
+    ATR의 Simple Moving Average를 계산합니다.
+    동적 슬리피지 계산을 위한 "정상" 변동성 기준을 제공합니다.
+    
+    Args:
+        df: 데이터프레임
+        atr_window: 기존 ATR 계산에 사용된 윈도우
+        ma_window: ATR의 이동평균을 계산할 윈도우
+    
+    Returns:
+        tuple: (업데이트된 데이터프레임, 새로운 컬럼명 리스트)
+    """
+    atr_col = format_col_name('ATR', atr_window)
+    new_col = format_col_name('ATR', f"{atr_window}_MA_{ma_window}")
+    
+    if atr_col not in df.columns:
+        print(f"Warning: ATR column '{atr_col}' not found. Skipping ATR moving average calculation.")
+        return df, []
+    
+    # ATR의 Simple Moving Average 계산
+    df[new_col] = df[atr_col].rolling(window=ma_window, min_periods=1).mean()
+    
+    return df, [new_col]
+
 # ==============================================================================
 # 5. 거래량 (Volume) 지표 (TA-Lib 적용)
 # ==============================================================================
