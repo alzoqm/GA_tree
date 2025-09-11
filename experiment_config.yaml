@@ -170,10 +170,12 @@ evaluation:
   
   # === WFO 미사용시 기본 목표 설정 (호환성) ===
   objectives:
-    objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "win_rate"]
+    objectives: ["mean_return", "max_drawdown", "psr", "win_rate"]
     minimize: [false, true, false, false]
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
+    psr_sr_benchmark: 0.0
     # Advanced metrics params (optional)
     mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
     benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
@@ -181,9 +183,12 @@ evaluation:
   # === WFO 사용시 목표 설정 ===
   # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
   is_objectives:
-    objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "complexity"]
+    # Use PSR instead of raw Sharpe during evolution
+    objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
     minimize: [false, true, false, true]
     normalization: "minmax"
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.0
     
   # Simulator-side complexity composition
   complexity:
@@ -198,6 +203,7 @@ evaluation:
       "mean_return",
       "max_drawdown",
       "sharpe_ratio",
+      "psr",
       "win_rate",
       "profit_factor",
       "calmar_ratio",
@@ -212,6 +218,7 @@ evaluation:
       false,  # mean_return (maximize)
       true,   # max_drawdown (minimize)
       false,  # sharpe_ratio (maximize)
+      false,  # psr (maximize)
       false,  # win_rate (maximize)
       false,  # profit_factor (maximize)
       false,  # calmar_ratio (maximize)
@@ -225,6 +232,8 @@ evaluation:
     normalization: "minmax"
     risk_free_rate: 0.0
     volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.0
     # Advanced metrics params (optional)
     mar: 0.0
     benchmark_mode: "close_to_next_open"
@@ -232,9 +241,14 @@ evaluation:
   # 집계된 OOS 목표 (최종 모델 선택용)
   oos_aggregate:
     # 확장된 OOS 지표 순서에 맞춰 안전하게 집계 (표준편차 제거로 라벨 불일치 방지)
-    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_sharpe", "oos_consistency"]
+    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_psr", "oos_consistency"]
     minimize: [false, true, false, false]
     methods: ["mean", "max", "mean", "hit_rate"]
+    # Include Deflated Sharpe Ratio (DSR) in final selection
+    include_dsr: true
+    dsr_method: "mean"          # mean | median | min | max | pXX
+    dsr_minimize: false          # DSR is a maximize metric
+    dsr_sr_benchmark: 0.0        # Optional SR* for DSR
     # 일관성(hit_rate) 임계값
     thresholds:
       min_return: 0.0       # 최소 수익률 임계값

@@ -363,14 +363,14 @@ def main():
         agg_names = eval_cfg.get('oos_aggregate', {}).get('objectives', [])
         agg_min = eval_cfg.get('oos_aggregate', {}).get('minimize', [True] * len(agg_names))
         if isinstance(best_metrics, np.ndarray) and best_metrics.size and len(agg_names) > 0:
-            # Natural orientation for logging
+            # Natural orientation for logging (no sign flip)
             top1 = best_metrics[0]
             topk_avg = np.mean(best_metrics, axis=0)
             payload = {"final/windows": int(len(windows)),
                         "final/candidates": int(len(best_metrics))}
             for j, name in enumerate(agg_names):
-                val_top1 = float(-top1[j] if not agg_min[j] else top1[j])
-                val_avg = float(-topk_avg[j] if not agg_min[j] else topk_avg[j])
+                val_top1 = float(top1[j])
+                val_avg = float(topk_avg[j])
                 payload[f"final/top1/{name}"] = val_top1
                 payload[f"final/topK/avg/{name}"] = val_avg
             wandb_logger.log(payload, step=final_step)
@@ -417,7 +417,7 @@ def main():
         # === WFO Mode: Save aggregated results and best population ===
         logging.info("=== WFO Mode: Saving aggregated results & best model ===")
         
-        # Save WFO results summary
+        # Save WFO results summary (+ DSR post-analysis for Top-1 if possible)
         wfo_results_path = os.path.join(env_cfg['output_dir'], "wfo_results.json")
         wfo_results = {
             'num_windows': len(windows) if 'windows' in locals() else 0,
@@ -427,6 +427,65 @@ def main():
             'minimize_directions': eval_cfg.get('oos_aggregate', {}).get('minimize', []),
             'wfo_config': wfo_cfg
         }
+
+        # Attempt DSR computation for Top-1 candidate across windows
+        try:
+            from analysis.stat_tests import window_level_dsr
+            # Identify Top-1 candidate ID by matching chromosome tensor
+            top1_id = None
+            if best_chromosomes is not None and len(best_chromosomes) > 0:
+                top1_chrom = best_chromosomes[0]
+                for cid, chrom in getattr(wfo_optimizer, 'candidate_chromosomes', {}).items():
+                    try:
+                        if torch.equal(chrom, top1_chrom):
+                            top1_id = cid
+                            break
+                    except Exception:
+                        continue
+            # Compute per-window DSRs if we found the candidate
+            dsr_per_window = []
+            oos_obj_cfg = eval_cfg.get('oos_objectives', eval_cfg.get('objectives', {}))
+            oos_names = oos_obj_cfg.get('objectives', []) if isinstance(oos_obj_cfg, dict) else []
+            sharpe_idx = oos_names.index('sharpe_ratio') if 'sharpe_ratio' in oos_names else None
+            if top1_id is not None and sharpe_idx is not None:
+                # n_obs approximated by OOS bars
+                n_obs = int(wfo_cfg.get('oos_bars', 1))
+                lookback_period = int(oos_obj_cfg.get('lookback_period', 252)) if isinstance(oos_obj_cfg, dict) else 252
+                scale = np.sqrt(max(1, lookback_period))
+                dsr_sr_bm = float(eval_cfg.get('oos_aggregate', {}).get('dsr_sr_benchmark', 0.0))
+                for w_idx, _win in enumerate(windows):
+                    # Collect all candidates' Sharpe for this window
+                    sr_all = []
+                    sr_selected = None
+                    for cid, win_map in wfo_optimizer.candidate_archives.items():
+                        if w_idx in win_map:
+                            val = win_map[w_idx][sharpe_idx]
+                            # Convert from annualized SR to per-period SR for DSR
+                            sr_all.append(float(val) / scale)
+                            if cid == top1_id:
+                                sr_selected = float(val) / scale
+                    if sr_selected is None or len(sr_all) == 0:
+                        dsr_per_window.append(float('nan'))
+                    else:
+                        dsr_val = window_level_dsr(
+                            sr_selected=float(sr_selected),
+                            n_obs=n_obs,
+                            sr_all_candidates=sr_all,
+                            sr_benchmark=dsr_sr_bm,
+                        )
+                        dsr_per_window.append(float(dsr_val))
+                # Summarize
+                dsr_valid = [x for x in dsr_per_window if x == x]
+                if dsr_valid:
+                    wfo_results['dsr_summary'] = {
+                        'mean': float(np.mean(dsr_valid)),
+                        'median': float(np.median(dsr_valid)),
+                        'min': float(np.min(dsr_valid)),
+                        'num_windows': int(len(dsr_valid)),
+                    }
+                wfo_results['dsr_per_window'] = dsr_per_window
+        except Exception:
+            pass
         
         with open(wfo_results_path, 'w') as f:
             json.dump(wfo_results, f, indent=2)
@@ -476,8 +535,14 @@ def main():
             logging.info(f"Total candidates evaluated: {len(wfo_optimizer.candidate_archives)}")
             
             if isinstance(best_metrics, np.ndarray) and len(best_metrics) > 0:
-                agg_obj_names = eval_cfg.get('oos_aggregate', {}).get('objectives', [])
-                agg_minimize = eval_cfg.get('oos_aggregate', {}).get('minimize', [])
+                agg_obj_names = list(eval_cfg.get('oos_aggregate', {}).get('objectives', []))
+                agg_minimize = list(eval_cfg.get('oos_aggregate', {}).get('minimize', []))
+                # If DSR was included in aggregation, append its display name and direction
+                include_dsr = bool(eval_cfg.get('oos_aggregate', {}).get('include_dsr', False))
+                if include_dsr and isinstance(best_metrics, np.ndarray) and best_metrics.shape[1] > len(agg_obj_names):
+                    agg_obj_names.append('oos_dsr')
+                    dsr_minimize = bool(eval_cfg.get('oos_aggregate', {}).get('dsr_minimize', False))
+                    agg_minimize.append(dsr_minimize)
                 
                 logging.info("Top 5 candidates by aggregated OOS performance:")
                 for i in range(min(5, len(best_metrics))):
@@ -485,8 +550,8 @@ def main():
                     # Build a single log line instead of using unsupported `end` kwarg
                     line = f"Candidate {i+1:2d} | "
                     for obj_name, obj_val, minimize in zip(agg_obj_names, objectives, agg_minimize):
-                        # Display in natural form: flip sign for maximize metrics
-                        disp_val = obj_val if minimize else -obj_val
+                        # Display natural values (no sign flip); use arrow for direction only
+                        disp_val = obj_val
                         direction = "↓" if minimize else "↑"
                         line += f"{obj_name}: {disp_val:.4f} {direction} | "
                     logging.info(line)

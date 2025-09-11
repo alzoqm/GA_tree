@@ -42,7 +42,7 @@ class FitnessSimulator:
             evaluation_config.get(
                 'objectives',
                 {
-                    'objectives': ['mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate'],
+                    'objectives': ['mean_return', 'max_drawdown', 'psr', 'win_rate'],
                     'minimize': [False, True, False, False],
                     'risk_free_rate': 0.0,
                     'volatility_lookback': 30,
@@ -52,7 +52,7 @@ class FitnessSimulator:
 
         # Environment-supported objective names
         SUPPORTED_ENV_OBJECTIVES = {
-            'mean_return', 'max_drawdown', 'sharpe_ratio', 'win_rate',
+            'mean_return', 'max_drawdown', 'sharpe_ratio', 'psr', 't_stat', 'win_rate',
             'profit_factor', 'compound_value', 'trade_win_rate', 'volatility',
             'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio'
         }
