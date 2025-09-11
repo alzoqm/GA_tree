@@ -182,6 +182,10 @@ __global__ void execute_actions_kernel(
             profit[i] += realized;
             trade_realized_pnl[i] += realized; // accumulate only
             enter_ratio[i] = er_cur - closed_margin;
+
+            // Decrement additional_count, ensuring it does not go below zero
+            additional_count[i] = (additional_count[i] > 0) ? additional_count[i] - 1 : 0;
+            
             return;
         }
     }
