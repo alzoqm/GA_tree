@@ -101,6 +101,9 @@
     - {window: 7}
     - {window: 14}
     - {window: 28}
+  calculate_atr_moving_average:
+    - {atr_window: 14, ma_window: 50}  # Primary ATR-MA for dynamic slippage
+    - {atr_window: 28, ma_window: 50}  # Alternative ATR-MA
   calculate_natr:
     - {window: 14}
     - {window: 28}

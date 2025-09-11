@@ -43,7 +43,29 @@ class TradingEnvironment:
         # === 원본 거래 환경 설정 완전 보존 ===
         self.taker_fee_rate = env_config['taker_fee_rate']
         self.maintenance_margin_rate = env_config['maintenance_margin_rate']
-        self.fixed_slippage_rate = env_config['fixed_slippage_rate']
+        
+        # === 슬리피지 설정 (동적 슬리피지 지원) ===
+        slippage_config = env_config.get('slippage', {})
+        self.slippage_mode = slippage_config.get('mode', 'fixed')
+        
+        if self.slippage_mode == 'fixed':
+            # 기존 고정 슬리피지 (backward compatibility)
+            self.fixed_slippage_rate = slippage_config.get('fixed_rate', env_config.get('fixed_slippage_rate', 0.0005))
+        elif self.slippage_mode == 'relative_volatility':
+            # 상대 변동성 기반 동적 슬리피지
+            self.base_slippage_rate = slippage_config.get('base_rate', 0.0001)
+            self.atr_ma_window = slippage_config.get('atr_ma_window', 50)
+            self.min_slippage = slippage_config.get('min_slippage', 0.00005)
+            self.max_slippage = slippage_config.get('max_slippage', 0.002)
+            # 기본 ATR 컬럼명 설정 (ATR_14가 가장 일반적)
+            self.atr_column = 'ATR_14'
+            self.atr_ma_column = f'ATR_14_MA_{self.atr_ma_window}'
+        else:
+            raise ValueError(f"Unknown slippage mode: {self.slippage_mode}")
+        
+        # 기존 호환성을 위해 fixed_slippage_rate를 유지 (fixed 모드에서만 사용)
+        if not hasattr(self, 'fixed_slippage_rate'):
+            self.fixed_slippage_rate = 0.0005
         # Mark price / equity options
         self.use_real_mark_price = env_config.get('use_real_mark_price', False)
         self.equity_mtm_basis = env_config.get('equity_mtm_basis', 'mark_proxy')  # 'mark_price' | 'mark_proxy'
@@ -221,9 +243,14 @@ class TradingEnvironment:
     def _snapshot_state_for_dedup(self) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.pos_list.clone(), self.enter_ratio.clone()
 
-    def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price):
+    def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price, market_data_row=None):
+        # 동적 슬리피지 계산 (market_data_row가 제공된 경우)
+        slippage_rate = None
+        if market_data_row is not None:
+            slippage_rate = self._calculate_dynamic_slippage(market_data_row)
+        
         if str(self.device).startswith('cuda'):
-            used_cuda = self._execute_actions(actions, exec_base_price)
+            used_cuda = self._execute_actions(actions, exec_base_price, slippage_rate)
             if not used_cuda:
                 raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
         else:
@@ -319,6 +346,47 @@ class TradingEnvironment:
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
         self.profit.zero_()
         self.last_timestamp = timestamp
+
+    def _calculate_dynamic_slippage(self, market_data_row) -> float:
+        """
+        상대 변동성 기반 동적 슬리피지를 계산합니다.
+        
+        Args:
+            market_data_row: 현재 시점의 시장 데이터 행 (pandas Series)
+        
+        Returns:
+            float: 계산된 슬리피지 비율
+        """
+        if self.slippage_mode != 'relative_volatility':
+            return self.fixed_slippage_rate
+        
+        try:
+            # ATR과 ATR 이동평균 값 추출
+            current_atr = market_data_row.get(self.atr_column)
+            atr_ma = market_data_row.get(self.atr_ma_column)
+            
+            # 데이터 유효성 검사
+            if current_atr is None or atr_ma is None:
+                print(f"Warning: Missing ATR data columns ({self.atr_column}, {self.atr_ma_column}). Using base slippage rate.")
+                return self.base_slippage_rate
+            
+            if pd.isna(current_atr) or pd.isna(atr_ma) or atr_ma <= 0:
+                return self.base_slippage_rate
+            
+            # 변동성 비율 계산: 현재 ATR / ATR 이동평균
+            volatility_ratio = float(current_atr) / float(atr_ma)
+            
+            # 동적 슬리피지 계산: 기본 비율 * 변동성 비율
+            dynamic_slippage = self.base_slippage_rate * volatility_ratio
+            
+            # 최소/최대 한계 적용
+            final_slippage = max(self.min_slippage, min(self.max_slippage, dynamic_slippage))
+            
+            return final_slippage
+            
+        except Exception as e:
+            print(f"Error in dynamic slippage calculation: {e}. Using base slippage rate.")
+            return self.base_slippage_rate
 
     def _update_dedup_buffers_after_exec(
         self,
@@ -806,7 +874,7 @@ class TradingEnvironment:
             self.trade_realized_pnl[flip_to_long_mask] = 0.0
 
 
-    def _execute_actions(self, actions_tensor, exec_base_price):
+    def _execute_actions(self, actions_tensor, exec_base_price, slippage_rate=None):
         """CUDA 커널로 액션 실행 (Thread-per-individual)."""
         try:
             import gatree_cuda_compat as gatree_cuda
@@ -820,10 +888,14 @@ class TradingEnvironment:
         if not str(self.device).startswith('cuda'):
             return False
 
+        # Use provided slippage rate or fall back to fixed rate
+        if slippage_rate is None:
+            slippage_rate = self.fixed_slippage_rate
+
         # Ensure tensors are on CUDA and contiguous
         actions = actions_tensor.to(self.device).contiguous()
-        buy_exec_price = float((exec_base_price * (1 + self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 + self.fixed_slippage_rate))
-        sell_exec_price = float((exec_base_price * (1 - self.fixed_slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 - self.fixed_slippage_rate))
+        buy_exec_price = float((exec_base_price * (1 + slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 + slippage_rate))
+        sell_exec_price = float((exec_base_price * (1 - slippage_rate)).item() if isinstance(exec_base_price, torch.Tensor) else exec_base_price * (1 - slippage_rate))
 
         # CPU 비교 디버그는 제거됨 (Python 경로 삭제)
 
@@ -887,7 +959,7 @@ class TradingEnvironment:
         self._check_liquidation(state.low, state.high)
         actions, raw_actions = self._prepare_and_deduplicate_actions(predicted_actions)
         pos_before, er_before = self._snapshot_state_for_dedup()
-        self._execute_actions_wrapper(actions, state.exec_base_price)
+        self._execute_actions_wrapper(actions, state.exec_base_price, market_data)
         self._update_holding_periods()
         self._accumulate_realized_pnl_and_stats()
         total_unreal = self._compute_unrealized_pnl(state.mark_t)
