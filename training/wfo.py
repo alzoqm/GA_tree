@@ -232,12 +232,6 @@ class WalkForwardOptimizer:
                 scale = float(np.sqrt(max(1, lookback_period)))
                 n_obs = int(self.wfo_config.get('oos_bars', 1))
                 dsr_sr_bm = float(self.aggregate_config.get('dsr_sr_benchmark', 0.0))
-                # Recover true Sharpe sign from minimization flags (env stored maximization metrics as negated)
-                minimize_flags = list(oos_obj_cfg.get('minimize', [])) if isinstance(oos_obj_cfg, dict) else []
-                sr_sign = -1.0  # default assume maximization metric was negated
-                if minimize_flags and len(minimize_flags) > sharpe_idx:
-                    # If metric is marked as minimization, it wasn't negated in env
-                    sr_sign = 1.0 if minimize_flags[sharpe_idx] else -1.0
 
                 dsr_per_window: list[float] = []
                 for w_idx in sorted(window_results.keys()):
@@ -246,8 +240,7 @@ class WalkForwardOptimizer:
                     for cid, win_map in self.candidate_archives.items():
                         if w_idx in win_map and len(win_map[w_idx]) > sharpe_idx:
                             val = float(win_map[w_idx][sharpe_idx])
-                            # Undo env minimization sign for Sharpe, then de-annualize
-                            sr = (sr_sign * val) / scale  # per-period SR
+                            sr = val / scale  # convert to per-period SR
                             sr_all.append(sr)
                             if cid == candidate_id:
                                 sr_selected = sr
