@@ -275,13 +275,13 @@ def predict_population_cuda(
         if str(positions_tensor.device) != str(device) or positions_tensor.dtype != torch.int32:
             positions_tensor = positions_tensor.to(device=device, dtype=torch.int32)
 
-    # Results
+    # Results: allocate 5 columns to optionally store action_node_id at [:,4]
     if results is None:
-        results_tensor = torch.empty((B, 4), dtype=torch.float32, device=device)
+        results_tensor = torch.empty((B, 5), dtype=torch.float32, device=device)
     else:
         results_tensor = results
-        if results_tensor.shape != (B, 4):
-            raise ValueError("results buffer must be shape (B,4)")
+        if results_tensor.dim() != 2 or results_tensor.size(0) != B or results_tensor.size(1) < 4:
+            raise ValueError("results buffer must be shape (B,>=4)")
         if results_tensor.dtype != torch.float32:
             raise ValueError("results buffer must be float32")
 
@@ -311,7 +311,8 @@ def predict_population_cuda(
         results_tensor,
         bfs_queue_buffer,
         visited_buffer,
-        sid
+        sid,
+        int(results_tensor.size(1))
     )
     if sync:
         torch.cuda.synchronize()

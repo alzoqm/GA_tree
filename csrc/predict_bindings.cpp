@@ -52,8 +52,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // This function performs GPU-accelerated prediction for a batch of trees.
     m.def("predict", &predict_cuda, 
-          "Performs GPU-accelerated prediction for a batch of trees with safety guarantees.",
+          "Performs GPU-accelerated prediction for a batch of trees with safety guarantees.\n"
+          "results tensor may have >=4 columns. If >=5, column[4] will store the selected ACTION node index.",
           py::arg("trees"), py::arg("features"), py::arg("positions"), 
           py::arg("offsets"), py::arg("children"), py::arg("results"),
-          py::arg("bfs_q"), py::arg("visited_gen"), py::arg("step_id"));
+          py::arg("bfs_q"), py::arg("visited_gen"), py::arg("step_id"), py::arg("results_cols"));
 }

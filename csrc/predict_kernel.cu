@@ -73,7 +73,8 @@ __global__ void k_predict_batch(
     float*       __restrict__ results,
     int*         __restrict__ bfs_q,
     int*         __restrict__ visited_gen,
-    const int    step_id
+    const int    step_id,
+    const int    results_cols
 ){
     const int b = blockIdx.x;
     if (b >= B) return;
@@ -90,6 +91,10 @@ __global__ void k_predict_batch(
         rout[1] = 0.0f;
         rout[2] = 0.0f;
         rout[3] = 0.0f;
+        if (results_cols >= 5){
+            // Optional column for selected ACTION node id (if provided by host)
+            rout[4] = 0.0f;
+        }
         q[0]    = -1;
     }
     __syncthreads();
@@ -148,6 +153,10 @@ __global__ void k_predict_batch(
                     rout[1] = nb[COL_PARAM_2];
                     rout[2] = nb[COL_PARAM_3];
                     rout[3] = nb[COL_PARAM_4];
+                    if (results_cols >= 5){
+                        // Write the action node index for downstream attribution
+                        rout[4] = i2f(v);
+                    }
                     found = true;
                     break;
                 }
@@ -175,14 +184,15 @@ void predict_cuda(
     torch::Tensor results,
     torch::Tensor bfs_q,
     torch::Tensor visited_gen,
-    int step_id
+    int step_id,
+    int results_cols
 ){
     TORCH_CHECK(trees.is_cuda() && trees.dtype()==torch::kFloat32 && trees.dim()==3 && trees.is_contiguous(), "trees must be (B,N,D) float32 CUDA contiguous");
     TORCH_CHECK(features.is_cuda() && features.dtype()==torch::kFloat32 && features.dim()==1, "features must be (F,) float32 CUDA");
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==torch::kInt32 && positions.dim()==1, "positions must be (B,) int32 CUDA");
     TORCH_CHECK(offsets.is_cuda() && offsets.dtype()==torch::kInt32 && offsets.dim()==2, "offsets must be (B,N+1) int32 CUDA");
     TORCH_CHECK(children.is_cuda() && children.dtype()==torch::kInt32 && children.dim()==2, "children must be (B,Emax) int32 CUDA");
-    TORCH_CHECK(results.is_cuda() && results.dtype()==torch::kFloat32 && results.dim()==2 && results.size(1)==4, "results must be (B,4) float32 CUDA");
+    TORCH_CHECK(results.is_cuda() && results.dtype()==torch::kFloat32 && results.dim()==2 && results.size(1)>=4, "results must be (B,>=4) float32 CUDA");
     TORCH_CHECK(bfs_q.is_cuda() && bfs_q.dtype()==torch::kInt32 && bfs_q.dim()==2, "bfs_q must be (B,N) int32 CUDA");
     TORCH_CHECK(visited_gen.is_cuda() && visited_gen.dtype()==torch::kInt32 && visited_gen.dim()==2, "visited_gen must be (B,N) int32 CUDA");
 
@@ -214,7 +224,8 @@ void predict_cuda(
         results.data_ptr<float>(),
         bfs_q.data_ptr<int>(),
         visited_gen.data_ptr<int>(),
-        step_id
+        step_id,
+        results_cols
     );
 
     CUDA_CHECK_ERRORS();

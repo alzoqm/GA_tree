@@ -7,11 +7,13 @@ from typing import List, Optional
 from tqdm import tqdm
 
 from training.trading_env import TradingEnvironment
+from analysis.event_logger import EventLogger, EventRecord, WindowRecord
 from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 from models.model import GATreePop
 from models.constants import (
     COL_NODE_TYPE, COL_DEPTH, NODE_TYPE_UNUSED,
 )
+from models.constants import ACTION_FLIP_POSITION
 
 torch.set_grad_enabled(False)
 
@@ -110,7 +112,8 @@ class FitnessSimulator:
                 features_all_gpu = None
 
         # Preallocate reusable GPU buffers
-        results = torch.empty((B, 4), dtype=torch.float32, device=device)
+        # Allocate 5 columns: [:,4] will carry action_node_id when available
+        results = torch.empty((B, 5), dtype=torch.float32, device=device)
         bfs = torch.empty((B, N), dtype=torch.int32, device=device)
         visited = torch.empty((B, N), dtype=torch.int32, device=device)
         positions = torch.empty((B,), dtype=torch.int32, device=device)
@@ -122,6 +125,19 @@ class FitnessSimulator:
 
         # Monotonic step id for kernel visited generation marking
         step_id = 1
+
+        # --- Event logging setup ---
+        evt_logger = EventLogger(output_dir="results")
+        try:
+            generation_id = int(evaluation_config.get('generation', 0))
+        except Exception:
+            generation_id = 0
+        # Trade tracking per chromosome (CPU-side, vectorized)
+        trade_id = np.zeros((B,), dtype=np.int64)
+        trade_seq = np.zeros((B,), dtype=np.int64)
+        win_start_step = np.full((B,), -1, dtype=np.int64)
+        win_start_time = np.empty((B,), dtype=object)
+        win_start_time[:] = None
 
         pbar = tqdm(range(start_data_cnt, stop_data_cnt - 1), desc="Sim", leave=False)
         for entry_index in pbar:
@@ -161,7 +177,101 @@ class FitnessSimulator:
                     "CUDA prediction failed. Check if gatree_cuda module is compiled and available."
                 )
 
+            # Snapshot pre-state for logging
+            pos_before = environment.pos_list.clone()
+            lev_before = environment.leverage_ratio.clone()
+            er_before = environment.enter_ratio.clone()
+            add_before = environment.additional_count.clone()
+
             environment.step(market_data_row, next_open_price, predicted_actions)
+
+            # Post-state and applied actions
+            pos_after = environment.pos_list.clone()
+            applied_mask = environment.get_last_applied_mask()
+            last_actions, last_raw = environment.get_last_actions()
+            # Ensure tensors on CPU for logging
+            if applied_mask is None:
+                applied_mask = torch.zeros((B,), dtype=torch.bool, device=device)
+            applied_mask_cpu = applied_mask.detach().to('cpu').numpy()
+            if last_actions is None:
+                last_actions = torch.zeros((B, predicted_actions.size(1)), dtype=torch.float32, device=device)
+            last_actions_cpu = last_actions.detach().to('cpu').numpy()
+            pos_before_cpu = pos_before.detach().to('cpu').numpy()
+            pos_after_cpu = pos_after.detach().to('cpu').numpy()
+            er_before_cpu = er_before.detach().to('cpu').numpy()
+            lev_before_cpu = lev_before.detach().to('cpu').numpy()
+            add_before_cpu = add_before.detach().to('cpu').numpy()
+
+            # Action type constants
+            from models.constants import (
+                ACTION_FLIP_POSITION,
+            )
+
+            ts_str = str(market_data_row.name)
+
+            # Vectorized window close/open determination
+            atype_vec = last_actions_cpu[:, 0].astype(np.int64) if last_actions_cpu.shape[1] >= 1 else np.zeros((B,), dtype=np.int64)
+            flip_mask = applied_mask_cpu & (atype_vec == ACTION_FLIP_POSITION) & (pos_before_cpu != 0)
+            open_mask = ((pos_before_cpu == 0) & (pos_after_cpu != 0)) | flip_mask
+            close_mask = ((pos_before_cpu != 0) & (pos_after_cpu == 0)) | flip_mask
+
+            valid_close = close_mask & (trade_id > 0) & (win_start_step >= 0)
+            if np.any(valid_close):
+                idx = np.where(valid_close)[0]
+                windows_df = pd.DataFrame({
+                    'generation': generation_id,
+                    'chromosome': idx.astype(np.int64),
+                    'trade_id': trade_id[idx].astype(np.int64),
+                    'start_step': win_start_step[idx].astype(np.int64),
+                    'start_time': win_start_time[idx].astype(str),
+                    'end_step': np.full(idx.shape[0], entry_index, dtype=np.int64),
+                    'end_time': np.full(idx.shape[0], ts_str, dtype=object),
+                })
+                evt_logger.log_windows_df(windows_df)
+                # reset indicators (next open increments id as needed)
+                win_start_step[idx] = -1
+                win_start_time[idx] = None
+
+            if np.any(open_mask):
+                idxo = np.where(open_mask)[0]
+                trade_id[idxo] = trade_id[idxo] + 1
+                trade_seq[idxo] = 0
+                win_start_step[idxo] = entry_index
+                # store original timestamp object for start_time; keep as string for consistency
+                win_start_time[idxo] = ts_str
+
+            # Vectorized applied event logging
+            if np.any(applied_mask_cpu):
+                idxe = np.where(applied_mask_cpu)[0]
+                acts = last_actions_cpu[idxe, :]
+                # action parameters (default to 0 if absent)
+                atype_e = acts[:, 0].astype(np.int64) if acts.shape[1] >= 1 else np.zeros((idxe.shape[0],), dtype=np.int64)
+                p2_e = acts[:, 1].astype(np.float32) if acts.shape[1] >= 2 else np.zeros((idxe.shape[0],), dtype=np.float32)
+                p3_e = acts[:, 2].astype(np.float32) if acts.shape[1] >= 3 else np.zeros((idxe.shape[0],), dtype=np.float32)
+                p4_e = acts[:, 3].astype(np.float32) if acts.shape[1] >= 4 else np.zeros((idxe.shape[0],), dtype=np.float32)
+                node_e = acts[:, 4].astype(np.int64) if acts.shape[1] >= 5 else np.full((idxe.shape[0],), -1, dtype=np.int64)
+                # trade_seq increments for these indices
+                trade_seq[idxe] = trade_seq[idxe] + 1
+                events_df = pd.DataFrame({
+                    'generation': generation_id,
+                    'chromosome': idxe.astype(np.int64),
+                    'step_index': np.full(idxe.shape[0], entry_index, dtype=np.int64),
+                    'timestamp': np.full(idxe.shape[0], ts_str, dtype=object),
+                    'action_node_id': node_e,
+                    'action_type': atype_e,
+                    'param2': p2_e,
+                    'param3': p3_e,
+                    'param4': p4_e,
+                    'applied': np.full(idxe.shape[0], True, dtype=bool),
+                    'pos_before': pos_before_cpu[idxe].astype(np.int64),
+                    'pos_after': pos_after_cpu[idxe].astype(np.int64),
+                    'lev_before': lev_before_cpu[idxe].astype(np.int64),
+                    'er_before': er_before_cpu[idxe].astype(np.float32),
+                    'add_count_before': add_before_cpu[idxe].astype(np.int64),
+                    'trade_id': trade_id[idxe].astype(np.int64),
+                    'trade_seq': trade_seq[idxe].astype(np.int64),
+                })
+                evt_logger.log_events_df(events_df)
         pbar.close()
 
         minimum_trades = evaluation_config.get('fitness_function', {}).get('minimum_trades', 40)
@@ -170,6 +280,11 @@ class FitnessSimulator:
             minimum_trades = wfo_min_trades
 
         env_objectives = environment.get_multi_objective_metrics(minimum_date=minimum_trades)
+        # Flush event/window logs to disk
+        try:
+            evt_logger.flush()
+        except Exception:
+            pass
         try:
             verbose = bool(evaluation_config.get('verbose', False)) if isinstance(evaluation_config, dict) else False
         except Exception:
