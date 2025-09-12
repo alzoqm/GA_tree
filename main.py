@@ -460,6 +460,11 @@ def _main_impl():
                 lookback_period = int(oos_obj_cfg.get('lookback_period', 252)) if isinstance(oos_obj_cfg, dict) else 252
                 scale = np.sqrt(max(1, lookback_period))
                 dsr_sr_bm = float(eval_cfg.get('oos_aggregate', {}).get('dsr_sr_benchmark', 0.0))
+                # Undo env minimization sign for Sharpe if necessary
+                minimize_flags = list(oos_obj_cfg.get('minimize', [])) if isinstance(oos_obj_cfg, dict) else []
+                sr_sign = -1.0
+                if minimize_flags and len(minimize_flags) > sharpe_idx:
+                    sr_sign = 1.0 if minimize_flags[sharpe_idx] else -1.0
                 for w_idx, _win in enumerate(windows):
                     # Collect all candidates' Sharpe for this window
                     sr_all = []
@@ -467,10 +472,10 @@ def _main_impl():
                     for cid, win_map in wfo_optimizer.candidate_archives.items():
                         if w_idx in win_map:
                             val = win_map[w_idx][sharpe_idx]
-                            # Convert from annualized SR to per-period SR for DSR
-                            sr_all.append(float(val) / scale)
+                            # Convert from annualized SR to per-period SR for DSR (restore true sign)
+                            sr_all.append((sr_sign * float(val)) / scale)
                             if cid == top1_id:
-                                sr_selected = float(val) / scale
+                                sr_selected = (sr_sign * float(val)) / scale
                     if sr_selected is None or len(sr_all) == 0:
                         dsr_per_window.append(float('nan'))
                     else:
@@ -551,15 +556,33 @@ def _main_impl():
                     dsr_minimize = bool(eval_cfg.get('oos_aggregate', {}).get('dsr_minimize', False))
                     agg_minimize.append(dsr_minimize)
                 
+                # Prepare base OOS objectives and their minimize flags for sign restoration
+                oos_obj_cfg = eval_cfg.get('oos_objectives', eval_cfg.get('objectives', {}))
+                if isinstance(oos_obj_cfg, dict):
+                    base_names = list(oos_obj_cfg.get('objectives', []))
+                    base_min_flags = list(oos_obj_cfg.get('minimize', []))
+                else:
+                    base_names = []
+                    base_min_flags = []
+
                 logging.info("Top 5 candidates by aggregated OOS performance:")
                 for i in range(min(5, len(best_metrics))):
                     objectives = best_metrics[i]
-                    # Build a single log line instead of using unsupported `end` kwarg
                     line = f"Candidate {i+1:2d} | "
-                    for obj_name, obj_val, minimize in zip(agg_obj_names, objectives, agg_minimize):
-                        # Display natural values (no sign flip); use arrow for direction only
-                        disp_val = obj_val
+                    for j, (obj_name, obj_val) in enumerate(zip(agg_obj_names, objectives)):
+                        minimize = agg_minimize[j] if j < len(agg_minimize) else False
                         direction = "↓" if minimize else "↑"
+                        # Human-friendly display: restore natural sign for base OOS maximize metrics
+                        disp_val = obj_val
+                        if isinstance(obj_name, str) and obj_name.startswith('oos_') and obj_name not in ('oos_consistency', 'oos_dsr'):
+                            base = obj_name[len('oos_'):]
+                            if base in base_names:
+                                idx = base_names.index(base)
+                                base_min = bool(base_min_flags[idx]) if idx < len(base_min_flags) else True
+                                # If the base metric is maximize (min=False), env stored it negated; flip sign for display only
+                                if not base_min:
+                                    disp_val = -obj_val
+                        # oos_consistency and oos_dsr are already natural-scale probabilities; leave as-is
                         line += f"{obj_name}: {disp_val:.4f} {direction} | "
                     logging.info(line)
         
