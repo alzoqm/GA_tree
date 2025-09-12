@@ -118,6 +118,43 @@ void check_liquidation_batch_cuda(
     float maintenance_margin_rate,
     float liq_clearance_fee_rate);
 
+// Host launcher to check liquidation with node-level attribution (thread-per-individual)
+void check_liquidation_with_attrib_cuda(
+    // State tensors
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    torch::Tensor additional_count,
+    torch::Tensor holding_period,
+    torch::Tensor profit,
+    torch::Tensor trade_open,
+    torch::Tensor trade_realized_pnl,
+    torch::Tensor trade_total_count,
+    torch::Tensor trade_win_count,
+    torch::Tensor trade_holding_sum,
+    torch::Tensor trade_holding_avg,
+    torch::Tensor curr_win_streak,
+    torch::Tensor curr_loss_streak,
+    torch::Tensor max_win_streak,
+    torch::Tensor max_loss_streak,
+    // Lot ledger
+    torch::Tensor lot_open,
+    torch::Tensor lot_node_idx,
+    torch::Tensor lot_side,
+    torch::Tensor lot_entry,
+    torch::Tensor lot_exposure,
+    torch::Tensor lot_open_step,
+    // Node accumulators (subset used)
+    torch::Tensor node_win_count,
+    torch::Tensor node_realized_pnl_sum,
+    torch::Tensor node_exposure_sum,
+    // Scalars
+    float mark_low,
+    float mark_high,
+    float maintenance_margin_rate,
+    float liq_clearance_fee_rate);
+
 // Host launcher to compute equity (realized + unrealized) per individual
 void compute_equity_batch_cuda(
     torch::Tensor pos_list,

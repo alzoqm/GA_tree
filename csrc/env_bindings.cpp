@@ -131,6 +131,42 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+        "check_liquidation_with_attrib",
+        &check_liquidation_with_attrib_cuda,
+        "Check and apply liquidations with node-level attribution (thread-per-individual)",
+        py::arg("pos_list"),
+        py::arg("price_list"),
+        py::arg("leverage_ratio"),
+        py::arg("enter_ratio"),
+        py::arg("additional_count"),
+        py::arg("holding_period"),
+        py::arg("profit"),
+        py::arg("trade_open"),
+        py::arg("trade_realized_pnl"),
+        py::arg("trade_total_count"),
+        py::arg("trade_win_count"),
+        py::arg("trade_holding_sum"),
+        py::arg("trade_holding_avg"),
+        py::arg("curr_win_streak"),
+        py::arg("curr_loss_streak"),
+        py::arg("max_win_streak"),
+        py::arg("max_loss_streak"),
+        py::arg("lot_open"),
+        py::arg("lot_node_idx"),
+        py::arg("lot_side"),
+        py::arg("lot_entry"),
+        py::arg("lot_exposure"),
+        py::arg("lot_open_step"),
+        py::arg("node_win_count"),
+        py::arg("node_realized_pnl_sum"),
+        py::arg("node_exposure_sum"),
+        py::arg("mark_low"),
+        py::arg("mark_high"),
+        py::arg("maintenance_margin_rate"),
+        py::arg("liq_clearance_fee_rate")
+    );
+
+    m.def(
         "compute_equity_batch",
         [](torch::Tensor pos_list,
            torch::Tensor price_list,

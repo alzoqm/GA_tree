@@ -687,7 +687,7 @@ class TradingEnvironment:
                     break
 
     def _check_liquidation(self, mark_low, mark_high):
-        """CUDA 커널로 청산 체크를 수행 (Python 경로 제거)"""
+        """CUDA 커널로 청산 체크를 수행. Lot/노드 어트리뷰션 버퍼가 있으면 노드 단위로도 집계."""
         if not str(self.device).startswith('cuda'):
             raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
         try:
@@ -719,29 +719,63 @@ class TradingEnvironment:
         mark_low_f = float(mark_low.item() if isinstance(mark_low, torch.Tensor) else mark_low)
         mark_high_f = float(mark_high.item() if isinstance(mark_high, torch.Tensor) else mark_high)
 
-        gatree_cuda.check_liquidation_batch(
-            pos_list,
-            price_list,
-            leverage_ratio,
-            enter_ratio,
-            additional_count,
-            holding_period,
-            profit,
-            trade_open,
-            trade_realized_pnl,
-            trade_total_count,
-            trade_win_count,
-            trade_holding_sum,
-            trade_holding_avg,
-            curr_win_streak,
-            curr_loss_streak,
-            max_win_streak,
-            max_loss_streak,
-            float(mark_low_f),
-            float(mark_high_f),
-            float(self.maintenance_margin_rate),
-            float(self.liq_clearance_fee_rate),
-        )
+        used_attrib = False
+        if (
+            self.lot_open is not None and
+            hasattr(gatree_cuda, 'check_liquidation_with_attrib') and
+            getattr(gatree_cuda, 'check_liquidation_with_attrib') is not None and
+            self.node_realized_pnl_sum is not None and self.node_exposure_sum is not None
+        ):
+            gatree_cuda.check_liquidation_with_attrib(
+                pos_list,
+                price_list,
+                leverage_ratio,
+                enter_ratio,
+                additional_count,
+                holding_period,
+                profit,
+                trade_open,
+                trade_realized_pnl,
+                trade_total_count,
+                trade_win_count,
+                trade_holding_sum,
+                trade_holding_avg,
+                curr_win_streak,
+                curr_loss_streak,
+                max_win_streak,
+                max_loss_streak,
+                self.lot_open, self.lot_node_idx, self.lot_side, self.lot_entry, self.lot_exposure, self.lot_open_step,
+                self.node_win_count, self.node_realized_pnl_sum, self.node_exposure_sum,
+                float(mark_low_f),
+                float(mark_high_f),
+                float(self.maintenance_margin_rate),
+                float(self.liq_clearance_fee_rate),
+            )
+            used_attrib = True
+        else:
+            gatree_cuda.check_liquidation_batch(
+                pos_list,
+                price_list,
+                leverage_ratio,
+                enter_ratio,
+                additional_count,
+                holding_period,
+                profit,
+                trade_open,
+                trade_realized_pnl,
+                trade_total_count,
+                trade_win_count,
+                trade_holding_sum,
+                trade_holding_avg,
+                curr_win_streak,
+                curr_loss_streak,
+                max_win_streak,
+                max_loss_streak,
+                float(mark_low_f),
+                float(mark_high_f),
+                float(self.maintenance_margin_rate),
+                float(self.liq_clearance_fee_rate),
+            )
 
         # If any tensor got new storage via contiguous(), write back views
         if pos_list.data_ptr() != self.pos_list.data_ptr():
