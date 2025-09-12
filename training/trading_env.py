@@ -378,6 +378,13 @@ class TradingEnvironment:
                     raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
         else:
             raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
+    
+    # --- 최근 스텝 데이터 접근자 (로깅용) ---
+    def get_last_applied_mask(self) -> torch.Tensor | None:
+        return self.last_applied_mask
+
+    def get_last_actions(self) -> Tuple[torch.Tensor | None, torch.Tensor | None]:
+        return self.last_actions, self.last_raw_actions
 
     def _update_holding_periods(self):
         self.holding_period[self.pos_list != 0] += 1
@@ -1185,6 +1192,9 @@ class TradingEnvironment:
         self._apply_funding_fees(state.timestamp, state.funding_rate)
         self._check_liquidation(state.low, state.high)
         actions, raw_actions = self._prepare_and_deduplicate_actions(predicted_actions)
+        # 보관(로깅/리플레이용). actions는 디듀프 적용본, raw_actions는 원본 예측본
+        self.last_actions = actions.clone()
+        self.last_raw_actions = raw_actions.clone()
         pos_before, er_before = self._snapshot_state_for_dedup()
         self._execute_actions_wrapper(actions, state.exec_base_price, market_data)
         self._update_holding_periods()
@@ -1192,6 +1202,8 @@ class TradingEnvironment:
         total_unreal = self._compute_unrealized_pnl(state.mark_t)
         self._update_equity_and_drawdown(total_unreal, state.timestamp)
         self._update_dedup_buffers_after_exec(actions, raw_actions, pos_before, er_before)
+        # 적용 마스크도 보관
+        self.last_applied_mask = self.prev_applied_mask.clone()
         self._update_return_histories(pre_equity, market_data, state.exec_base_price)
 
     def get_final_metrics(self, minimum_date=40):
