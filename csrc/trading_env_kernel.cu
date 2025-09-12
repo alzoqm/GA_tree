@@ -342,6 +342,434 @@ void execute_actions_batch_cuda(
     );
 }
 
+// ===================== Extended executor with attribution =====================
+
+__device__ inline int find_free_lot(bool* lot_open_row, int L){
+    for (int k = 0; k < L; ++k){ if (!lot_open_row[k]) return k; }
+    return -1;
+}
+
+__global__ void execute_actions_with_attrib_kernel(
+    const float* __restrict__ actions, // (B,4)
+    const int*   __restrict__ action_node_idx, // (B,)
+    // aggregated state
+    int64_t* __restrict__ pos_list,
+    float*   __restrict__ price_list,
+    int64_t* __restrict__ leverage_ratio,
+    float*   __restrict__ enter_ratio,
+    int64_t* __restrict__ additional_count,
+    float*   __restrict__ profit,
+    bool*    __restrict__ trade_open,
+    float*   __restrict__ trade_realized_pnl,
+    int32_t* __restrict__ trade_total_count,
+    int32_t* __restrict__ trade_win_count,
+    float*   __restrict__ trade_holding_sum,
+    float*   __restrict__ trade_holding_avg,
+    int32_t* __restrict__ curr_win_streak,
+    int32_t* __restrict__ curr_loss_streak,
+    int32_t* __restrict__ max_win_streak,
+    int32_t* __restrict__ max_loss_streak,
+    const int64_t* __restrict__ holding_period,
+    // lot ledger (flattened)
+    bool*    __restrict__ lot_open,
+    int*     __restrict__ lot_node_idx,
+    int8_t*  __restrict__ lot_side,
+    float*   __restrict__ lot_entry,
+    float*   __restrict__ lot_exposure,
+    int*     __restrict__ lot_open_step,
+    // node accumulators
+    int32_t* __restrict__ node_apply_count,
+    int32_t* __restrict__ node_noop_count,
+    int32_t* __restrict__ node_win_count,
+    float*   __restrict__ node_realized_pnl_sum,
+    float*   __restrict__ node_exposure_sum,
+    // dims
+    int B, int L, int N, int current_step,
+    // scalars
+    float buy_exec_price,
+    float sell_exec_price,
+    float taker_fee_rate,
+    float min_entry_ratio,
+    long long min_leverage,
+    long long max_leverage,
+    float min_additional_enter_ratio,
+    long long max_additional_entries
+){
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    const float a0 = actions[i * 4 + 0];
+    const float a1 = actions[i * 4 + 1];
+    const float a2 = actions[i * 4 + 2];
+    const int atype = static_cast<int>(llroundf(a0));
+    const int src_node = action_node_idx[i];
+    if (atype == ACTION_NOT_FOUND || src_node < 0 || src_node >= N){
+        return;
+    }
+
+    // Row pointers for lot and node accumulators
+    bool*  lot_open_row = lot_open + (size_t)i * L;
+    int*   lot_node_row = lot_node_idx + (size_t)i * L;
+    int8_t* lot_side_row = lot_side + (size_t)i * L;
+    float* lot_entry_row = lot_entry + (size_t)i * L;
+    float* lot_expo_row  = lot_exposure + (size_t)i * L;
+    int*   lot_openstep_row = lot_open_step + (size_t)i * L;
+
+    int32_t* apply_row = node_apply_count + (size_t)i * N;
+    int32_t* noop_row  = node_noop_count  + (size_t)i * N;
+    int32_t* win_row   = node_win_count   + (size_t)i * N;
+    float*   pnl_row   = node_realized_pnl_sum + (size_t)i * N;
+    float*   exp_row   = node_exposure_sum     + (size_t)i * N;
+
+    const int64_t pos = pos_list[i];
+    auto fee_apply = [&](float margin, float levf) {
+        profit[i] -= margin * levf * taker_fee_rate;
+    };
+
+    // Helper to realize a close amount on a single lot and update node accums
+    auto realize_lot = [&](int k, float close_margin, float exec_price){
+        if (!lot_open_row[k] || close_margin <= 0.0f) return 0;
+        const int nidx = lot_node_row[k];
+        const float entry = lot_entry_row[k];
+        const float levf = static_cast<float>(leverage_ratio[i]);
+        const float side = (lot_side_row[k] == 1) ? 1.0f : -1.0f; // 1: long, -1: short
+        float pnl = ((side > 0 ? (exec_price - entry) : (entry - exec_price)) / (entry + 1e-9f)) * levf * close_margin;
+        const float fee = close_margin * levf * taker_fee_rate;
+        const float realized = pnl - fee;
+        profit[i] += realized;
+        trade_realized_pnl[i] += realized;
+        pnl_row[nidx] += realized;
+        // close portion
+        lot_expo_row[k] = fmaxf(0.0f, lot_expo_row[k] - close_margin);
+        if (lot_expo_row[k] <= min_entry_ratio) {
+            lot_open_row[k] = false;
+        }
+        if (realized > 0.0f) win_row[nidx] += 1;
+        return 1;
+    };
+
+    // OPEN: NEW LONG/SHORT
+    if ((atype == ACTION_NEW_LONG || atype == ACTION_NEW_SHORT) && pos == 0){
+        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
+        // apply and attribute entry fee to source node
+        float fee = ratio * static_cast<float>(lev) * taker_fee_rate;
+        profit[i] -= fee;
+        pos_list[i] = (atype == ACTION_NEW_LONG) ? 2 : 1;
+        price_list[i] = (atype == ACTION_NEW_LONG) ? buy_exec_price : sell_exec_price;
+        leverage_ratio[i] = lev;
+        enter_ratio[i] = ratio;
+        additional_count[i] = 0;
+        trade_open[i] = true;
+        trade_realized_pnl[i] = 0.0f;
+        // lot record
+        int slot = find_free_lot(lot_open_row, L);
+        if (slot >= 0){
+            lot_open_row[slot] = true;
+            lot_node_row[slot] = src_node;
+            lot_side_row[slot] = (atype == ACTION_NEW_LONG) ? 1 : -1;
+            lot_entry_row[slot] = (atype == ACTION_NEW_LONG) ? buy_exec_price : sell_exec_price;
+            lot_expo_row[slot]  = ratio;
+            lot_openstep_row[slot] = current_step;
+            exp_row[src_node] += ratio;
+            // attribute entry fee as negative PnL to opening node
+            pnl_row[src_node] -= fee;
+            apply_row[src_node] += 1;
+        } else {
+            noop_row[src_node] += 1; // no slot available
+        }
+        return;
+    }
+
+    // CLOSE ALL
+    if (atype == ACTION_CLOSE_ALL && pos != 0){
+        // realize all open lots at proper side price
+        const float exec_price = (pos == 2) ? sell_exec_price : buy_exec_price;
+        // Count trade
+        trade_total_count[i] += 1;
+        // For each lot
+        for (int k = 0; k < L; ++k){
+            if (!lot_open_row[k]) continue;
+            const int nidx = lot_node_row[k];
+            const float cm = lot_expo_row[k];
+            if (cm <= 0.0f) { lot_open_row[k] = false; continue; }
+            // Per-lot realize
+            const float entry = lot_entry_row[k];
+            const float levf = static_cast<float>(leverage_ratio[i]);
+            const float side = (lot_side_row[k] == 1) ? 1.0f : -1.0f;
+            float pnl = ((side > 0 ? (exec_price - entry) : (entry - exec_price)) / (entry + 1e-9f)) * levf * cm;
+            const float fee = cm * levf * taker_fee_rate;
+            const float realized = pnl - fee;
+            profit[i] += realized;
+            trade_realized_pnl[i] += realized;
+            pnl_row[nidx] += realized;
+            if (realized > 0.0f) win_row[nidx] += 1;
+            lot_open_row[k] = false;
+            lot_expo_row[k] = 0.0f;
+        }
+        if (trade_realized_pnl[i] > 0.0f) trade_win_count[i] += 1;
+        on_trade_close(i, trade_realized_pnl[i], curr_win_streak, curr_loss_streak,
+                       max_win_streak, max_loss_streak, trade_holding_sum,
+                       holding_period, trade_total_count, trade_holding_avg);
+        trade_open[i] = false;
+        trade_realized_pnl[i] = 0.0f;
+        pos_list[i] = 0; price_list[i] = -1.0f; leverage_ratio[i] = -1; enter_ratio[i] = -1.0f; additional_count[i] = 0;
+        apply_row[src_node] += 1;
+        return;
+    }
+
+    // CLOSE PARTIAL
+    if (atype == ACTION_CLOSE_PARTIAL && pos != 0){
+        const float ratio = fmaxf(0.0f, fminf(1.0f, a1));
+        const float er_cur = enter_ratio[i];
+        if (er_cur <= 0.0f || ratio <= 0.0f){
+            noop_row[src_node] += 1; return;
+        }
+        const float total_close = er_cur * ratio;
+        float remaining_to_close = total_close;
+        const float exec_price = (pos == 2) ? sell_exec_price : buy_exec_price;
+        // distribute pro-rata by exposure
+        float sum_expo = 0.0f; for (int k=0;k<L;++k){ if (lot_open_row[k]) sum_expo += lot_expo_row[k]; }
+        if (sum_expo <= 0.0f){ noop_row[src_node] += 1; return; }
+        for (int k = 0; k < L && remaining_to_close > 1e-9f; ++k){
+            if (!lot_open_row[k]) continue;
+            float share = lot_expo_row[k] / (sum_expo + 1e-9f);
+            float close_k = fminf(lot_expo_row[k], total_close * share);
+            if (close_k <= 0.0f) continue;
+            // realize portion
+            const int nidx = lot_node_row[k];
+            const float entry = lot_entry_row[k];
+            const float levf = static_cast<float>(leverage_ratio[i]);
+            const float side = (lot_side_row[k] == 1) ? 1.0f : -1.0f;
+            float pnl = ((side > 0 ? (exec_price - entry) : (entry - exec_price)) / (entry + 1e-9f)) * levf * close_k;
+            const float fee = close_k * levf * taker_fee_rate;
+            const float realized = pnl - fee;
+            profit[i] += realized;
+            trade_realized_pnl[i] += realized; // accumulate
+            pnl_row[nidx] += realized;
+            if (realized > 0.0f) win_row[nidx] += 1;
+            lot_expo_row[k] = fmaxf(0.0f, lot_expo_row[k] - close_k);
+            if (lot_expo_row[k] <= min_entry_ratio) lot_open_row[k] = false;
+            remaining_to_close -= close_k;
+        }
+        // Update aggregated er
+        enter_ratio[i] = fmaxf(0.0f, er_cur - total_close);
+        // Decrement additional count but not below zero
+        additional_count[i] = (additional_count[i] > 0) ? additional_count[i] - 1 : 0;
+        apply_row[src_node] += 1;
+        return;
+    }
+
+    // ADD POSITION
+    if (atype == ACTION_ADD_POSITION && pos != 0 && additional_count[i] < max_additional_entries){
+        const float er = enter_ratio[i];
+        const float remaining = fmaxf(0.0f, 1.0f - er);
+        if (remaining >= min_additional_enter_ratio){
+            const float desired = fmaxf(a1, min_additional_enter_ratio);
+            const float add = fminf(desired, remaining);
+            if (add > 0.0f){
+                const float levf = static_cast<float>(leverage_ratio[i]);
+                // apply and attribute entry fee for add
+                float fee = add * levf * taker_fee_rate;
+                profit[i] -= fee;
+                // update aggregated avg price
+                const float old_price = price_list[i];
+                const float new_avg = (old_price * er + ((pos == 2) ? buy_exec_price : sell_exec_price) * add) / (er + add + 1e-9f);
+                price_list[i] = new_avg;
+                enter_ratio[i] = er + add;
+                additional_count[i] += 1;
+                // lot record
+                int slot = find_free_lot(lot_open_row, L);
+                if (slot >= 0){
+                    lot_open_row[slot] = true;
+                    lot_node_row[slot] = src_node;
+                    lot_side_row[slot] = (pos == 2) ? 1 : -1;
+                    lot_entry_row[slot] = (pos == 2) ? buy_exec_price : sell_exec_price;
+                    lot_expo_row[slot]  = add;
+                    lot_openstep_row[slot] = current_step;
+                    exp_row[src_node] += add;
+                    // attribute add entry fee as negative PnL to node
+                    pnl_row[src_node] -= fee;
+                    apply_row[src_node] += 1;
+                } else {
+                    noop_row[src_node] += 1;
+                }
+                return;
+            }
+        }
+        noop_row[src_node] += 1; return;
+    }
+
+    // FLIP POSITION
+    if (atype == ACTION_FLIP_POSITION && pos != 0){
+        // close all first at proper price
+        const float exec_price = (pos == 2) ? sell_exec_price : buy_exec_price;
+        trade_total_count[i] += 1;
+        for (int k = 0; k < L; ++k){
+            if (!lot_open_row[k]) continue;
+            const int nidx = lot_node_row[k];
+            const float cm = lot_expo_row[k];
+            if (cm <= 0.0f) { lot_open_row[k] = false; continue; }
+            const float entry = lot_entry_row[k];
+            const float levf = static_cast<float>(leverage_ratio[i]);
+            const float side = (lot_side_row[k] == 1) ? 1.0f : -1.0f;
+            float pnl = ((side > 0 ? (exec_price - entry) : (entry - exec_price)) / (entry + 1e-9f)) * levf * cm;
+            const float fee = cm * levf * taker_fee_rate;
+            const float realized = pnl - fee;
+            profit[i] += realized;
+            trade_realized_pnl[i] += realized;
+            pnl_row[nidx] += realized;
+            if (realized > 0.0f) win_row[nidx] += 1;
+            lot_open_row[k] = false;
+            lot_expo_row[k] = 0.0f;
+        }
+        if (trade_realized_pnl[i] > 0.0f) trade_win_count[i] += 1;
+        on_trade_close(i, trade_realized_pnl[i], curr_win_streak, curr_loss_streak,
+                       max_win_streak, max_loss_streak, trade_holding_sum,
+                       holding_period, trade_total_count, trade_holding_avg);
+        trade_open[i] = false;
+        trade_realized_pnl[i] = 0.0f;
+
+        // open new opposite lot
+        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
+        // apply and attribute entry fee for the new flipped position
+        float fee_open = ratio * static_cast<float>(lev) * taker_fee_rate;
+        profit[i] -= fee_open;
+        const int64_t new_pos = (pos == 2) ? 1 : 2;
+        pos_list[i] = new_pos;
+        price_list[i] = (new_pos == 2) ? buy_exec_price : sell_exec_price;
+        enter_ratio[i] = ratio;
+        leverage_ratio[i] = lev;
+        additional_count[i] = 0;
+        trade_open[i] = true;
+        trade_realized_pnl[i] = 0.0f;
+
+        int slot = find_free_lot(lot_open_row, L);
+        if (slot >= 0){
+            lot_open_row[slot] = true;
+            lot_node_row[slot] = src_node;
+            lot_side_row[slot] = (new_pos == 2) ? 1 : -1;
+            lot_entry_row[slot] = (new_pos == 2) ? buy_exec_price : sell_exec_price;
+            lot_expo_row[slot]  = ratio;
+            lot_openstep_row[slot] = current_step;
+            exp_row[src_node] += ratio;
+            // attribute flip-opening fee to node
+            pnl_row[src_node] -= fee_open;
+            apply_row[src_node] += 1;
+        } else {
+            noop_row[src_node] += 1;
+        }
+        return;
+    }
+
+    // If reached here, action had no effect
+    noop_row[src_node] += 1;
+}
+
+void execute_actions_with_attrib_batch_cuda(
+    torch::Tensor actions,
+    torch::Tensor action_node_idx,
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    torch::Tensor additional_count,
+    torch::Tensor profit,
+    torch::Tensor trade_open,
+    torch::Tensor trade_realized_pnl,
+    torch::Tensor trade_total_count,
+    torch::Tensor trade_win_count,
+    torch::Tensor trade_holding_sum,
+    torch::Tensor trade_holding_avg,
+    torch::Tensor curr_win_streak,
+    torch::Tensor curr_loss_streak,
+    torch::Tensor max_win_streak,
+    torch::Tensor max_loss_streak,
+    torch::Tensor holding_period,
+    torch::Tensor lot_open,
+    torch::Tensor lot_node_idx,
+    torch::Tensor lot_side,
+    torch::Tensor lot_entry,
+    torch::Tensor lot_exposure,
+    torch::Tensor lot_open_step,
+    torch::Tensor node_attempt_count, // unused here (attempts updated in Python)
+    torch::Tensor node_apply_count,
+    torch::Tensor node_noop_count,
+    torch::Tensor node_win_count,
+    torch::Tensor node_realized_pnl_sum,
+    torch::Tensor node_exposure_sum,
+    int current_step,
+    float buy_exec_price,
+    float sell_exec_price,
+    float taker_fee_rate,
+    float min_entry_ratio,
+    int64_t min_leverage,
+    int64_t max_leverage,
+    float min_additional_enter_ratio,
+    int64_t max_additional_entries)
+{
+    TORCH_CHECK(actions.is_cuda() && actions.is_contiguous() && actions.dim()==2 && actions.size(1)>=3, "actions must be (B,>=3) CUDA contiguous");
+    TORCH_CHECK(action_node_idx.is_cuda() && action_node_idx.dtype()==torch::kInt32 && action_node_idx.dim()==1, "action_node_idx must be (B,) int32 CUDA");
+    auto check = [](const torch::Tensor& t, const char* n){ TORCH_CHECK(t.is_cuda() && t.is_contiguous(), n, " must be CUDA contiguous"); };
+    check(pos_list, "pos_list"); check(price_list, "price_list"); check(leverage_ratio, "leverage_ratio"); check(enter_ratio, "enter_ratio");
+    check(additional_count, "additional_count"); check(profit, "profit"); check(trade_open, "trade_open"); check(trade_realized_pnl, "trade_realized_pnl");
+    check(trade_total_count, "trade_total_count"); check(trade_win_count, "trade_win_count"); check(trade_holding_sum, "trade_holding_sum"); check(trade_holding_avg, "trade_holding_avg");
+    check(curr_win_streak, "curr_win_streak"); check(curr_loss_streak, "curr_loss_streak"); check(max_win_streak, "max_win_streak"); check(max_loss_streak, "max_loss_streak"); check(holding_period, "holding_period");
+    check(lot_open, "lot_open"); check(lot_node_idx, "lot_node_idx"); check(lot_side, "lot_side"); check(lot_entry, "lot_entry"); check(lot_exposure, "lot_exposure"); check(lot_open_step, "lot_open_step");
+    check(node_apply_count, "node_apply_count"); check(node_noop_count, "node_noop_count"); check(node_win_count, "node_win_count"); check(node_realized_pnl_sum, "node_realized_pnl_sum"); check(node_exposure_sum, "node_exposure_sum");
+
+    const int B = actions.size(0);
+    if (B == 0) return;
+    TORCH_CHECK(action_node_idx.size(0)==B, "action_node_idx must match B");
+    const int L = lot_open.size(1);
+    const int N = node_apply_count.size(1);
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+    execute_actions_with_attrib_kernel<<<blocks, threads>>>(
+        actions.data_ptr<float>(),
+        action_node_idx.data_ptr<int>(),
+        pos_list.data_ptr<int64_t>(),
+        price_list.data_ptr<float>(),
+        leverage_ratio.data_ptr<int64_t>(),
+        enter_ratio.data_ptr<float>(),
+        additional_count.data_ptr<int64_t>(),
+        profit.data_ptr<float>(),
+        trade_open.data_ptr<bool>(),
+        trade_realized_pnl.data_ptr<float>(),
+        trade_total_count.data_ptr<int32_t>(),
+        trade_win_count.data_ptr<int32_t>(),
+        trade_holding_sum.data_ptr<float>(),
+        trade_holding_avg.data_ptr<float>(),
+        curr_win_streak.data_ptr<int32_t>(),
+        curr_loss_streak.data_ptr<int32_t>(),
+        max_win_streak.data_ptr<int32_t>(),
+        max_loss_streak.data_ptr<int32_t>(),
+        holding_period.data_ptr<int64_t>(),
+        lot_open.data_ptr<bool>(),
+        lot_node_idx.data_ptr<int>(),
+        lot_side.data_ptr<int8_t>(),
+        lot_entry.data_ptr<float>(),
+        lot_exposure.data_ptr<float>(),
+        lot_open_step.data_ptr<int>(),
+        node_apply_count.data_ptr<int32_t>(),
+        node_noop_count.data_ptr<int32_t>(),
+        node_win_count.data_ptr<int32_t>(),
+        node_realized_pnl_sum.data_ptr<float>(),
+        node_exposure_sum.data_ptr<float>(),
+        B, L, N, current_step,
+        buy_exec_price,
+        sell_exec_price,
+        taker_fee_rate,
+        min_entry_ratio,
+        (long long)min_leverage,
+        (long long)max_leverage,
+        min_additional_enter_ratio,
+        (long long)max_additional_entries
+    );
+}
+
 // ===============================================================
 // Accumulate realized PnL and stats (thread-per-individual)
 // ===============================================================
