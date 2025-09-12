@@ -955,6 +955,246 @@ __global__ void check_liquidation_kernel(
     }
 }
 
+// ===============================================================
+// Liquidation check with node attribution (thread-per-individual)
+// ===============================================================
+
+__global__ void check_liquidation_with_attrib_kernel(
+    int64_t* __restrict__ pos_list,
+    float* __restrict__ price_list,
+    int64_t* __restrict__ leverage_ratio,
+    float* __restrict__ enter_ratio,
+    int64_t* __restrict__ additional_count,
+    int64_t* __restrict__ holding_period,
+    float* __restrict__ profit,
+    bool* __restrict__ trade_open,
+    float* __restrict__ trade_realized_pnl,
+    int32_t* __restrict__ trade_total_count,
+    int32_t* __restrict__ trade_win_count,
+    float* __restrict__ trade_holding_sum,
+    float* __restrict__ trade_holding_avg,
+    int32_t* __restrict__ curr_win_streak,
+    int32_t* __restrict__ curr_loss_streak,
+    int32_t* __restrict__ max_win_streak,
+    int32_t* __restrict__ max_loss_streak,
+    // Lot ledger
+    bool* __restrict__ lot_open,
+    int*  __restrict__ lot_node_idx,
+    int8_t* __restrict__ lot_side,
+    float* __restrict__ lot_entry,
+    float* __restrict__ lot_exposure,
+    int* __restrict__ lot_open_step,
+    // Node accumulators
+    int32_t* __restrict__ node_win_count,
+    float* __restrict__ node_realized_pnl_sum,
+    float* __restrict__ node_exposure_sum,
+    // sizes
+    int B,
+    int L,
+    int N,
+    // marks and params
+    float mark_low,
+    float mark_high,
+    float maintenance_margin_rate,
+    float liq_clearance_fee_rate)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    const int64_t pos = pos_list[i];
+    if (pos == 0) return; // no position open
+
+    const float entry = price_list[i];
+    const float levf = static_cast<float>(leverage_ratio[i]);
+    const float er = enter_ratio[i];
+    if (er <= 0.0f || levf <= 0.0f || entry <= 0.0f) return;
+
+    // Compute margin balance vs maintenance threshold at conservative mark
+    const float denom = entry + 1e-9f;
+    float pnl_pct = 0.0f;
+    if (pos == 2) {
+        pnl_pct = (mark_low - entry) / denom;
+    } else {
+        pnl_pct = (entry - mark_high) / denom;
+    }
+    const float margin_balance = er * (1.0f + pnl_pct * levf);
+    const float maintenance_margin = (er * levf) * maintenance_margin_rate;
+
+    if (margin_balance <= maintenance_margin) {
+        // Liquidation realized delta: initial margin + clearance fee
+        const float notional = er * levf;
+        const float liq_fee = notional * liq_clearance_fee_rate;
+        const float realized_delta = -(er + liq_fee);
+
+        // Attribute realized_delta across open lots by exposure share
+        // Row-major access helpers
+        bool* lot_open_row = lot_open + (size_t)i * (size_t)L;
+        int*  lot_node_row = lot_node_idx + (size_t)i * (size_t)L;
+        int8_t* lot_side_row = lot_side + (size_t)i * (size_t)L; // unused, kept for parity
+        float* lot_entry_row = lot_entry + (size_t)i * (size_t)L; // unused, kept for parity
+        float* lot_expo_row = lot_exposure + (size_t)i * (size_t)L;
+        int* lot_openstep_row = lot_open_step + (size_t)i * (size_t)L; // unused
+
+        float sum_expo = 0.0f;
+        for (int k = 0; k < L; ++k) {
+            if (lot_open_row[k]) sum_expo += lot_expo_row[k];
+        }
+
+        if (sum_expo > 0.0f) {
+            for (int k = 0; k < L; ++k) {
+                if (!lot_open_row[k]) continue;
+                const int nidx = lot_node_row[k];
+                if (nidx < 0 || nidx >= N) { lot_open_row[k] = false; lot_expo_row[k] = 0.0f; continue; }
+                const float cm = lot_expo_row[k];
+                const float share = cm / (sum_expo + 1e-9f);
+                const float realized_k = realized_delta * share;
+                node_realized_pnl_sum[(size_t)i * (size_t)N + (size_t)nidx] += realized_k;
+                if (realized_k > 0.0f) node_win_count[(size_t)i * (size_t)N + (size_t)nidx] += 1;
+                node_exposure_sum[(size_t)i * (size_t)N + (size_t)nidx] += cm;
+                // Close lot
+                lot_open_row[k] = false;
+                lot_expo_row[k] = 0.0f;
+            }
+        } else {
+            // No open lots recorded; nothing to attribute
+        }
+
+        // Apply realized to per-step profit and trade accumulators
+        profit[i] += realized_delta;
+        trade_realized_pnl[i] += realized_delta;
+        trade_total_count[i] += 1;
+        if (trade_realized_pnl[i] > 0.0f) trade_win_count[i] += 1;
+
+        // Close trade: update streaks and holding aggregates
+        on_trade_close(i, trade_realized_pnl[i],
+                       curr_win_streak, curr_loss_streak,
+                       max_win_streak, max_loss_streak,
+                       trade_holding_sum,
+                       holding_period,
+                       trade_total_count,
+                       trade_holding_avg);
+
+        trade_open[i] = false;
+        trade_realized_pnl[i] = 0.0f;
+
+        // Reset aggregate state
+        pos_list[i] = 0;
+        price_list[i] = -1.0f;
+        leverage_ratio[i] = -1;
+        enter_ratio[i] = -1.0f;
+        additional_count[i] = 0;
+        holding_period[i] = 0;
+    }
+}
+
+void check_liquidation_with_attrib_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    torch::Tensor additional_count,
+    torch::Tensor holding_period,
+    torch::Tensor profit,
+    torch::Tensor trade_open,
+    torch::Tensor trade_realized_pnl,
+    torch::Tensor trade_total_count,
+    torch::Tensor trade_win_count,
+    torch::Tensor trade_holding_sum,
+    torch::Tensor trade_holding_avg,
+    torch::Tensor curr_win_streak,
+    torch::Tensor curr_loss_streak,
+    torch::Tensor max_win_streak,
+    torch::Tensor max_loss_streak,
+    torch::Tensor lot_open,
+    torch::Tensor lot_node_idx,
+    torch::Tensor lot_side,
+    torch::Tensor lot_entry,
+    torch::Tensor lot_exposure,
+    torch::Tensor lot_open_step,
+    torch::Tensor node_win_count,
+    torch::Tensor node_realized_pnl_sum,
+    torch::Tensor node_exposure_sum,
+    float mark_low,
+    float mark_high,
+    float maintenance_margin_rate,
+    float liq_clearance_fee_rate)
+{
+    auto check_cuda_contig = [](const torch::Tensor& t, const char* name){
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA tensor");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+    };
+
+    check_cuda_contig(pos_list, "pos_list");
+    check_cuda_contig(price_list, "price_list");
+    check_cuda_contig(leverage_ratio, "leverage_ratio");
+    check_cuda_contig(enter_ratio, "enter_ratio");
+    check_cuda_contig(additional_count, "additional_count");
+    check_cuda_contig(holding_period, "holding_period");
+    check_cuda_contig(profit, "profit");
+    check_cuda_contig(trade_open, "trade_open");
+    check_cuda_contig(trade_realized_pnl, "trade_realized_pnl");
+    check_cuda_contig(trade_total_count, "trade_total_count");
+    check_cuda_contig(trade_win_count, "trade_win_count");
+    check_cuda_contig(trade_holding_sum, "trade_holding_sum");
+    check_cuda_contig(trade_holding_avg, "trade_holding_avg");
+    check_cuda_contig(curr_win_streak, "curr_win_streak");
+    check_cuda_contig(curr_loss_streak, "curr_loss_streak");
+    check_cuda_contig(max_win_streak, "max_win_streak");
+    check_cuda_contig(max_loss_streak, "max_loss_streak");
+
+    check_cuda_contig(lot_open, "lot_open");
+    check_cuda_contig(lot_node_idx, "lot_node_idx");
+    check_cuda_contig(lot_side, "lot_side");
+    check_cuda_contig(lot_entry, "lot_entry");
+    check_cuda_contig(lot_exposure, "lot_exposure");
+    check_cuda_contig(lot_open_step, "lot_open_step");
+
+    check_cuda_contig(node_win_count, "node_win_count");
+    check_cuda_contig(node_realized_pnl_sum, "node_realized_pnl_sum");
+    check_cuda_contig(node_exposure_sum, "node_exposure_sum");
+
+    const int B = static_cast<int>(pos_list.size(0));
+    if (B == 0) return;
+    const int L = static_cast<int>(lot_open.size(1));
+    const int N = static_cast<int>(node_win_count.size(1));
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+    check_liquidation_with_attrib_kernel<<<blocks, threads>>>(
+        pos_list.data_ptr<int64_t>(),
+        price_list.data_ptr<float>(),
+        leverage_ratio.data_ptr<int64_t>(),
+        enter_ratio.data_ptr<float>(),
+        additional_count.data_ptr<int64_t>(),
+        holding_period.data_ptr<int64_t>(),
+        profit.data_ptr<float>(),
+        trade_open.data_ptr<bool>(),
+        trade_realized_pnl.data_ptr<float>(),
+        trade_total_count.data_ptr<int32_t>(),
+        trade_win_count.data_ptr<int32_t>(),
+        trade_holding_sum.data_ptr<float>(),
+        trade_holding_avg.data_ptr<float>(),
+        curr_win_streak.data_ptr<int32_t>(),
+        curr_loss_streak.data_ptr<int32_t>(),
+        max_win_streak.data_ptr<int32_t>(),
+        max_loss_streak.data_ptr<int32_t>(),
+        lot_open.data_ptr<bool>(),
+        lot_node_idx.data_ptr<int>(),
+        lot_side.data_ptr<int8_t>(),
+        lot_entry.data_ptr<float>(),
+        lot_exposure.data_ptr<float>(),
+        lot_open_step.data_ptr<int>(),
+        node_win_count.data_ptr<int32_t>(),
+        node_realized_pnl_sum.data_ptr<float>(),
+        node_exposure_sum.data_ptr<float>(),
+        B, L, N,
+        mark_low,
+        mark_high,
+        maintenance_margin_rate,
+        liq_clearance_fee_rate
+    );
+}
+
 void check_liquidation_batch_cuda(
     torch::Tensor pos_list,
     torch::Tensor price_list,

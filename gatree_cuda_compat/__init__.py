@@ -83,6 +83,7 @@ try:
     execute_actions_with_attrib = getattr(gatree_env, 'execute_actions_with_attrib', None)
     accumulate_realized_stats = getattr(gatree_env, 'accumulate_realized_stats', None)
     check_liquidation_batch = getattr(gatree_env, 'check_liquidation_batch', None)
+    check_liquidation_with_attrib = getattr(gatree_env, 'check_liquidation_with_attrib', None)
     compute_equity_batch = getattr(gatree_env, 'compute_equity_batch', None)
     
 except ImportError as e:
@@ -129,4 +130,5 @@ except ImportError as e:
     execute_actions_with_attrib = None
     accumulate_realized_stats = None
     check_liquidation_batch = None
+    check_liquidation_with_attrib = None
     compute_equity_batch = None
