@@ -10,8 +10,241 @@ from tqdm import tqdm
 
 from models.model import GATreePop
 from training.predictor import build_adjacency_list_cuda
-from fitness.simulator import FitnessSimulator
+from training.simulator import FitnessSimulator
 from utils.checkpoint_manager import CheckpointManager
+
+
+class GenerationRunner:
+    """Class-based generation trainer/tester to manage evaluation and checkpoints."""
+
+    def __init__(
+        self,
+        device: str,
+        evaluation_config: dict,
+        output_dir: str,
+        checkpoint_manager: Optional[CheckpointManager] = None,
+        wandb_config: Optional[Dict] = None,
+    ) -> None:
+        self.device = device
+        self.evaluation_config = evaluation_config
+        self.output_dir = output_dir
+        self.checkpoint_manager = checkpoint_manager
+        self.wandb_config = wandb_config or {}
+
+    # ----- internal helpers (formerly module-level) -----
+    def compute_generation_objectives(
+        self,
+        population: GATreePop,
+        data_1m: pd.DataFrame,
+        start_cnt: int,
+        stop_cnt: int,
+    ) -> np.ndarray:
+        return _compute_generation_objectives(
+            population=population,
+            data_1m=data_1m,
+            start_cnt=start_cnt,
+            stop_cnt=stop_cnt,
+            device=self.device,
+            evaluation_config=self.evaluation_config,
+        )
+
+    def update_pareto_archive(
+        self,
+        evaluator,
+        population: GATreePop,
+        train_objectives: np.ndarray,
+        best_chromosomes: Optional[torch.Tensor],
+        best_objectives: Optional[np.ndarray],
+        best_size: int,
+    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+        return _update_pareto_archive(
+            evaluator,
+            population,
+            train_objectives,
+            best_chromosomes,
+            best_objectives,
+            best_size,
+        )
+
+    def log_generation(
+        self,
+        evaluator,
+        evolution: Any,
+        train_objectives: np.ndarray,
+        best_objectives: Optional[np.ndarray],
+        gen_idx: int,
+        start_gen: int,
+    ) -> None:
+        return _log_generation(
+            evaluator=evaluator,
+            evolution=evolution,
+            train_objectives=train_objectives,
+            best_objectives=best_objectives,
+            gen_idx=gen_idx,
+            start_gen=start_gen,
+            wandb_config=self.wandb_config,
+        )
+
+    def save_generation_checkpoint(
+        self,
+        gen_idx: int,
+        population: GATreePop,
+        best_chromosomes: Optional[torch.Tensor],
+        best_objectives: Optional[np.ndarray],
+        generation_summary: Dict,
+        objectives_config: dict,
+        evolution: Any,
+        window_idx: Optional[int] = None,
+    ) -> None:
+        checkpoint_dir = os.path.join(self.output_dir, 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        return _save_generation_checkpoint(
+            checkpoint_dir=checkpoint_dir,
+            gen_idx=gen_idx,
+            population=population,
+            best_chromosomes=best_chromosomes,
+            best_objectives=best_objectives,
+            generation_summary=generation_summary,
+            objectives_config=objectives_config,
+            evolution=evolution,
+            checkpoint_manager=self.checkpoint_manager,
+            window_idx=window_idx,
+        )
+
+    @staticmethod
+    def load_generation_checkpoint(
+        checkpoint_manager: CheckpointManager,
+        window_idx: int,
+        generation: int,
+        config: Dict[str, Any],
+    ) -> Optional[Tuple[GATreePop, Optional[torch.Tensor], Optional[np.ndarray], Dict]]:
+        return load_generation_checkpoint(checkpoint_manager, window_idx, generation, config)
+
+    # ----- public API -----
+    def train(
+        self,
+        data_1m: pd.DataFrame,
+        evolution,
+        skip_data_cnt: int,
+        valid_skip_data_cnt: int,
+        chromosomes_size: int,
+        gen_loop: int,
+        best_size: int,
+        elite_size: int,
+        warming_step: int,
+        objectives_config: Optional[dict] = None,
+        best_archive=None,
+        start_gen: int = 0,
+        window_idx: Optional[int] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+        from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+
+        if objectives_config is None:
+            objectives_config = self.evaluation_config.get('multi_objectives', self.evaluation_config.get('objectives', {}))
+        evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
+
+        if not isinstance(data_1m.index, pd.DatetimeIndex):
+            data_1m.index = pd.to_datetime(data_1m.index)
+
+        population = evolution.population
+
+        # Pareto archive
+        if best_archive is None:
+            best_chromosomes = None
+            best_objectives = None
+        else:
+            best_chromosomes, best_objectives = best_archive
+
+        for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
+            print(f'Generation {gen_idx}:')
+
+            # Build adjacency once to catch early structural errors
+            adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
+            if adj_offsets is None:
+                raise RuntimeError("Failed to build adjacency list on GPU.")
+            del adj_offsets, adj_indices
+
+            train_objectives = self.compute_generation_objectives(
+                population=population,
+                data_1m=data_1m,
+                start_cnt=skip_data_cnt,
+                stop_cnt=valid_skip_data_cnt,
+            )
+
+            train_objectives_tensor = torch.from_numpy(train_objectives).to(self.device)
+
+            if gen_idx >= warming_step:
+                prev_size = 0 if best_objectives is None else len(best_objectives)
+                best_chromosomes, best_objectives = self.update_pareto_archive(
+                    evaluator,
+                    population,
+                    train_objectives,
+                    best_chromosomes,
+                    best_objectives,
+                    best_size,
+                )
+                new_size = 0 if best_objectives is None else len(best_objectives)
+                if new_size != prev_size:
+                    print(f"  Archive size: {new_size}")
+
+            self.log_generation(
+                evaluator=evaluator,
+                evolution=evolution,
+                train_objectives=train_objectives,
+                best_objectives=best_objectives,
+                gen_idx=gen_idx,
+                start_gen=start_gen,
+            )
+
+            generation_summary = evaluator.get_objective_summary(train_objectives)
+            self.save_generation_checkpoint(
+                gen_idx=gen_idx,
+                population=population,
+                best_chromosomes=best_chromosomes,
+                best_objectives=best_objectives,
+                generation_summary=generation_summary,
+                objectives_config=objectives_config,
+                evolution=evolution,
+                window_idx=window_idx,
+            )
+
+            evolution.evolve(train_objectives_tensor)
+            # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
+            population.move_to(self.device)
+            population.reorganize_nodes()
+
+        return best_chromosomes, best_objectives
+
+    def test(
+        self,
+        data_1m: pd.DataFrame,
+        population: GATreePop,
+        start_data_cnt: int,
+        end_data_cnt: int,
+    ) -> Tuple[np.ndarray, Dict]:
+        from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+
+        if not isinstance(data_1m.index, pd.DatetimeIndex):
+            data_1m.index = pd.to_datetime(data_1m.index)
+
+        all_feature_names = population.all_features
+        simulator = FitnessSimulator()
+
+        test_objectives = simulator.simulate(
+            population=population,
+            data=data_1m,
+            all_feature_names=all_feature_names,
+            start_data_cnt=start_data_cnt,
+            stop_data_cnt=end_data_cnt,
+            device=self.device,
+            evaluation_config=self.evaluation_config,
+        )
+
+        objectives_config = self.evaluation_config.get('multi_objectives', self.evaluation_config.get('objectives', {}))
+        evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
+        test_summary = evaluator.get_objective_summary(test_objectives)
+
+        return test_objectives, test_summary
 
 
 # --- Internal helpers to keep responsibilities separated ---
@@ -99,7 +332,7 @@ def _log_generation(
 
     # wandb logging (best-effort)
     try:
-        from tools import wandb_logger
+        from analysis import wandb_logger
         wb = wandb_config or {}
         if bool(wb.get('gen_log', True)) and ((gen_idx - start_gen) % int(wb.get('gen_log_interval', 1)) == 0):
             obj_names = evaluator.objective_names
@@ -288,91 +521,29 @@ def generation_training(
     Generation training loop using the decoupled FitnessSimulator.
     Returns Pareto-archive best chromosomes and objectives.
     """
-    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
-
-    os.makedirs(os.path.join(output_dir, 'checkpoints'), exist_ok=True)
-    checkpoint_dir = os.path.join(output_dir, 'checkpoints')
-
-    if objectives_config is None:
-        objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
-    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
-
-    if not isinstance(data_1m.index, pd.DatetimeIndex):
-        data_1m.index = pd.to_datetime(data_1m.index)
-
-    population = evolution.population
-
-    # Pareto archive
-    if best_archive is None:
-        best_chromosomes = None
-        best_objectives = None
-    else:
-        best_chromosomes, best_objectives = best_archive
-
-    for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
-        print(f'Generation {gen_idx}:')
-
-        # Build adjacency once to catch early structural errors
-        adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
-        if adj_offsets is None:
-            raise RuntimeError("Failed to build adjacency list on GPU.")
-        del adj_offsets, adj_indices
-
-        train_objectives = _compute_generation_objectives(
-            population=population,
-            data_1m=data_1m,
-            start_cnt=skip_data_cnt,
-            stop_cnt=valid_skip_data_cnt,
-            device=device,
-            evaluation_config=evaluation_config,
-        )
-
-        train_objectives_tensor = torch.from_numpy(train_objectives).to(device)
-
-        if gen_idx >= warming_step:
-            prev_size = 0 if best_objectives is None else len(best_objectives)
-            best_chromosomes, best_objectives = _update_pareto_archive(
-                evaluator,
-                population,
-                train_objectives,
-                best_chromosomes,
-                best_objectives,
-                best_size,
-            )
-            new_size = 0 if best_objectives is None else len(best_objectives)
-            if new_size != prev_size:
-                print(f"  Archive size: {new_size}")
-
-        _log_generation(
-            evaluator=evaluator,
-            evolution=evolution,
-            train_objectives=train_objectives,
-            best_objectives=best_objectives,
-            gen_idx=gen_idx,
-            start_gen=start_gen,
-            wandb_config=wandb_config,
-        )
-
-        generation_summary = evaluator.get_objective_summary(train_objectives)
-        _save_generation_checkpoint(
-            checkpoint_dir=checkpoint_dir,
-            gen_idx=gen_idx,
-            population=population,
-            best_chromosomes=best_chromosomes,
-            best_objectives=best_objectives,
-            generation_summary=generation_summary,
-            objectives_config=objectives_config,
-            evolution=evolution,
-            checkpoint_manager=checkpoint_manager,
-            window_idx=window_idx,
-        )
-
-        evolution.evolve(train_objectives_tensor)
-        # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
-        population.move_to(device)
-        population.reorganize_nodes()
-
-    return best_chromosomes, best_objectives
+    # wrapper to keep compatibility while migrating to class-based API
+    runner = GenerationRunner(
+        device=device,
+        evaluation_config=evaluation_config,
+        output_dir=output_dir,
+        checkpoint_manager=checkpoint_manager,
+        wandb_config=wandb_config,
+    )
+    return runner.train(
+        data_1m=data_1m,
+        evolution=evolution,
+        skip_data_cnt=skip_data_cnt,
+        valid_skip_data_cnt=valid_skip_data_cnt,
+        chromosomes_size=chromosomes_size,
+        gen_loop=gen_loop,
+        best_size=best_size,
+        elite_size=elite_size,
+        warming_step=warming_step,
+        objectives_config=objectives_config,
+        best_archive=best_archive,
+        start_gen=start_gen,
+        window_idx=window_idx,
+    )
 
 
 def generation_test(
@@ -384,26 +555,15 @@ def generation_test(
     evaluation_config: dict,
 ) -> Tuple[np.ndarray, Dict]:
     """Evaluate best population on test split using simulator/evaluator."""
-    from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
-
-    if not isinstance(data_1m.index, pd.DatetimeIndex):
-        data_1m.index = pd.to_datetime(data_1m.index)
-
-    all_feature_names = population.all_features
-    simulator = FitnessSimulator()
-
-    test_objectives = simulator.simulate(
-        population=population,
-        data=data_1m,
-        all_feature_names=all_feature_names,
-        start_data_cnt=start_data_cnt,
-        stop_data_cnt=end_data_cnt,
+    # wrapper for class-based API
+    runner = GenerationRunner(
         device=device,
         evaluation_config=evaluation_config,
+        output_dir="",
     )
-
-    objectives_config = evaluation_config.get('multi_objectives', evaluation_config.get('objectives', {}))
-    evaluator = MultiObjectiveFitnessEvaluator(objectives_config)
-    test_summary = evaluator.get_objective_summary(test_objectives)
-
-    return test_objectives, test_summary
+    return runner.test(
+        data_1m=data_1m,
+        population=population,
+        start_data_cnt=start_data_cnt,
+        end_data_cnt=end_data_cnt,
+    )

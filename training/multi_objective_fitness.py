@@ -93,7 +93,7 @@ class MultiObjectiveFitnessEvaluator:
             objectives: [population_size, num_objectives] array of objective values
         """
         # Use the simulator's wrapper to avoid legacy dependency on trading_env.fitness_fn
-        from fitness.simulator import fitness_fn
+        from training.simulator import fitness_fn
         return fitness_fn(
             population=population,
             data=data,
