@@ -56,7 +56,7 @@ Run feature generation pipeline without full training.
 - Generate interpretability and behavior reports (feature usage, type mix, interaction heatmap, threshold distributions, quantile-binned curves, permutation importance):
 
 ```
-python tools/analyze_best.py -c experiment_config.yaml
+python analysis/analyze_best.py -c experiment_config.yaml
 ```
 
 - Outputs are written to `results/.../analysis/` as JSON and PNGs (PNG generation requires matplotlib; otherwise JSON is still produced).

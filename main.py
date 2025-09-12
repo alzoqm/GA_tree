@@ -22,9 +22,9 @@ from evolution.Mutation import (
     ChainMutation, AddNodeMutation, DeleteNodeMutation, NodeParamMutation,
     ReinitializeNodeMutation, AddSubtreeMutation, DeleteSubtreeMutation
 )
-from training.runner import generation_training, generation_test
+from training.runner import generation_training, generation_test, GenerationRunner
 from training.wfo import WalkForwardOptimizer as _WFO
-from tools import wandb_logger
+from analysis import wandb_logger
 from utils.checkpoint_manager import CheckpointManager, detect_resumable_training
 
 try:
@@ -113,7 +113,14 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def main():
+class TrainingPipeline:
+    """Class-based wrapper to run the GA Tree training pipeline."""
+
+    def run(self):
+        return _main_impl()
+
+
+def _main_impl():
     """전체 학습 파이프라인을 실행하는 메인 함수"""
     # --- Parse command line arguments ---
     args = parse_arguments()
@@ -562,4 +569,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    TrainingPipeline().run()

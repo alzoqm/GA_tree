@@ -16,7 +16,7 @@ from models.model import GATreePop
 from analysis import trees as trees_analysis
 from analysis import plots as plots
 from analysis.importance import quantile_binned_curve, permutation_importance
-from fitness.simulator import FitnessSimulator
+from training.simulator import FitnessSimulator
 from training.wfo import WalkForwardOptimizer
 
 import warnings

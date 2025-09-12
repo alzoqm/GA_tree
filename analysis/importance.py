@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from fitness.simulator import FitnessSimulator
+from training.simulator import FitnessSimulator
 
 
 def quantile_binned_curve(feature_values: pd.Series,
