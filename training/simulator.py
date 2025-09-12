@@ -91,6 +91,7 @@ class FitnessSimulator:
             env_config=env_config,
             objectives_config=objectives_config,
             device=device,
+            max_nodes=population.max_nodes,
         )
 
         # Pre-extract features to numpy for fast access
@@ -140,7 +141,7 @@ class FitnessSimulator:
 
             # Increment step id each iteration to avoid clearing visited
             step_id += 1
-            predicted_actions = predict_population_cuda(
+            predicted_actions, predicted_nodes = predict_population_cuda(
                 population=population,
                 feature_values=None,
                 current_positions=positions,
@@ -161,7 +162,7 @@ class FitnessSimulator:
                     "CUDA prediction failed. Check if gatree_cuda module is compiled and available."
                 )
 
-            environment.step(market_data_row, next_open_price, predicted_actions)
+            environment.step(market_data_row, next_open_price, (predicted_actions, predicted_nodes))
         pbar.close()
 
         minimum_trades = evaluation_config.get('fitness_function', {}).get('minimum_trades', 40)

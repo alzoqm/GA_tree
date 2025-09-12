@@ -210,7 +210,7 @@ def predict_population_cuda(
     step_id: int | None = None,
     validate: bool = False,
     sync: bool = False,
-) -> torch.Tensor | None:
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     """
     사전 생성된 인접 리스트를 이용하여 전체 GATree 집단의 예측을 병렬로 수행합니다.
     
@@ -285,6 +285,9 @@ def predict_population_cuda(
         if results_tensor.dtype != torch.float32:
             raise ValueError("results buffer must be float32")
 
+    # Action node indices (output)
+    action_node_idx = torch.empty((B,), dtype=torch.int32, device=device)
+
     # BFS / visited
     if bfs is None:
         # Uninitialized memory can poison BFS logic; use zeros for safety
@@ -311,7 +314,8 @@ def predict_population_cuda(
         results_tensor,
         bfs_queue_buffer,
         visited_buffer,
-        sid
+        sid,
+        action_node_idx
     )
     if sync:
         torch.cuda.synchronize()
@@ -322,7 +326,7 @@ def predict_population_cuda(
             raise RuntimeError(f"validate_trees failed after predict: {e}")
 
 
-    return results_tensor
+    return results_tensor, action_node_idx
 
 
 def _eval_node_cpu(node_row: np.ndarray, features: np.ndarray) -> bool:
@@ -363,7 +367,7 @@ def predict_population_cpu(
     device: str = 'cpu',
     *,
     features_tensor: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     CPU fallback that mirrors the CUDA kernel's predict behavior:
     - Builds CSR adjacency per tree on CPU with children sorted ascending
@@ -400,6 +404,7 @@ def predict_population_cpu(
     # Pre-allocate outputs
     results = np.zeros((B, 4), dtype=np.float32)
     results[:, 0] = float(ACTION_NOT_FOUND)
+    node_idx = np.full((B,), -1, dtype=np.int32)
 
     # Build CSR adjacency per tree on CPU
     # offsets (B, N+1), children ragged via per-tree vector
@@ -494,6 +499,7 @@ def predict_population_cpu(
                     results[b, 1] = float(tree[v, COL_PARAM_2])
                     results[b, 2] = float(tree[v, COL_PARAM_3])
                     results[b, 3] = float(tree[v, COL_PARAM_4])
+                    node_idx[b] = v
                     qh = qt  # break outer
                     break
                 elif nt == NODE_TYPE_DECISION:
@@ -504,7 +510,10 @@ def predict_population_cpu(
                             qt += 1
             steps += 1
 
-    return torch.as_tensor(results, dtype=torch.float32, device=device)
+    return (
+        torch.as_tensor(results, dtype=torch.float32, device=device),
+        torch.as_tensor(node_idx, dtype=torch.int32, device=device),
+    )
 
 
 def predict_population(
@@ -515,7 +524,7 @@ def predict_population(
     adj_indices: torch.Tensor | None = None,
     device: str = 'cuda',
     **kwargs,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Unified entry point: use CUDA kernel if available; otherwise CPU fallback.
     When using CUDA, adj_offsets/adj_indices must be provided.

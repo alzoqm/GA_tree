@@ -80,6 +80,7 @@ try:
 
     # Trading environment functions (from gatree_env)
     execute_actions_batch = gatree_env.execute_actions_batch
+    execute_actions_with_attrib = getattr(gatree_env, 'execute_actions_with_attrib', None)
     accumulate_realized_stats = getattr(gatree_env, 'accumulate_realized_stats', None)
     check_liquidation_batch = getattr(gatree_env, 'check_liquidation_batch', None)
     compute_equity_batch = getattr(gatree_env, 'compute_equity_batch', None)
@@ -125,6 +126,7 @@ except ImportError as e:
     ppts_select_elites = None
     ppts_pick_parents = None
     execute_actions_batch = None
+    execute_actions_with_attrib = None
     accumulate_realized_stats = None
     check_liquidation_batch = None
     compute_equity_batch = None

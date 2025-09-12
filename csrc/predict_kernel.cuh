@@ -36,5 +36,6 @@ void predict_cuda(
     torch::Tensor results,   // (B,4)    float32, CUDA
     torch::Tensor bfs_q,     // (B,N)    int32, CUDA
     torch::Tensor visited_gen, // (B,N)  int32, CUDA (stores last-visited step id)
-    int step_id              // scalar step id for visited generation marking
+    int step_id,             // scalar step id for visited generation marking
+    torch::Tensor action_node_idx // (B,) int32, CUDA, writes found action node index or -1
 );

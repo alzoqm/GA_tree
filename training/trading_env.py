@@ -28,7 +28,8 @@ class TradingEnvironment:
     포지션 관리 등을 그대로 유지하면서 다중 목표 메트릭 계산 기능을 추가합니다.
     """
     def __init__(self, chromosomes_size: int, env_config: dict, 
-                 objectives_config: Optional[dict] = None, device='cpu'):
+                 objectives_config: Optional[dict] = None, device='cpu',
+                 max_nodes: Optional[int] = None):
         """
         거래 환경 초기화
         
@@ -40,6 +41,7 @@ class TradingEnvironment:
         """
         self.device = device
         self.chromosomes_size = chromosomes_size
+        self.max_nodes = int(max_nodes) if max_nodes is not None else int(env_config.get('max_nodes', 0))
         
         # === 원본 거래 환경 설정 완전 보존 ===
         self.taker_fee_rate = env_config['taker_fee_rate']
@@ -182,6 +184,53 @@ class TradingEnvironment:
         # 직전 스텝에서 실제 적용된 개체 마스크
         self.prev_applied_mask = torch.zeros(chromosomes_size, dtype=torch.bool, device=device)
 
+        # === Action-node attribution buffers ===
+        if self.max_nodes and self.max_nodes > 0 and str(self.device).startswith('cuda'):
+            B = self.chromosomes_size
+            N = self.max_nodes
+            i32 = dict(dtype=torch.int32, device=self.device)
+            f32 = dict(dtype=torch.float32, device=self.device)
+            b8  = dict(dtype=torch.bool, device=self.device)
+            i8  = dict(dtype=torch.int8, device=self.device)
+            # Per-node accumulators
+            self.node_attempt_count = torch.zeros((B, N), **i32)
+            self.node_apply_count   = torch.zeros((B, N), **i32)
+            self.node_noop_count    = torch.zeros((B, N), **i32)
+            self.node_stall_count   = torch.zeros((B, N), **i32)
+            self.node_win_count     = torch.zeros((B, N), **i32)
+            self.node_realized_pnl_sum = torch.zeros((B, N), **f32)
+            self.node_exposure_sum     = torch.zeros((B, N), **f32)
+            # Lot ledger (L = N)
+            L = N
+            self.lot_open      = torch.zeros((B, L), **b8)
+            self.lot_node_idx  = torch.full((B, L), -1, **i32)
+            self.lot_side      = torch.zeros((B, L), **i8)
+            self.lot_entry     = torch.full((B, L), -1.0, **f32)
+            self.lot_exposure  = torch.zeros((B, L), **f32)
+            self.lot_open_step = torch.zeros((B, L), **i32)
+            # Last predicted node indices (per step)
+            self._last_action_node_idx = torch.full((B,), -1, **i32)
+            self._last_dedup_mask = torch.zeros((B,), dtype=torch.bool, device=self.device)
+            # Step counter for holding periods
+            self._sim_step = 0
+        else:
+            # Fallback placeholders on CPU or when max_nodes unknown
+            self.node_attempt_count = None
+            self.node_apply_count = None
+            self.node_noop_count = None
+            self.node_win_count = None
+            self.node_realized_pnl_sum = None
+            self.node_exposure_sum = None
+            self.lot_open = None
+            self.lot_node_idx = None
+            self.lot_side = None
+            self.lot_entry = None
+            self.lot_exposure = None
+            self.lot_open_step = None
+            self._last_action_node_idx = None
+            self._last_dedup_mask = None
+            self._sim_step = 0
+
     # ------------------------------------------------------------
     # Step decomposition helpers (no logic change)
     # ------------------------------------------------------------
@@ -212,8 +261,16 @@ class TradingEnvironment:
             exec_base_price=next_open_price,
         )
 
-    def _prepare_and_deduplicate_actions(self, predicted_actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        actions = predicted_actions.to(self.device)
+    def _prepare_and_deduplicate_actions(self, predicted_actions) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Accept either tensor or (actions, node_idx)
+        if isinstance(predicted_actions, tuple) or isinstance(predicted_actions, list):
+            actions_tensor, node_idx = predicted_actions
+            actions = actions_tensor.to(self.device)
+            if self._last_action_node_idx is not None:
+                # store raw predicted node indices for attribution
+                self._last_action_node_idx = node_idx.to(device=self.device, dtype=torch.int32)
+        else:
+            actions = predicted_actions.to(self.device)
         raw_actions = actions.clone()
 
         if self.enable_action_dedup:
@@ -246,6 +303,26 @@ class TradingEnvironment:
             if duplicate_mask.any():
                 actions[duplicate_mask, :] = 0.0
                 actions[duplicate_mask, 0] = float(ACTION_NOT_FOUND)
+            # Update per-node attempt/stall counters
+            if self.node_attempt_count is not None and self._last_action_node_idx is not None:
+                # Everyone who predicted a valid action (not NOT_FOUND) attempts++
+                valid_pred = (raw_actions[:, 0].long() != ACTION_NOT_FOUND)
+                idx_valid = torch.where(valid_pred)[0]
+                if idx_valid.numel() > 0:
+                    rows = idx_valid
+                    cols = self._last_action_node_idx[idx_valid].clamp(min=0, max=self.max_nodes-1)
+                    self.node_attempt_count[rows, cols] += 1
+                # Stall = dedup skipped
+                stalled = duplicate_mask & valid_pred
+                idx_stall = torch.where(stalled)[0]
+                if idx_stall.numel() > 0:
+                    rows = idx_stall
+                    cols = self._last_action_node_idx[idx_stall].clamp(min=0, max=self.max_nodes-1)
+                    self.node_stall_count = getattr(self, 'node_stall_count', torch.zeros_like(self.node_attempt_count))
+                    self.node_stall_count[rows, cols] += 1
+                self._last_dedup_mask = duplicate_mask
+            else:
+                self._last_dedup_mask = torch.zeros(actions.shape[0], dtype=torch.bool, device=self.device)
 
         return actions, raw_actions
 
@@ -253,15 +330,52 @@ class TradingEnvironment:
         return self.pos_list.clone(), self.enter_ratio.clone()
 
     def _execute_actions_wrapper(self, actions: torch.Tensor, exec_base_price, market_data_row=None):
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
         # 동적 슬리피지 계산 (market_data_row가 제공된 경우)
         slippage_rate = None
         if market_data_row is not None:
             slippage_rate = self._calculate_dynamic_slippage(market_data_row)
         
         if str(self.device).startswith('cuda'):
-            used_cuda = self._execute_actions(actions, exec_base_price, slippage_rate)
-            if not used_cuda:
-                raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
+            # Prefer extended kernel when buffers are available
+            if self.lot_open is not None and hasattr(gatree_cuda, 'execute_actions_with_attrib') and getattr(gatree_cuda, 'execute_actions_with_attrib') is not None and self._last_action_node_idx is not None:
+                buy_exec = float(exec_base_price) * (1.0 + (slippage_rate if slippage_rate is not None else self.fixed_slippage_rate))
+                sell_exec = float(exec_base_price) * (1.0 - (slippage_rate if slippage_rate is not None else self.fixed_slippage_rate))
+                # Ensure contiguous views
+                pos_list = self.pos_list.contiguous(); price_list = self.price_list.contiguous()
+                leverage_ratio = self.leverage_ratio.contiguous(); enter_ratio = self.enter_ratio.contiguous()
+                additional_count = self.additional_count.contiguous(); profit = self.profit.contiguous()
+                trade_open = self.trade_open.contiguous(); trade_realized_pnl = self.trade_realized_pnl.contiguous()
+                trade_total_count = self.trade_total_count.contiguous(); trade_win_count = self.trade_win_count.contiguous()
+                trade_holding_sum = self.trade_holding_sum.contiguous(); trade_holding_avg = self.trade_holding_avg.contiguous()
+                curr_win_streak = self.curr_win_streak.contiguous(); curr_loss_streak = self.curr_loss_streak.contiguous()
+                max_win_streak = self.max_win_streak.contiguous(); max_loss_streak = self.max_loss_streak.contiguous()
+                holding_period = self.holding_period.contiguous()
+
+                gatree_cuda.execute_actions_with_attrib(
+                    actions,
+                    self._last_action_node_idx,
+                    pos_list, price_list, leverage_ratio, enter_ratio, additional_count,
+                    profit, trade_open, trade_realized_pnl, trade_total_count, trade_win_count,
+                    trade_holding_sum, trade_holding_avg,
+                    curr_win_streak, curr_loss_streak, max_win_streak, max_loss_streak,
+                    holding_period,
+                    self.lot_open, self.lot_node_idx, self.lot_side, self.lot_entry, self.lot_exposure, self.lot_open_step,
+                    self.node_attempt_count if self.node_attempt_count is not None else torch.zeros(1, device=self.device, dtype=torch.int32),
+                    self.node_apply_count, self.node_noop_count, self.node_win_count, self.node_realized_pnl_sum, self.node_exposure_sum,
+                    int(self._sim_step),
+                    float(buy_exec), float(sell_exec),
+                    float(self.taker_fee_rate), float(self.min_entry_ratio),
+                    int(self.min_leverage), int(self.max_leverage),
+                    float(self.min_additional_enter_ratio), int(self.max_additional_entries)
+                )
+            else:
+                used_cuda = self._execute_actions(actions, exec_base_price, slippage_rate)
+                if not used_cuda:
+                    raise RuntimeError("CUDA 확장 모듈을 찾을 수 없습니다. Python 기반 _execute_actions는 제거되었습니다.")
         else:
             raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
 
@@ -1064,6 +1178,8 @@ class TradingEnvironment:
         """
         원본 step 함수 완전 보존 + 다중 목표용 히스토리 추가 추적
         """
+        # Increment simulation step for attribution holding periods
+        self._sim_step += 1
         pre_equity = self._calculate_current_equity(market_data)
         state = self._extract_step_state(market_data, next_open_price)
         self._apply_funding_fees(state.timestamp, state.funding_rate)

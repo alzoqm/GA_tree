@@ -55,5 +55,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Performs GPU-accelerated prediction for a batch of trees with safety guarantees.",
           py::arg("trees"), py::arg("features"), py::arg("positions"), 
           py::arg("offsets"), py::arg("children"), py::arg("results"),
-          py::arg("bfs_q"), py::arg("visited_gen"), py::arg("step_id"));
+          py::arg("bfs_q"), py::arg("visited_gen"), py::arg("step_id"),
+          py::arg("action_node_idx"));
 }
