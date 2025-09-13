@@ -38,15 +38,38 @@ class GenerationRunner:
         data_1m: pd.DataFrame,
         start_cnt: int,
         stop_cnt: int,
-    ) -> np.ndarray:
-        return _compute_generation_objectives(
+    ) -> np.ndarray | tuple[np.ndarray, dict]:
+        """Compute per-individual objectives for a generation.
+
+        If pruning is enabled in the evaluation config, also return node-level
+        attribution stats by running the simulator with return_node_stats=True.
+        """
+        from training.simulator import FitnessSimulator
+
+        # Determine whether to collect node stats (for pruning)
+        pruning_cfg = self.evaluation_config.get('pruning', {}) if isinstance(self.evaluation_config, dict) else {}
+        want_node_stats = bool(pruning_cfg.get('enabled', False))
+
+        simulator = FitnessSimulator()
+        eval_cfg = dict(self.evaluation_config)
+        if want_node_stats:
+            eval_cfg = {**eval_cfg, 'return_node_stats': True}
+
+        sim_ret = simulator.simulate(
             population=population,
-            data_1m=data_1m,
-            start_cnt=start_cnt,
-            stop_cnt=stop_cnt,
+            data=data_1m,
+            all_feature_names=population.all_features,
+            start_data_cnt=start_cnt,
+            stop_data_cnt=stop_cnt,
             device=self.device,
-            evaluation_config=self.evaluation_config,
+            evaluation_config=eval_cfg,
         )
+
+        if want_node_stats:
+            # simulate returns (objectives, stats) when return_node_stats=True
+            return sim_ret  # type: ignore[return-value]
+        else:
+            return sim_ret  # objectives only
 
     def update_pareto_archive(
         self,
@@ -56,7 +79,9 @@ class GenerationRunner:
         best_chromosomes: Optional[torch.Tensor],
         best_objectives: Optional[np.ndarray],
         best_size: int,
-    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+        current_node_stats: Optional[dict] = None,
+        best_node_stats: Optional[dict] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
         return _update_pareto_archive(
             evaluator,
             population,
@@ -64,6 +89,8 @@ class GenerationRunner:
             best_chromosomes,
             best_objectives,
             best_size,
+            current_node_stats=current_node_stats,
+            best_node_stats=best_node_stats,
         )
 
     def log_generation(
@@ -91,6 +118,7 @@ class GenerationRunner:
         population: GATreePop,
         best_chromosomes: Optional[torch.Tensor],
         best_objectives: Optional[np.ndarray],
+        best_node_stats: Optional[Dict] ,
         generation_summary: Dict,
         objectives_config: dict,
         evolution: Any,
@@ -104,6 +132,7 @@ class GenerationRunner:
             population=population,
             best_chromosomes=best_chromosomes,
             best_objectives=best_objectives,
+            best_node_stats=best_node_stats,
             generation_summary=generation_summary,
             objectives_config=objectives_config,
             evolution=evolution,
@@ -136,7 +165,7 @@ class GenerationRunner:
         best_archive=None,
         start_gen: int = 0,
         window_idx: Optional[int] = None,
-    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
         from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
 
         if objectives_config is None:
@@ -152,8 +181,10 @@ class GenerationRunner:
         if best_archive is None:
             best_chromosomes = None
             best_objectives = None
+            best_node_stats: Optional[dict] = None
         else:
             best_chromosomes, best_objectives = best_archive
+            best_node_stats = None
 
         for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
             print(f'Generation {gen_idx}:')
@@ -164,24 +195,32 @@ class GenerationRunner:
                 raise RuntimeError("Failed to build adjacency list on GPU.")
             del adj_offsets, adj_indices
 
-            train_objectives = self.compute_generation_objectives(
+            # Compute objectives; when pruning is enabled, also gather node stats
+            comp_ret = self.compute_generation_objectives(
                 population=population,
                 data_1m=data_1m,
                 start_cnt=skip_data_cnt,
                 stop_cnt=valid_skip_data_cnt,
             )
+            if isinstance(comp_ret, tuple) and len(comp_ret) == 2:
+                train_objectives, current_node_stats = comp_ret
+            else:
+                train_objectives = comp_ret  # type: ignore[assignment]
+                current_node_stats = None
 
             train_objectives_tensor = torch.from_numpy(train_objectives).to(self.device)
 
             if gen_idx >= warming_step:
                 prev_size = 0 if best_objectives is None else len(best_objectives)
-                best_chromosomes, best_objectives = self.update_pareto_archive(
+                best_chromosomes, best_objectives, best_node_stats = self.update_pareto_archive(
                     evaluator,
                     population,
                     train_objectives,
                     best_chromosomes,
                     best_objectives,
                     best_size,
+                    current_node_stats=current_node_stats,
+                    best_node_stats=best_node_stats,
                 )
                 new_size = 0 if best_objectives is None else len(best_objectives)
                 if new_size != prev_size:
@@ -202,6 +241,7 @@ class GenerationRunner:
                 population=population,
                 best_chromosomes=best_chromosomes,
                 best_objectives=best_objectives,
+                best_node_stats=best_node_stats,
                 generation_summary=generation_summary,
                 objectives_config=objectives_config,
                 evolution=evolution,
@@ -213,7 +253,7 @@ class GenerationRunner:
             population.move_to(self.device)
             population.reorganize_nodes()
 
-        return best_chromosomes, best_objectives
+        return best_chromosomes, best_objectives, best_node_stats
 
     def test(
         self,
@@ -276,7 +316,7 @@ def _update_pareto_archive(
     best_chromosomes: Optional[torch.Tensor],
     best_objectives: Optional[np.ndarray],
     best_size: int,
-) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
     """Update Pareto archive given the current generation objectives."""
     valid_mask = ~np.any(np.isin(train_objectives, [-1e9, 1e9]), axis=1)
     if not np.any(valid_mask):
@@ -308,6 +348,112 @@ def _update_pareto_archive(
             best_chromosomes = best_chromosomes[selected_indices]
 
     return best_chromosomes, best_objectives
+
+
+def _slice_node_stats(stats: dict, mask_or_idx) -> dict:
+    """Utility to slice node stats dict along batch dimension consistently.
+
+    Assumes all tensor values (except possibly 'total_steps') have shape [B, N, ...].
+    """
+    if stats is None:
+        return None  # type: ignore[return-value]
+    out = {}
+    for k, v in stats.items():
+        if k == 'total_steps':
+            out[k] = v
+            continue
+        try:
+            out[k] = v[mask_or_idx]
+        except Exception:
+            out[k] = v
+    return out
+
+
+def _concat_node_stats(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    out = {}
+    keys = set(a.keys()) | set(b.keys())
+    for k in keys:
+        if k == 'total_steps':
+            # Prefer non-zero, else keep a's
+            out[k] = a.get(k, None) if a.get(k, None) is not None else b.get(k, None)
+            continue
+        va = a.get(k, None)
+        vb = b.get(k, None)
+        if va is None:
+            out[k] = vb
+        elif vb is None:
+            out[k] = va
+        else:
+            try:
+                out[k] = torch.cat([va, vb], dim=0)
+            except Exception:
+                out[k] = va
+    return out
+
+
+def _select_k_node_stats(stats: Optional[dict], indices: np.ndarray) -> Optional[dict]:
+    if stats is None:
+        return None
+    return _slice_node_stats(stats, indices)
+
+
+def _update_pareto_archive(
+    evaluator,
+    population: GATreePop,
+    train_objectives: np.ndarray,
+    best_chromosomes: Optional[torch.Tensor],
+    best_objectives: Optional[np.ndarray],
+    best_size: int,
+    current_node_stats: Optional[dict] = None,
+    best_node_stats: Optional[dict] = None,
+) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
+    """Update Pareto archive given current gen objectives and optionally node stats.
+
+    Mirrors chromosome/objective selection on node stats so pruning can consume
+    the best-archive-aligned stats without re-simulation.
+    """
+    valid_mask = ~np.any(np.isin(train_objectives, [-1e9, 1e9]), axis=1)
+    if not np.any(valid_mask):
+        return best_chromosomes, best_objectives, best_node_stats
+
+    valid_objectives = train_objectives[valid_mask]
+    valid_chromosomes = population.population_tensor[valid_mask].clone()
+    current_node_stats = _slice_node_stats(current_node_stats, valid_mask) if current_node_stats is not None else None
+
+    pareto_front_mask = evaluator._find_pareto_front(valid_objectives)
+    if not np.any(pareto_front_mask):
+        return best_chromosomes, best_objectives, best_node_stats
+
+    pareto_objectives = valid_objectives[pareto_front_mask]
+    pareto_chromosomes = valid_chromosomes[pareto_front_mask]
+    pareto_node_stats = _slice_node_stats(current_node_stats, pareto_front_mask) if current_node_stats is not None else None
+
+    if best_chromosomes is None:
+        best_objectives = pareto_objectives.copy()
+        best_chromosomes = pareto_chromosomes.clone()
+        best_node_stats = pareto_node_stats
+    else:
+        combined_objectives = np.vstack([best_objectives, pareto_objectives])
+        combined_chromosomes = torch.cat([best_chromosomes, pareto_chromosomes])
+        combined_node_stats = _concat_node_stats(best_node_stats, pareto_node_stats)
+
+        combined_pareto_mask = evaluator._find_pareto_front(combined_objectives)
+        best_objectives = combined_objectives[combined_pareto_mask]
+        best_chromosomes = combined_chromosomes[combined_pareto_mask]
+        best_node_stats = _slice_node_stats(combined_node_stats, combined_pareto_mask) if combined_node_stats is not None else None
+
+        if len(best_objectives) > best_size:
+            distances = evaluator._calculate_crowding_distances(best_objectives)
+            selected_indices = np.argsort(distances)[-best_size:]
+            best_objectives = best_objectives[selected_indices]
+            best_chromosomes = best_chromosomes[selected_indices]
+            best_node_stats = _select_k_node_stats(best_node_stats, selected_indices)
+
+    return best_chromosomes, best_objectives, best_node_stats
 
 
 def _log_generation(
@@ -388,6 +534,7 @@ def _save_generation_checkpoint(
     population: GATreePop,
     best_chromosomes: Optional[torch.Tensor],
     best_objectives: Optional[np.ndarray],
+    best_node_stats: Optional[Dict],
     generation_summary: Dict,
     objectives_config: dict,
     evolution: Any,
@@ -401,6 +548,7 @@ def _save_generation_checkpoint(
         "population_state_dict": population.population_tensor.cpu(),
         "best_objectives": best_objectives,
         "best_chromosomes": best_chromosomes.cpu() if best_chromosomes is not None else None,
+        "best_node_stats": {k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in best_node_stats.items()} if isinstance(best_node_stats, dict) else None,
         "generation_stats": generation_summary,
         "objectives_config": objectives_config,
         "evolution_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {},
@@ -438,6 +586,7 @@ def _save_generation_checkpoint(
                 population_state=population_state,
                 best_chromosomes=best_chromosomes.cpu() if best_chromosomes is not None else None,
                 best_objectives=best_objectives,
+                best_node_stats={k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in best_node_stats.items()} if isinstance(best_node_stats, dict) else None,
                 evolution_state=evolution_state,
                 generation_stats=generation_summary,
                 objectives_config=objectives_config,
@@ -485,8 +634,13 @@ def load_generation_checkpoint(
         best_chromosomes = checkpoint_data.get("best_chromosomes")
         best_objectives = checkpoint_data.get("best_objectives")
         
-        # Load evolution state
+        # Load evolution state and attach best_node_stats if present
         evolution_state = checkpoint_data.get("evolution_state", {})
+        if 'best_node_stats' in checkpoint_data:
+            try:
+                evolution_state['best_node_stats'] = checkpoint_data['best_node_stats']
+            except Exception:
+                pass
         
         logging.info(f"Successfully loaded checkpoint: window {window_idx}, generation {generation}")
         
@@ -519,7 +673,7 @@ def generation_training(
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """
     Generation training loop using the decoupled FitnessSimulator.
-    Returns Pareto-archive best chromosomes and objectives.
+    Returns Pareto-archive best chromosomes, objectives, and node stats (if pruning enabled).
     """
     # wrapper to keep compatibility while migrating to class-based API
     runner = GenerationRunner(

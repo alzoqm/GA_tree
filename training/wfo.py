@@ -450,7 +450,7 @@ class WalkForwardOptimizer:
             if 'min_trades_per_window' in wfo_cfg:
                 window_eval_config['min_trades_per_window'] = wfo_cfg['min_trades_per_window']
 
-            window_best_chromosomes, window_best_objectives = generation_training(
+            window_best_chromosomes, window_best_objectives, window_best_node_stats = generation_training(
                 data_1m=final_df,
                 evolution=evolution_engine,
                 skip_data_cnt=train_start,
@@ -489,26 +489,13 @@ class WalkForwardOptimizer:
                 prune_population.initialized = True
                 prune_population.set_next_idx()
 
-                # Re-run IS simulation to harvest node stats
-                sim_eval_config = {**window_eval_config}
-                sim_eval_config['return_node_stats'] = True
-                from .simulator import FitnessSimulator
-                sim = FitnessSimulator()
-                _, stats = sim.simulate(
-                    population=prune_population,
-                    data=final_df,
-                    all_feature_names=prune_population.all_features,
-                    start_data_cnt=train_start,
-                    stop_data_cnt=train_end,
-                    device=env_cfg['device'],
-                    evaluation_config=sim_eval_config,
-                )
-
-                # Prune in-place (CUDA) and validate
-                pruner.prune_in_place(prune_population, stats)
-
-                # Replace best chromosomes with pruned version
-                window_best_chromosomes = prune_population.population_tensor.detach().clone().to('cpu')
+                # Use archived node stats from IS; no re-simulation
+                stats = window_best_node_stats if isinstance(window_best_node_stats, dict) else None
+                if stats is None:
+                    logging.warning("Pruning enabled but no node stats found; skipping pruning for this window.")
+                else:
+                    pruner.prune_in_place(prune_population, stats)
+                    window_best_chromosomes = prune_population.population_tensor.detach().clone().to('cpu')
 
             # OOS evaluation
             oos_objectives_config = self.evaluation_config.get('oos_objectives', self.evaluation_config.get('objectives'))
