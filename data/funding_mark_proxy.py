@@ -198,14 +198,28 @@ def estimate_funding_and_mark(perp_df: pd.DataFrame, spot_df: pd.DataFrame) -> p
     # Contract price = perp close
     last = last_price
 
-    # Median of three
+    # Median of three (bar close reference)
     stacked = np.stack([price1, price2, last], axis=1)
     mark_est = np.median(stacked, axis=1)
+
+    # Intrabar mark range for liquidation checks
+    # Use mid-bar for Price1 to avoid lookahead and smooth within-bar funding component
+    mid_adjust_h = float(bar_m) / 120.0  # half-bar in hours
+    time_to_next_mid_h = np.maximum(0.0, time_to_next_h - mid_adjust_h)
+    price1_mid = I * (1.0 + funding_est * (time_to_next_mid_h / 8.0))
+
+    contract_low = perp['Low'].to_numpy(dtype=np.float64)
+    contract_high = perp['High'].to_numpy(dtype=np.float64)
+    low_stack = np.stack([price1_mid, price2, contract_low], axis=1)
+    high_stack = np.stack([price1_mid, price2, contract_high], axis=1)
+    mark_low_est = np.median(low_stack, axis=1)
+    mark_high_est = np.median(high_stack, axis=1)
 
     out = pd.DataFrame({
         'Open time': ts,
         'fundingRate_est': funding_est.astype(np.float64),
         'markPrice_est': mark_est.astype(np.float64),
+        'markLow_est': mark_low_est.astype(np.float64),
+        'markHigh_est': mark_high_est.astype(np.float64),
     })
     return out
-
