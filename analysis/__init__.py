@@ -1,3 +1,4 @@
+# /analysis/__init__.py
 """Analysis utilities for GA_tree.
 
 Includes tree-structure summaries, behavior analyses, and lightweight

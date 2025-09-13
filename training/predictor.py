@@ -1,4 +1,4 @@
-# training/predictor.py (수정된 전체 코드)
+# /training/predictor.py
 
 import torch
 import numpy as np

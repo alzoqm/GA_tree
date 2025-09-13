@@ -1,3 +1,4 @@
+# /analysis/stat_tests.py
 """
 Statistical post-analysis utilities: Probabilistic Sharpe Ratio (PSR) and
 Deflated Sharpe Ratio (DSR) following Bailey & López de Prado.

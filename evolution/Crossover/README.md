@@ -1,4 +1,4 @@
-# evolution/Crossover/README.md
+# /evolution/Crossover/README.md
 
 유전 알고리즘의 GA 트리 표현에 특화된 교차(Crossover) 오퍼레이터들이 포함되어 있습니다. 모든 연산은 배치 텐서 입력을 받아 GPU에서 동작하도록 설계되었습니다.
 

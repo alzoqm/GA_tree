@@ -1,4 +1,4 @@
-# gatree_cuda_compat/__init__.py - Compatibility layer for split CUDA extensions
+# /gatree_cuda_compat/__init__.py
 """
 This module provides backward compatibility by importing all functions
 from the new split CUDA extensions and exposing them under the original

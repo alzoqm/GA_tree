@@ -1,4 +1,4 @@
-# models/README.md
+# /models/README.md
 
 GA 트리 표현, 상수 정의, 집단(population) 관리가 구현되어 있으며, CPU/ CUDA 초기화 경로와 선택적 시각화를 지원합니다.
 

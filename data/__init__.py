@@ -1,3 +1,4 @@
+# /data/__init__.py
 """Data subpackage.
 
 Avoid importing heavy optional dependencies (e.g., TA-Lib) at package import
