@@ -468,7 +468,12 @@ class GATree:
 
     def predict(self, feature_values, current_position):
         """
-        [수정] BFS를 사용하여 최단 경로의 Action을 찾고, 새로운 Action 체계의 파라미터를 반환합니다.
+        [수정] BFS를 사용하여 최단 경로의 Action을 찾고, 새로운 Action 체계의 파라미터와
+        해당 Action 노드의 인덱스를 반환합니다.
+
+        Returns:
+            tuple: (action_type, param2, param3, param4, action_node_idx)
+                   액션을 찾지 못하면 (ACTION_NOT_FOUND, 0.0, 0.0, 0.0, -1) 반환
         """
         if not self.initialized:
             raise RuntimeError("Tree is not initialized. Call make_tree() or load() first.")
@@ -486,7 +491,7 @@ class GATree:
                 break
 
         if start_node_idx == -1:
-            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0) # CUDA와 동일한 미발견 표현
+            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0, -1) # CUDA와 동일한 미발견 표현
 
         self._queue_head = 0
         self._queue_tail = 0
@@ -506,12 +511,12 @@ class GATree:
                 child_node_type = int(self.data[child_idx, COL_NODE_TYPE].item())
 
                 if child_node_type == NODE_TYPE_ACTION:
-                    # [수정] Action 노드의 파라미터를 그대로 반환
+                    # [수정] Action 노드의 파라미터 및 액션 노드 인덱스를 반환
                     action_type = int(self.data[child_idx, COL_PARAM_1].item())
                     param_2 = self.data[child_idx, COL_PARAM_2].item()
                     param_3 = self.data[child_idx, COL_PARAM_3].item()
                     param_4 = self.data[child_idx, COL_PARAM_4].item()
-                    return (action_type, param_2, param_3, param_4)
+                    return (action_type, param_2, param_3, param_4, int(child_idx))
 
                 elif child_node_type == NODE_TYPE_DECISION:
                     if not visited[child_idx] and self._evaluate_node(child_idx, feature_values):
@@ -520,13 +525,13 @@ class GATree:
                             self._bfs_queue[self._queue_tail] = child_idx
                             self._queue_tail += 1
                         else:
-                            # 큐 오버플로 시 CUDA 커널과 동일하게 미발견 반환
-                            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0)
+                            # 큐 오버플로 시 CUDA 커널과 동일하게 미발견 반환 (액션 노드 인덱스 -1 포함)
+                            return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0, -1)
 
             steps += 1
 
-        # Action을 찾지 못하면 None을 반환하여 HOLD 동작 유도
-        return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0)
+        # Action을 찾지 못하면 CUDA 경로와 동일하게 표현
+        return (ACTION_NOT_FOUND, 0.0, 0.0, 0.0, -1)
 
 
     def save(self, filepath):
@@ -1077,11 +1082,11 @@ if __name__ == '__main__':
         'IsBullishMarket': True, 'IsHighVolatility': False
     }
     action_long = tree1.predict(test_features, 'LONG')
-    print(f"Prediction for 'LONG' position: {action_long} -> Action: {ACTION_TYPE_MAP.get(action_long[0])}")
+    print(f"Prediction for 'LONG' position: {action_long} -> Action: {ACTION_TYPE_MAP.get(action_long[0])}, NodeIdx: {action_long[4]}")
     action_hold = tree1.predict(test_features, 'HOLD')
-    print(f"Prediction for 'HOLD' position: {action_hold} -> Action: {ACTION_TYPE_MAP.get(action_hold[0])}")
+    print(f"Prediction for 'HOLD' position: {action_hold} -> Action: {ACTION_TYPE_MAP.get(action_hold[0])}, NodeIdx: {action_hold[4]}")
     action_short = tree1.predict(test_features, 'SHORT')
-    print(f"Prediction for 'SHORT' position: {action_short} -> Action: {ACTION_TYPE_MAP.get(action_short[0])}")
+    print(f"Prediction for 'SHORT' position: {action_short} -> Action: {ACTION_TYPE_MAP.get(action_short[0])}, NodeIdx: {action_short[4]}")
 
 
     # =====================================================
