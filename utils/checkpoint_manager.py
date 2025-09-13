@@ -115,6 +115,7 @@ class CheckpointManager:
                              population_state: Dict,
                              best_chromosomes: Optional[torch.Tensor] = None,
                              best_objectives: Optional[torch.Tensor] = None,
+                             best_node_stats: Optional[Dict[str, torch.Tensor]] = None,
                              evolution_state: Optional[Dict] = None,
                              **extra_state) -> None:
         """Save checkpoint for a specific window and generation."""
@@ -159,6 +160,20 @@ class CheckpointManager:
         
         if best_objectives is not None:
             torch.save(best_objectives, window_dir / f"best_objectives_gen_{generation}.pth")
+        
+        # Save best node stats if provided
+        if best_node_stats is not None:
+            try:
+                # Move to CPU for portability
+                cpu_stats = {}
+                for k, v in best_node_stats.items():
+                    if isinstance(v, torch.Tensor):
+                        cpu_stats[k] = v.detach().cpu()
+                    else:
+                        cpu_stats[k] = v
+                torch.save(cpu_stats, window_dir / f"best_node_stats_gen_{generation}.pth")
+            except Exception as e:
+                logging.warning(f"Failed to save best_node_stats: {e}")
     
     def load_window_checkpoint(self, window_idx: int, generation: int) -> Optional[Dict[str, Any]]:
         """Load checkpoint for a specific window and generation."""
@@ -193,6 +208,11 @@ class CheckpointManager:
             best_objectives_file = window_dir / f"best_objectives_gen_{generation}.pth"
             if best_objectives_file.exists():
                 checkpoint_data["best_objectives"] = torch.load(best_objectives_file, weights_only=False)
+            
+            # Load best node stats if it exists
+            best_node_stats_file = window_dir / f"best_node_stats_gen_{generation}.pth"
+            if best_node_stats_file.exists():
+                checkpoint_data["best_node_stats"] = torch.load(best_node_stats_file, weights_only=False)
             
             return checkpoint_data
             
