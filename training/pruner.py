@@ -74,6 +74,10 @@ class PopulationPruner:
             w_wr,
         )
 
+        # Critical repair to ensure each root branch has at least one child
+        if getattr(gatree_cuda, 'critical_repair_batch', None) is not None:
+            gatree_cuda.critical_repair_batch(population.population_tensor)
+
         # Compact in-place using existing reorganize kernel
         B, N, _ = population.population_tensor.shape
         active_counts = torch.zeros((B,), dtype=torch.int32, device=population.population_tensor.device)
@@ -82,4 +86,3 @@ class PopulationPruner:
 
         # Validate
         gatree_cuda.validate_trees(population.population_tensor.contiguous())
-

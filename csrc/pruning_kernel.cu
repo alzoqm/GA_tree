@@ -130,7 +130,9 @@ __global__ void prune_mark_kernel(
         float ppe     = (exp > 1e-12f) ? (pnl / exp) : 0.0f;
 
         bool cond_use  = (ap < k_min) || (eff_use < tau_use) || (ineff > tau_ineff);
-        bool cond_perf = (ap < k_perf_min) || (ppe <= 0.0f) || (wr <= tau_wr);
+        // Evaluate performance only when we have enough samples
+        bool has_samples = (ap >= k_perf_min);
+        bool cond_perf = has_samples && ((ppe <= 0.0f) || (wr <= tau_wr));
         bool cond_harm = (ap >= k_harm) && (ppe <= -delta_harm);
         bool candidate = (cond_use && cond_perf) || cond_harm;
         if (!candidate) continue;
