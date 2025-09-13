@@ -242,6 +242,8 @@ class TradingEnvironment:
         close: torch.Tensor
         funding_rate: torch.Tensor
         mark_t: torch.Tensor
+        mark_low: torch.Tensor
+        mark_high: torch.Tensor
         exec_base_price: torch.Tensor | float
 
     def _extract_step_state(self, market_data, next_open_price) -> "TradingEnvironment.StepState":
@@ -250,7 +252,10 @@ class TradingEnvironment:
         low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
         close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
         funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
-        mark_t = (high + low + close) / 3.0
+        # Use provided mark price series directly (assumed to exist in input data)
+        mark_t = torch.tensor(market_data['markPrice_est'], dtype=torch.float32, device=self.device)
+        mark_low = torch.tensor(market_data['markLow_est'], dtype=torch.float32, device=self.device)
+        mark_high = torch.tensor(market_data['markHigh_est'], dtype=torch.float32, device=self.device)
         return TradingEnvironment.StepState(
             timestamp=ts,
             high=high,
@@ -258,6 +263,8 @@ class TradingEnvironment:
             close=close,
             funding_rate=funding_rate,
             mark_t=mark_t,
+            mark_low=mark_low,
+            mark_high=mark_high,
             exec_base_price=next_open_price,
         )
 
@@ -1217,7 +1224,8 @@ class TradingEnvironment:
         pre_equity = self._calculate_current_equity(market_data)
         state = self._extract_step_state(market_data, next_open_price)
         self._apply_funding_fees(state.timestamp, state.funding_rate)
-        self._check_liquidation(state.low, state.high)
+        # Use mark-based range for liquidation checks when available
+        self._check_liquidation(state.mark_low, state.mark_high)
         actions, raw_actions = self._prepare_and_deduplicate_actions(predicted_actions)
         pos_before, er_before = self._snapshot_state_for_dedup()
         self._execute_actions_wrapper(actions, state.exec_base_price, market_data)
