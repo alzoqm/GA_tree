@@ -73,6 +73,9 @@ try:
                 return gatree_utils.reorganize_population(population_tensor)
     else:
         reorganize_population = None
+
+    # Pruning (from gatree_utils)
+    prune_mark_and_cleanup = getattr(gatree_utils, 'prune_mark_and_cleanup', None)
     
     # Selection functions (from gatree_selection)
     ppts_select_elites = gatree_selection.ppts_select_elites

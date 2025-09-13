@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional, Dict, Any
 from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
 from analysis.stat_tests import window_level_dsr
 from utils.checkpoint_manager import CheckpointManager
+from .pruner import PopulationPruner
 
 
 def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config: dict) -> np.ndarray:
@@ -470,6 +471,44 @@ class WalkForwardOptimizer:
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:
                 # Skip OOS if nothing valid
                 continue
+
+            # Optional CUDA pruning before OOS
+            pruning_cfg = self.evaluation_config.get('pruning', {}) if isinstance(self.evaluation_config, dict) else {}
+            pruner = PopulationPruner(pruning_cfg)
+            if pruner.is_enabled():
+                from models.model import GATreePop
+                # Build pruning population from best
+                prune_population = GATreePop(
+                    pop_size=len(window_best_chromosomes),
+                    max_nodes=ga_cfg['population']['max_nodes'],
+                    max_depth=ga_cfg['population']['max_depth'],
+                    max_children=ga_cfg['population']['max_children'],
+                    **model_config
+                )
+                prune_population.population_tensor = window_best_chromosomes.detach().clone().to(env_cfg['device'])
+                prune_population.initialized = True
+                prune_population.set_next_idx()
+
+                # Re-run IS simulation to harvest node stats
+                sim_eval_config = {**window_eval_config}
+                sim_eval_config['return_node_stats'] = True
+                from .simulator import FitnessSimulator
+                sim = FitnessSimulator()
+                _, stats = sim.simulate(
+                    population=prune_population,
+                    data=final_df,
+                    all_feature_names=prune_population.all_features,
+                    start_data_cnt=train_start,
+                    stop_data_cnt=train_end,
+                    device=env_cfg['device'],
+                    evaluation_config=sim_eval_config,
+                )
+
+                # Prune in-place (CUDA) and validate
+                pruner.prune_in_place(prune_population, stats)
+
+                # Replace best chromosomes with pruned version
+                window_best_chromosomes = prune_population.population_tensor.detach().clone().to('cpu')
 
             # OOS evaluation
             oos_objectives_config = self.evaluation_config.get('oos_objectives', self.evaluation_config.get('objectives'))

@@ -32,7 +32,7 @@ class FitnessSimulator:
         device: str,
         evaluation_config: dict,
         return_returns: bool = False,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, dict] | tuple[np.ndarray, np.ndarray, dict]:
         env_config = evaluation_config['simulation_env']
 
         # Pull the requested objective set (could be IS/OOS config); may include
@@ -259,7 +259,42 @@ class FitnessSimulator:
 
         objectives = np.stack(columns, axis=1) if columns else np.zeros((B, 0), dtype=np.float32)
 
-        if return_returns:
+        # Optionally return node-level CUDA attribution stats for pruning
+        return_node_stats = bool(evaluation_config.get('return_node_stats', False)) if isinstance(evaluation_config, dict) else False
+
+        if return_returns and return_node_stats:
+            try:
+                stats = {
+                    'node_attempt_count': environment.node_attempt_count,
+                    'node_apply_count': environment.node_apply_count,
+                    'node_noop_count': environment.node_noop_count,
+                    'node_stall_count': getattr(environment, 'node_stall_count', None),
+                    'node_win_count': environment.node_win_count,
+                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
+                    'node_exposure_sum': environment.node_exposure_sum,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+            except Exception:
+                stats = {
+                    'node_attempt_count': None,
+                    'node_apply_count': None,
+                    'node_noop_count': None,
+                    'node_stall_count': None,
+                    'node_win_count': None,
+                    'node_realized_pnl_sum': None,
+                    'node_exposure_sum': None,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
+            try:
+                if len(environment.returns_history) > 0:
+                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
+                else:
+                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+            except Exception:
+                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+            return objectives, ret_stack, stats
+        elif return_returns:
             # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
             try:
                 if len(environment.returns_history) > 0:
@@ -269,6 +304,30 @@ class FitnessSimulator:
             except Exception:
                 ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
             return objectives, ret_stack
+        elif return_node_stats:
+            try:
+                stats = {
+                    'node_attempt_count': environment.node_attempt_count,
+                    'node_apply_count': environment.node_apply_count,
+                    'node_noop_count': environment.node_noop_count,
+                    'node_stall_count': getattr(environment, 'node_stall_count', None),
+                    'node_win_count': environment.node_win_count,
+                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
+                    'node_exposure_sum': environment.node_exposure_sum,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+            except Exception:
+                stats = {
+                    'node_attempt_count': None,
+                    'node_apply_count': None,
+                    'node_noop_count': None,
+                    'node_stall_count': None,
+                    'node_win_count': None,
+                    'node_realized_pnl_sum': None,
+                    'node_exposure_sum': None,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+            return objectives, stats
         else:
             return objectives
 
