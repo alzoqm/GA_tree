@@ -43,6 +43,7 @@ setup(
                 'csrc/utils_bindings.cpp',
                 'csrc/reorganize_kernel.cu',
                 'csrc/validate_kernel.cu',
+                'csrc/pruning_kernel.cu',
                 'csrc/make_population.cu',
             ],
         ),

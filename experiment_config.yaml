@@ -256,6 +256,27 @@ evaluation:
     # 선택적 가중치 및 정규화
     weights: null           # null시 파레토 프론트 사용
     normalization: "minmax"
+
+  # === CUDA Pruning Configuration ===
+  pruning:
+    enabled: true
+    # usage thresholds
+    k_min: 3
+    tau_use: 0.01
+    tau_ineff: 0.8
+    # performance thresholds
+    k_perf_min: 3
+    tau_wr: 0.45
+    # harmful thresholds
+    k_harm: 5
+    delta_harm: 0.001
+    # per-branch minimum actions to keep
+    m_min: 1
+    # score weights
+    w_use: 0.2
+    w_ineff: 0.2
+    w_pnl: 0.5
+    w_wr: 0.1
     
   fitness_function:
     # 최소 거래 수 등 유틸 파라미터 (일부 로직에서 활용)
