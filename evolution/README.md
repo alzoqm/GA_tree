@@ -1,4 +1,4 @@
-# evolution/README.md
+# /evolution/README.md
 
 GA 트리 집단을 세대별로 진화시키는 엔진과 오퍼레이터 패키지(Selection/Crossover/Mutation)를 묶는 상위 폴더입니다.
 

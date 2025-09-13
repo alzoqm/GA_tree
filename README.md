@@ -1,4 +1,4 @@
-
+# /README.md
 ## Project Overview
 
 GA_tree is a genetic algorithm-based trading bot that uses tree structures to evolve trading strategies. The system combines evolutionary algorithms with GPU-accelerated prediction to create and optimize trading decision trees for cryptocurrency markets.

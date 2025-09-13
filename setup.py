@@ -1,4 +1,4 @@
-# setup.py (수정됨)
+# /setup.py
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 

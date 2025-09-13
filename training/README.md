@@ -1,4 +1,4 @@
-# training/README.md
+# /training/README.md
 
 GA 트리 집단의 예측을 CUDA로 가속하고, 거래 시뮬레이션 환경에서 피트니스를 계산합니다.
 

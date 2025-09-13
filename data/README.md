@@ -1,4 +1,4 @@
-# data/README.md
+# /data/README.md
 
 GA Tree 학습/평가를 위한 데이터 수집과 피처 엔지니어링 유틸리티가 들어 있습니다.
 

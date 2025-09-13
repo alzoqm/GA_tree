@@ -1,4 +1,4 @@
-# training/wfo.py
+# /training/wfo.py
 
 import numpy as np
 import torch

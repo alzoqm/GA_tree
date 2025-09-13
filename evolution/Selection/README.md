@@ -1,4 +1,4 @@
-# evolution/Selection/README.md
+# /evolution/Selection/README.md
 
 유전 알고리즘의 선택(Selection) 전략을 제공합니다. 엘리트 보존과 부모 선택(교차용)을 분리된 인터페이스로 지원합니다.
 

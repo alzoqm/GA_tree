@@ -1,4 +1,4 @@
-# evolution/Mutation/README.md
+# /evolution/Mutation/README.md
 
 GA 트리의 구조/파라미터를 확률적으로 변화시키는 변이(Mutation) 오퍼레이터 모음입니다. 모든 연산은 배치 텐서를 입력으로 받아 CUDA 커널에서 한 번에 처리(one-shot)하도록 설계되었습니다.
 

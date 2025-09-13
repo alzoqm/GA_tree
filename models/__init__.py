@@ -1,4 +1,4 @@
-# models/__init__.py (신규 파일)
+# /models/__init__.py
 
 from .model import GATree, GATreePop
 from . import constants
