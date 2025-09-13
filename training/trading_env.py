@@ -250,7 +250,11 @@ class TradingEnvironment:
         low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
         close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
         funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
-        mark_t = (high + low + close) / 3.0
+        # Prefer estimated mark price if available; fallback to typical price
+        if 'markPrice_est' in market_data.index and pd.notna(market_data['markPrice_est']):
+            mark_t = torch.tensor(market_data['markPrice_est'], dtype=torch.float32, device=self.device)
+        else:
+            mark_t = (high + low + close) / 3.0
         return TradingEnvironment.StepState(
             timestamp=ts,
             high=high,

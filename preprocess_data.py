@@ -7,6 +7,7 @@ import logging
 
 # --- 프로젝트 모듈 임포트 ---
 from data.data_download import fetch_historical_data, fetch_funding_rate_history
+from data.funding_mark_proxy import fetch_perp_klines, estimate_funding_and_mark
 from data.merge_dataset import run_feature_generation_from_yaml
 
 # ==============================================================================
@@ -96,6 +97,50 @@ def run_preprocessing():
     else:
         logging.info(f"Loading raw merged data from '{data_csv_path}'")
         source_df = pd.read_csv(data_csv_path, parse_dates=['Open time'])
+
+    # --- 1.5. Deterministic Funding/Mark estimation and injection ---
+    try:
+        # Determine time range from source_df
+        source_df = source_df.sort_values('Open time')
+        start_dt = pd.to_datetime(source_df['Open time'].iloc[0]).to_pydatetime()
+        end_dt = pd.to_datetime(source_df['Open time'].iloc[-1]).to_pydatetime()
+
+        # Fetch perp klines for the same period (futures)
+        perp_df = fetch_perp_klines(
+            symbol=data_cfg['symbol'],
+            interval=data_cfg['interval'],
+            start_dt=start_dt, end_dt=end_dt
+        )
+
+        # Spot klines are already in source_df (kline_df). If loaded from CSV, it's the same.
+        spot_df = source_df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+        est_df = estimate_funding_and_mark(perp_df=perp_df, spot_df=spot_df)
+        # Join back to source_df by 'Open time'
+        source_df = source_df.merge(est_df, on='Open time', how='left')
+
+        # Overwrite/Fill fundingRate deterministically: keep official if present, else use estimate
+        if 'fundingRate' in source_df.columns:
+            source_df['fundingRate'] = source_df['fundingRate'].where(
+                source_df['fundingRate'].notna(), source_df['fundingRate_est']
+            )
+        else:
+            source_df['fundingRate'] = source_df['fundingRate_est']
+
+        # Ensure no NaNs remain in fundingRate (pre-boundary defaults to 0 in estimator)
+        source_df['fundingRate'] = source_df['fundingRate'].fillna(0.0)
+
+        # Keep markPrice_est for downstream use
+        if 'markPrice_est' not in source_df.columns:
+            logging.warning("markPrice_est not found after estimation – unexpected.")
+
+        # Persist updated merged csv for reproducibility
+        source_df.to_csv(data_csv_path, index=False)
+        logging.info("Injected fundingRate/markPrice_est into merged dataset.")
+    except Exception as e:
+        logging.error(f"Funding/Mark estimation failed: {e}")
+        logging.error("Aborting preprocessing due to deterministic policy.")
+        return
 
     # --- 2. Multi-Timeframe 피처 생성 ---
     logging.info("Generating multi-timeframe features from YAML config...")

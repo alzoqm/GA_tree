@@ -63,7 +63,8 @@ def generate_multi_timeframe_features(
         'Low': 'min',
         'Close': 'last',
         'Volume': 'sum',
-        'fundingRate': 'last'
+        'fundingRate': 'last',
+        'markPrice_est': 'last',
     }
     # 시간 단위 문자열 변환 (e.g., '1h' -> '1H')
     resample_freq = base_timeframe.replace('m', 'T').replace('h','H').replace('d','D')
