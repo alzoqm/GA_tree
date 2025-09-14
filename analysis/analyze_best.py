@@ -100,7 +100,12 @@ def main():
     # 2) Quantile-binned response curves and permutation importance (lightweight)
     #    Use last WFO window OOS by default; if WFO disabled, use last 20% of data.
     final_features_path = os.path.join(env['data_dir'], data_cfg['final_features_path'])
-    df = pd.read_csv(final_features_path, parse_dates=['Open time']).set_index('Open time')
+    base, ext = os.path.splitext(final_features_path)
+    final_features_pkl = base + '.pkl'
+    if os.path.exists(final_features_pkl):
+        df = pd.read_pickle(final_features_pkl).set_index('Open time')
+    else:
+        df = pd.read_csv(final_features_path, parse_dates=['Open time']).set_index('Open time')
     total_len = len(df)
 
     if wfo_cfg.get('enabled', False):

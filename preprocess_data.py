@@ -51,18 +51,29 @@ def run_preprocessing():
 
     # --- 최종 전처리된 데이터가 있는지 확인 ---
     final_features_path = os.path.join(env_cfg['data_dir'], data_cfg['final_features_path'])
+    # Derive pickle path (prefer pickle for size)
+    base, ext = os.path.splitext(final_features_path)
+    final_features_pkl = base + '.pkl'
     model_config_path = os.path.join(env_cfg['data_dir'], data_cfg['model_config_path'])
 
-    if os.path.exists(final_features_path) and os.path.exists(model_config_path):
-        logging.info(f"Pre-processed data already exists at '{final_features_path}'.")
-        logging.info(f"Model config already exists at '{model_config_path}'.")
-        logging.info("Skipping preprocessing.")
+    if os.path.exists(model_config_path) and (os.path.exists(final_features_pkl) or os.path.exists(final_features_path)):
+        # Prefer checking pickle for existence and non-emptiness
         try:
-            df_check = pd.read_csv(final_features_path, nrows=5)
-            logging.info(f"Checked existing data shape (first 5 rows): {df_check.shape}")
+            if os.path.exists(final_features_pkl):
+                df_check = pd.read_pickle(final_features_pkl)
+                src_path = final_features_pkl
+            else:
+                df_check = pd.read_csv(final_features_path)
+                src_path = final_features_path
+            if not df_check.empty:
+                logging.info(f"Pre-processed data already exists at '{src_path}' with {len(df_check)} rows.")
+                logging.info(f"Model config already exists at '{model_config_path}'.")
+                logging.info("Skipping preprocessing.")
+                return
+            else:
+                logging.warning("Existing final features file is empty. Proceeding to regenerate.")
         except Exception as e:
-            logging.warning(f"Could not check existing data file. Error: {e}")
-        return
+            logging.warning(f"Existing final features could not be read ({e}). Proceeding to regenerate.")
 
     # --- 최종 데이터가 없으면 전처리 시작 ---
     logging.info("Pre-processed data not found. Starting data download and feature generation pipeline...")
@@ -119,6 +130,16 @@ def run_preprocessing():
         # Join back to source_df by 'Open time'
         source_df = source_df.merge(est_df, on='Open time', how='left')
 
+        # Diagnostics: how many estimates were produced
+        n_funding_ok = int(source_df['fundingRate_est'].notna().sum()) if 'fundingRate_est' in source_df.columns else 0
+        n_mark_ok = int(source_df['markPrice_est'].notna().sum()) if 'markPrice_est' in source_df.columns else 0
+        logging.info(f"Estimated funding/mark coverage: fundingRate_est={n_funding_ok}, markPrice_est={n_mark_ok} out of {len(source_df)}")
+
+        # Ensure fundingRate_est column exists
+        if 'fundingRate_est' not in source_df.columns:
+            logging.warning("fundingRate_est not found after estimation – creating fallback 0.0")
+            source_df['fundingRate_est'] = 0.0
+
         # Overwrite/Fill fundingRate deterministically: keep official if present, else use estimate
         if 'fundingRate' in source_df.columns:
             source_df['fundingRate'] = source_df['fundingRate'].where(
@@ -127,8 +148,22 @@ def run_preprocessing():
         else:
             source_df['fundingRate'] = source_df['fundingRate_est']
 
-        # Ensure no NaNs remain in fundingRate (pre-boundary defaults to 0 in estimator)
-        source_df['fundingRate'] = source_df['fundingRate'].fillna(0.0)
+        # Fill remaining NaNs in fundingRate using the mean of existing values
+        fr_mean = source_df['fundingRate'].mean(skipna=True)
+        source_df['fundingRate'] = source_df['fundingRate'].fillna(fr_mean)
+
+        # Ensure fundingRate_est is populated: prefer estimate, then official, finally fill with mean
+        if 'fundingRate_est' in source_df.columns:
+            source_df['fundingRate_est'] = source_df['fundingRate_est'].where(
+                source_df['fundingRate_est'].notna(), source_df['fundingRate']
+            )
+        else:
+            source_df['fundingRate_est'] = source_df['fundingRate']
+        # Compute mean of existing estimates; fallback to fundingRate mean, then 0.0 if still NaN
+        fr_est_mean = source_df['fundingRate_est'].mean(skipna=True)
+        if pd.isna(fr_est_mean):
+            fr_est_mean = fr_mean if not pd.isna(fr_mean) else 0.0
+        source_df['fundingRate_est'] = source_df['fundingRate_est'].fillna(fr_est_mean)
 
         # Keep markPrice_est for downstream use
         if 'markPrice_est' not in source_df.columns:
@@ -138,9 +173,42 @@ def run_preprocessing():
         source_df.to_csv(data_csv_path, index=False)
         logging.info("Injected fundingRate/markPrice_est into merged dataset.")
     except Exception as e:
+        # Fallback: proceed without aborting; create placeholder columns to satisfy downstream agg rules
         logging.error(f"Funding/Mark estimation failed: {e}")
-        logging.error("Aborting preprocessing due to deterministic policy.")
-        return
+        logging.warning("Proceeding with fallback columns for fundingRate/markPrice estimates.")
+        # Guarantee fundingRate exists; prefer preserving existing values and then fill with mean of present values
+        if 'fundingRate' not in source_df.columns:
+            source_df['fundingRate'] = float('nan')
+        fr_mean = source_df['fundingRate'].mean(skipna=True)
+        if pd.isna(fr_mean):
+            fr_mean = 0.0  # absolute fallback only if no values exist at all
+        source_df['fundingRate'] = source_df['fundingRate'].fillna(fr_mean)
+
+        # Guarantee fundingRate_est exists and mirrors fundingRate when missing; then fill with its own mean
+        if 'fundingRate_est' not in source_df.columns:
+            source_df['fundingRate_est'] = source_df['fundingRate']
+        else:
+            source_df['fundingRate_est'] = source_df['fundingRate_est'].where(
+                source_df['fundingRate_est'].notna(), source_df['fundingRate']
+            )
+        fr_est_mean = source_df['fundingRate_est'].mean(skipna=True)
+        if pd.isna(fr_est_mean):
+            fr_est_mean = fr_mean
+        source_df['fundingRate_est'] = source_df['fundingRate_est'].fillna(fr_est_mean)
+        # Create estimate placeholders if missing
+        for col, base in (
+            ('markPrice_est', 'Close'),
+            ('markLow_est', 'Low'),
+            ('markHigh_est', 'High'),
+        ):
+            if col not in source_df.columns:
+                if base in source_df.columns:
+                    source_df[col] = source_df[base]
+                else:
+                    source_df[col] = pd.NA
+        # Persist for transparency
+        os.makedirs(env_cfg['data_dir'], exist_ok=True)
+        source_df.to_csv(data_csv_path, index=False)
 
     # --- 2. Multi-Timeframe 피처 생성 ---
     logging.info("Generating multi-timeframe features from YAML config...")
@@ -155,12 +223,15 @@ def run_preprocessing():
     if final_df is None or model_config is None:
         logging.error("Feature generation failed. Exiting.")
         return
+    if final_df.empty:
+        logging.error("Feature dataframe is empty after generation. Check dropna rules and inputs.")
+        # Continue to save for inspection, but flag as error
 
     # --- 3. 생성된 최종 데이터 및 설정 저장 ---
-    logging.info(f"Saving generated feature data to '{final_features_path}'...")
+    logging.info(f"Saving generated feature data (pickle) to '{final_features_pkl}'...")
     try:
-        final_df.to_csv(final_features_path, index=False)
-        logging.info("Feature data saved successfully.")
+        final_df.to_pickle(final_features_pkl)
+        logging.info("Feature data saved successfully (pickle).")
     except Exception as e:
         logging.error(f"Failed to save feature data: {e}")
         return

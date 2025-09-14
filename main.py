@@ -190,16 +190,23 @@ def _main_impl():
     logging.info("--- Phase 1: Data Preparation & Feature Check ---")
 
     final_features_path = os.path.join(env_cfg['data_dir'], data_cfg['final_features_path'])
+    base, ext = os.path.splitext(final_features_path)
+    final_features_pkl = base + '.pkl'
     model_config_path = os.path.join(env_cfg['data_dir'], data_cfg['model_config_path'])
 
     # --- 최종 전처리된 데이터가 있는지 확인 ---
-    if not (os.path.exists(final_features_path) and os.path.exists(model_config_path)):
+    if not ((os.path.exists(final_features_pkl) or os.path.exists(final_features_path)) and os.path.exists(model_config_path)):
         logging.error("Preprocessed data not found.")
         logging.error("Please run 'preprocess_data.py' first to generate the data.")
         sys.exit(1)
 
-    logging.info(f"Loading pre-processed data from '{final_features_path}'")
-    final_df = pd.read_csv(final_features_path, parse_dates=['Open time'])
+    # Prefer pickle if available (smaller and faster)
+    if os.path.exists(final_features_pkl):
+        logging.info(f"Loading pre-processed data from '{final_features_pkl}' (pickle)")
+        final_df = pd.read_pickle(final_features_pkl)
+    else:
+        logging.info(f"Loading pre-processed data from '{final_features_path}' (csv)")
+        final_df = pd.read_csv(final_features_path, parse_dates=['Open time'])
 
     logging.info(f"Loading model config from '{model_config_path}'")
     with open(model_config_path, 'r', encoding='utf-8') as f:
