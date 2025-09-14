@@ -65,6 +65,7 @@ def generate_multi_timeframe_features(
         'Close': 'last',
         'Volume': 'sum',
         'fundingRate': 'last',
+        'fundingRate_est': 'last',
         'markPrice_est': 'last',
         'markLow_est': 'min',
         'markHigh_est': 'max',
@@ -72,7 +73,8 @@ def generate_multi_timeframe_features(
     # 시간 단위 문자열 변환 (e.g., '1h' -> '1H')
     resample_freq = base_timeframe.replace('m', 'T').replace('h','H').replace('d','D')
     base_df = source_df.resample(resample_freq).agg(agg_rules)
-    base_df.dropna(inplace=True)
+    # Drop only if essential OHLCV are missing; allow estimated columns to be NaN
+    base_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
 
     # --- 2. 시간 단위별 피처 계산 및 통합 ---
     features_by_timeframe = {}
@@ -85,7 +87,8 @@ def generate_multi_timeframe_features(
         print(f"--- '{timeframe}' 시간 단위 피처 계산 시작 ---")
 
         resample_freq = timeframe.replace('m', 'T').replace('h','H').replace('d','D')
-        df_resampled = source_df.resample(resample_freq).agg(agg_rules).dropna()
+        df_resampled = source_df.resample(resample_freq).agg(agg_rules)
+        df_resampled = df_resampled.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
         
         for func_name, params_list in feature_params[timeframe].items():
             try:
@@ -131,7 +134,8 @@ def generate_multi_timeframe_features(
             )
             print(f"'{timeframe}' 피처가 'merge_asof'로 통합되었습니다.")
 
-    final_df.dropna(inplace=True)
+    # At final stage, keep rows where essential OHLCV exist; allow feature gaps and est columns
+    final_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
     final_df.reset_index(inplace=True)
 
     print("\n최종 피처 생성 및 통합이 완료되었습니다.")

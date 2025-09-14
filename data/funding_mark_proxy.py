@@ -39,7 +39,7 @@ def _require_binance_client() -> Client:
 
 def fetch_perp_klines(symbol: str, interval: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     """
-    Fetch USDⓈ-M perpetual futures klines for [start_dt, end_dt].
+    Fetch USDⓈ-M perpetual futures klines for [start_dt, end_dt] with proper pagination.
     Returns a DataFrame with columns: 'Open time','Open','High','Low','Close','Volume', 'Close time', ...
     """
     client = _require_binance_client()
@@ -69,18 +69,44 @@ def fetch_perp_klines(symbol: str, interval: str, start_dt: datetime, end_dt: da
     start_ms = int(start_dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
     end_ms = int(end_dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
-    data = client.futures_klines(symbol=symbol, interval=iv, startTime=start_ms, endTime=end_ms)
+    # Binance returns max 1500 per request for futures_klines
+    limit = 1500
+    cursor = start_ms
+    all_rows = []
+    while cursor <= end_ms:
+        batch = client.futures_klines(
+            symbol=symbol, interval=iv, startTime=cursor, endTime=end_ms, limit=limit
+        )
+        if not batch:
+            break
+        all_rows.extend(batch)
+        # Advance by last bar's open time + 1 ms to avoid duplicates
+        last_open_ms = int(batch[-1][0])
+        next_cursor = last_open_ms + 1
+        if next_cursor <= cursor:
+            # Safety: prevent infinite loop on identical cursor
+            next_cursor = cursor + 1
+        cursor = next_cursor
+
+        # Early exit when we already reached or passed end
+        if last_open_ms >= end_ms:
+            break
+
     cols = [
         'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
         'Close time', 'Quote asset volume', 'Number of trades',
         'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
     ]
-    df = pd.DataFrame(data, columns=cols)
+    df = pd.DataFrame(all_rows, columns=cols)
+    if df.empty:
+        return df
     df['Open time'] = pd.to_datetime(df['Open time'], unit='ms', utc=True).dt.tz_convert(None)
     df['Close time'] = pd.to_datetime(df['Close time'], unit='ms', utc=True).dt.tz_convert(None)
     for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'Quote asset volume',
                 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Drop potential duplicates by open time
+    df = df.drop_duplicates(subset=['Open time']).sort_values('Open time')
     return df
 
 
