@@ -176,16 +176,12 @@ class MultiObjectiveFitnessEvaluator:
         # Normalize objectives first
         normalized = self.normalize_objectives(objectives)
         
-        # For minimization objectives, we want lower values to contribute positively to fitness
-        # For maximization objectives (stored as negated), we want higher absolute values
-        fitness_contrib = normalized.copy()
-        
-        for i in range(self.num_objectives):
-            if self.minimize_objectives[i]:
-                # Minimization: lower normalized value = higher fitness contribution
-                fitness_contrib[:, i] = 1.0 - fitness_contrib[:, i]
-            # For maximization objectives stored as negated values, 
-            # higher normalized values already represent better fitness
+        # IMPORTANT: inputs are assumed to be in minimization-space
+        # (maximize metrics were negated upstream). Therefore, for a
+        # scalar fitness where higher is better, every objective should
+        # contribute as: lower normalized value -> higher contribution.
+        # Map all columns with (1 - normalized), regardless of direction flags.
+        fitness_contrib = 1.0 - normalized
         
         # Weighted sum
         fitness = np.sum(fitness_contrib * weights, axis=1)
