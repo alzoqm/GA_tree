@@ -71,6 +71,9 @@ class TradingEnvironment:
             self.atr_column = None
             self.atr_ma_column = None
             self._columns_detected = False
+            # If ATR-MA column is absent in data, compute runtime rolling mean
+            self._use_runtime_atr_ma = False
+            self._atr_history = None
         else:
             raise ValueError(f"Unknown slippage mode: {self.slippage_mode}")
         
@@ -512,10 +515,24 @@ class TradingEnvironment:
             )
         
         if not atr_ma_candidates:
-            raise ValueError(
-                f"No ATR-MA columns found matching pattern '{self.atr_ma_pattern}'. "
-                f"Available ATR-related columns: {[col for col in available_columns if 'ATR' in col]}"
+            # No ATR-MA columns present; fall back to runtime rolling mean
+            best_atr = None
+            preferred_windows = [14, 7, 21, 28, 20, 10]
+            for window in preferred_windows:
+                for atr_col in atr_candidates:
+                    if f'_{window}' in atr_col or atr_col.endswith(str(window)):
+                        best_atr = atr_col
+                        break
+                if best_atr:
+                    break
+            if not best_atr:
+                best_atr = sorted(atr_candidates)[0]
+            print(
+                f"Auto-detected ATR column: {best_atr}; ATR-MA column not found. "
+                f"Using runtime rolling mean (window={self.atr_ma_window})."
             )
+            self._use_runtime_atr_ma = True
+            return best_atr, None
         
         # 3. 최적의 ATR/ATR-MA 쌍 찾기
         best_atr = None
@@ -595,7 +612,20 @@ class TradingEnvironment:
         try:
             # ATR과 ATR 이동평균 값 추출
             current_atr = market_data_row.get(self.atr_column)
-            atr_ma = market_data_row.get(self.atr_ma_column)
+            if not self._use_runtime_atr_ma:
+                atr_ma = market_data_row.get(self.atr_ma_column)
+            else:
+                # Compute ATR moving average on the fly using a rolling buffer
+                if current_atr is None or pd.isna(current_atr):
+                    return self.base_slippage_rate
+                if self._atr_history is None:
+                    self._atr_history = []
+                self._atr_history.append(float(current_atr))
+                # Keep last 'atr_ma_window' values
+                maxlen = int(self.atr_ma_window) if self.atr_ma_window else 50
+                if len(self._atr_history) > maxlen:
+                    self._atr_history = self._atr_history[-maxlen:]
+                atr_ma = float(np.mean(self._atr_history)) if len(self._atr_history) > 0 else None
             
             # 데이터 유효성 검사
             if current_atr is None or atr_ma is None:

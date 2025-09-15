@@ -9,7 +9,7 @@ environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 135
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
-  data_dir: "/root/workspace/dataset"
+  data_dir: "/root/workspace/GA_tree/dataset"
 
 # 1.0. Training Resumption 설정
 resumption:
@@ -21,7 +21,7 @@ resumption:
 
 # 1.1. Weights & Biases 설정
 wandb:
-  enabled: false          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
+  enabled: true          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
   project: "GA_tree"      # 프로젝트명
   entity: null            # 팀/엔티티 (없으면 null)
   group: "WFO"            # 그룹 태그
@@ -45,7 +45,7 @@ wandb:
 data:
   symbol: "BTCUSDT"
   interval: "5m"
-  days_to_fetch: 365
+  days_to_fetch: 2555
   train_ratio: 0.8 # 학습 데이터 비율
   # 생성된 데이터가 저장될 경로
   merged_csv_path: "BTCUSDT_5m_30d.csv"
@@ -55,21 +55,22 @@ data:
   # --------------------------------------------------------
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
-    target_timeframes: ['5m', '30m', '1h']
+    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
 ga_core:
   population:
     size: 10000        # 테스트용으로 작은 크기
-    max_nodes: 64    # 테스트용으로 작은 크기
-    max_depth: 6     # 테스트용으로 작은 깊이
-    max_children: 10  # 테스트용으로 작은 크기
+    max_nodes: 256    # 테스트용으로 작은 크기
+    max_depth: 10     # 테스트용으로 작은 깊이
+    max_children: 20  # 테스트용으로 작은 크기
   evolution_loop:
-    generations: 3           # 더 많은 세대로 테스트
+    # generations: 3           # 더 많은 세대로 테스트
+    generations: 20           # 더 많은 세대로 테스트
     parent_pool_size: 4000     # 교배 풀(Mating Pool) 크기
-    elite_size: 2000           # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 2000 # 최종까지 보관할 누적 베스트 개체 수
+    elite_size: 500           # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 500 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
@@ -92,12 +93,12 @@ operators:
   mutation:
     # ChainMutation에 전달될 각 변이의 확률
     probabilities:
-      add_node: 0.1
-      delete_node: 0.1
-      add_subtree: 0.05
-      delete_subtree: 0.05
-      reinitialize_node: 0.05
-      node_param: 0.2
+      add_node: 0.2
+      delete_node: 0.2
+      add_subtree: 0.1
+      delete_subtree: 0.1
+      reinitialize_node: 0.1
+      node_param: 0.3
     # 개별 변이 연산자의 세부 파라미터
     node_param_mutation:
       noise_ratio: 0.1
@@ -114,16 +115,25 @@ walk_forward:
   # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
   enabled: true
   # 윈도우 크기 설정 (테스트용으로 작게 조정)
-  train_bars: 1000           # 인샘플(IS) 윈도우 크기 (훈련 데이터 길이)
-  oos_bars: 250              # 아웃오브샘플(OOS) 윈도우 크기 (테스트 데이터 길이)
-  step_bars: 125             # 윈도우 이동 단위 (다음 윈도우로 이동할 데이터 포인트 수)
+  # train_bars: 1000           # (구) 테스트용 임시 값
+  # oos_bars: 250              # (구) 테스트용 임시 값
+  # step_bars: 125             # (구) 테스트용 임시 값
+  # === 실제 학습용 윈도우 크기 ===
+  # 기준: 총 데이터 길이 563,594 (5m 바), 1일=288바
+  # - 인샘플(학습): 2년 ≈ 210,240 바 (2*365*288)
+  # - 아웃샘플(OOS): 3개월 ≈ 25,920 바 (90*288)
+  # - 스텝: 3개월(분기) 롤링 = 25,920 바
+  train_bars: 210240        # 실제 학습 단위 (2년)
+  oos_bars: 25920           # 실제 검증 단위 (3개월)
+  step_bars: 25920          # 분기 단위 롤링
   # 윈도우 생성 방식
   scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
   # 데이터 품질 및 누수 방지
-  warmup_bars: 50           # 각 윈도우 시작에서 지표 예열을 위해 무시할 바 수
+  # warmup_bars: 50           # (구) 테스트용 임시 값
+  warmup_bars: 8640         # 실제 워밍업 (1개월, 30*288)
   embargo_bars: 0           # IS 끝과 OOS 시작 사이의 누수 방지 갭 (선택적)
   # 윈도우별 품질 제어
-  min_trades_per_window: 20 # 윈도우별 최소 거래 수 (유효성 검증)
+  min_trades_per_window: 40 # 윈도우별 최소 거래 수 (유효성 검증)
   # 집단 관리 설정
   reset_population_each_window: false  # 각 윈도우에서 집단 재설정 여부 (false시 엘리트 계승)
   adjacency_cache: false    # 인접성 캐시 사용 여부 (기본적으로 윈도우마다 재구축)
@@ -147,8 +157,8 @@ evaluation:
       atr_column: ATR_7_5m            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
       atr_ma_column: ATR_7_5m_MA_14         # e.g., 'ATR_7_5m_MA_50' - auto-detect if null  
       # Auto-detection patterns (used when columns are null)
-      atr_pattern: 'ATR_\\d+.*'   # Regex pattern to match ATR columns
-      atr_ma_pattern: 'ATR_\\d+.*_MA_\\d+' # Regex pattern to match ATR-MA columns
+      atr_pattern: 'ATR_[0-9]+.*'   # Regex pattern to match ATR columns
+      atr_ma_pattern: 'ATR_[0-9]+.*_MA_[0-9]+' # Regex pattern to match ATR-MA columns
     # Leverage bounds
     max_leverage: 100
     # Mark price / equity options
@@ -284,177 +294,178 @@ evaluation:
     minimum_trades: 5
 
 # 7. 피처 분류 및 모델 입력 설정 (수정됨)
-feature_classification:
-  # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
-  # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
-  feature_num:
-    # Price action (reduced)
-    close_change_pct: [-10, 10]
-    body_to_range_ratio: [0, 1]
-    # Momentum (canonical)
-    RSI: [0, 100]
-    ROC: [-50, 50]
-    # Trend (canonical)
-    MACD_Hist: [-50, 50]
-    ADX: [0, 100]
-    # Volatility (canonical)
-    NATR: [0, 5]
-    BB_Width: [0, 1]
-    # Volume/flow (canonical)
-    CMF: [-1, 1]
-    # Hilbert (single numeric)
-    HT_DCPERIOD: [0, 100]
-    # Composite (single representative)
-    RSI_ADX_Ratio: [-10, 10]
-
-  # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
-  # 여기에 포함된 피처들은 서로 비교 대상이 됨
-  feature_comparison:
-    - Close
-    - High
-    - Low
-    - SMA
-    - EMA
-    - BB_Mid
-    - Ichimoku_Kijun
-    - SAR
-    - Pivot_Point
-    - Support1_Pivot
-    - Resistance1_Pivot
-
-  # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
-  feature_bool:
-    - InvertedHammers
-    - Hammers
-    - Dojis
-    - MorningStars
-    - ShootingStars
-    - '3BlackCrows'
-    - '3WhiteSoldiers'
-    - BullishEngulfing
-    - BearishEngulfing
-    - HT_TRENDMODE
-    # Composite / volume-context confirmations
-    - Volume_Spike
-    - Consecutive_Bullish
-    - Consecutive_Bearish
-    - Bullish_Confirmation
-    - Bearish_Confirmation
-
-# # 7. 피처 분류 및 모델 입력 설정 (수정됨)
 # feature_classification:
 #   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
 #   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
 #   feature_num:
+#     # Price action (reduced)
 #     close_change_pct: [-10, 10]
-#     body_size: [0, 100]
-#     upper_wick_size: [0, 100]
-#     lower_wick_size: [0, 100]
-#     total_range: [0, 200]
 #     body_to_range_ratio: [0, 1]
+#     # Momentum (canonical)
 #     RSI: [0, 100]
-#     '%K': [0, 100]
-#     '%D': [0, 100]
-#     Williams_R: [-100, 0]
-#     CCI: [-250, 250]
-#     STOCHRSI_K: [0, 100]
-#     STOCHRSI_D: [0, 100]
-#     PPO: [-50, 50]
 #     ROC: [-50, 50]
-#     ULTOSC: [0, 100]
-#     MOM: [-50, 50]
-#     MACD: [-100, 100]
-#     MACD_Signal: [-100, 100]
+#     # Trend (canonical)
 #     MACD_Hist: [-50, 50]
 #     ADX: [0, 100]
-#     DI_plus: [0, 100]
-#     DI_minus: [0, 100]
-#     BB_Width: [0, 1]
-#     ATR: [0, 100]
+#     # Volatility (canonical)
 #     NATR: [0, 5]
-#     OBV: [-1e9, 1e9]
+#     BB_Width: [0, 1]
+#     # Volume/flow (canonical)
 #     CMF: [-1, 1]
-#     AD: [-1e9, 1e9]
-#     ADOSC: [-1e9, 1e9]
+#     # Hilbert (single numeric)
 #     HT_DCPERIOD: [0, 100]
-#     HT_SINE: [-1, 1]
-#     HT_LEADSINE: [-1, 1]
-#     # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+#     # Composite (single representative)
 #     RSI_ADX_Ratio: [-10, 10]
-#     MACD_ATR_Ratio: [-50, 50]
-#     RSI_Ratio: [0, 5]
-#     BB_Width_Ratio: [0, 5]
-#     RSI_ROC: [-100, 100]
-#     ATR_ROC: [-100, 100]
-#     MACD_Hist_ROC: [-100, 100]
-#     CCI_ROC: [-100, 100]
-#     # ----------------------------------------------
 
 #   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
 #   # 여기에 포함된 피처들은 서로 비교 대상이 됨
 #   feature_comparison:
-#     - Open
+#     - Close
 #     - High
 #     - Low
-#     - Close
 #     - SMA
 #     - EMA
-#     - VWMA
-#     - DEMA
-#     - TEMA
-#     - TRIMA
-#     - BB_Upper
 #     - BB_Mid
-#     - BB_Lower
-#     - Ichimoku_Tenkan
 #     - Ichimoku_Kijun
-#     - Ichimoku_SenkouA
-#     - Ichimoku_SenkouB
-#     - Ichimoku_Chikou_Ratio
 #     - SAR
-#     - Support_MA
-#     - Resistance_MA
 #     - Pivot_Point
 #     - Support1_Pivot
-#     - Support2_Pivot
 #     - Resistance1_Pivot
-#     - Resistance2_Pivot
 
 #   # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
 #   feature_bool:
 #     - InvertedHammers
 #     - Hammers
-#     - HangingMen
-#     - DarkCloudCovers
 #     - Dojis
-#     - DragonflyDojis
-#     - GravestoneDojis
 #     - MorningStars
-#     - MorningStarDojis
-#     - PiercingPatterns
 #     - ShootingStars
 #     - '3BlackCrows'
 #     - '3WhiteSoldiers'
-#     - '3StarsInSouth'
-#     - BullishHarami
-#     - BearishHarami
 #     - BullishEngulfing
 #     - BearishEngulfing
-#     - BullishDojiStar
-#     - BearishDojiStar
-#     - BullishTasukiGap
-#     - BearishTasukiGap
-#     - BullishXSideGap3Methods
-#     - BearishXSideGap3Methods
-#     - BullishSpinningTop
-#     - BearishSpinningTop
-#     - BullishRise3Methods
-#     - BearishFall3Methods
 #     - HT_TRENDMODE
-#     # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+#     # Composite / volume-context confirmations
 #     - Volume_Spike
 #     - Consecutive_Bullish
 #     - Consecutive_Bearish
 #     - Bullish_Confirmation
 #     - Bearish_Confirmation
-#     # ---------------------------------------------
+
+# 7. 피처 분류 및 모델 입력 설정 (수정됨)
+feature_classification:
+  # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
+  # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
+  feature_num:
+    close_change_pct: [-10, 10]
+    body_size: [0, 100]
+    upper_wick_size: [0, 100]
+    lower_wick_size: [0, 100]
+    total_range: [0, 200]
+    body_to_range_ratio: [0, 1]
+    RSI: [0, 100]
+    '%K': [0, 100]
+    '%D': [0, 100]
+    Williams_R: [-100, 0]
+    CCI: [-250, 250]
+    STOCHRSI_K: [0, 100]
+    STOCHRSI_D: [0, 100]
+    PPO: [-50, 50]
+    ROC: [-50, 50]
+    ULTOSC: [0, 100]
+    MOM: [-50, 50]
+    MACD: [-100, 100]
+    MACD_Signal: [-100, 100]
+    MACD_Hist: [-50, 50]
+    ADX: [0, 100]
+    DI_plus: [0, 100]
+    DI_minus: [0, 100]
+    BB_Width: [0, 1]
+    ATR: [0, 100]
+    NATR: [0, 5]
+    OBV: [-1e9, 1e9]
+    CMF: [-1, 1]
+    ADOSC: [-1e9, 1e9]
+    # AD는 제거 (요청 반영)
+    HT_DCPERIOD: [0, 100]
+    HT_SINE: [-1, 1]
+    HT_LEADSINE: [-1, 1]
+    # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+    RSI_ADX_Ratio: [-10, 10]
+    MACD_ATR_Ratio: [-50, 50]
+    RSI_Ratio: [0, 5]
+    BB_Width_Ratio: [0, 5]
+    Ichimoku_Chikou_Ratio: [0, 5]
+    RSI_ROC: [-100, 100]
+    ATR_ROC: [-100, 100]
+    MACD_Hist_ROC: [-100, 100]
+    CCI_ROC: [-100, 100]
+    # ----------------------------------------------
+
+  # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
+  # 여기에 포함된 피처들은 서로 비교 대상이 됨
+  feature_comparison:
+    - Open
+    - High
+    - Low
+    - Close
+    - SMA
+    - EMA
+    - VWMA
+    - DEMA
+    - TEMA
+    - TRIMA
+    - BB_Upper
+    - BB_Mid
+    - BB_Lower
+    - Ichimoku_Tenkan
+    - Ichimoku_Kijun
+    - Ichimoku_SenkouA
+    - Ichimoku_SenkouB
+    # Ichimoku_Chikou_Ratio는 피처간 비교에서 숫자형 비교로 이동 (요청 반영)
+    - SAR
+    - Support_MA
+    - Resistance_MA
+    - Pivot_Point
+    - Support1_Pivot
+    - Support2_Pivot
+    - Resistance1_Pivot
+    - Resistance2_Pivot
+
+  # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
+  feature_bool:
+    - InvertedHammers
+    - Hammers
+    - HangingMen
+    - DarkCloudCovers
+    - Dojis
+    - DragonflyDojis
+    - GravestoneDojis
+    - MorningStars
+    - MorningStarDojis
+    - PiercingPatterns
+    - ShootingStars
+    - '3BlackCrows'
+    - '3WhiteSoldiers'
+    - '3StarsInSouth'
+    - BullishHarami
+    - BearishHarami
+    - BullishEngulfing
+    - BearishEngulfing
+    - BullishDojiStar
+    - BearishDojiStar
+    - BullishTasukiGap
+    - BearishTasukiGap
+    - BullishXSideGap3Methods
+    - BearishXSideGap3Methods
+    - BullishSpinningTop
+    - BearishSpinningTop
+    - BullishRise3Methods
+    - BearishFall3Methods
+    - HT_TRENDMODE
+    # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+    - Volume_Spike
+    - Consecutive_Bullish
+    - Consecutive_Bearish
+    - Bullish_Confirmation
+    - Bearish_Confirmation
+    # ---------------------------------------------
