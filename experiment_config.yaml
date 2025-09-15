@@ -104,11 +104,11 @@ operators:
       noise_ratio: 0.1
       leverage_change: 5
     add_node_mutation:
-      max_add_nodes: 5
+      max_add_nodes: 12
     delete_node_mutation:
       max_delete_nodes: 5
     add_subtree_mutation:
-      node_count_range: [2, 5]
+      node_count_range: [4, 10]
 
 # 5. Walk-Forward Optimization 설정
 walk_forward:
@@ -150,12 +150,12 @@ evaluation:
       fixed_rate: 0.0005
       # Relative volatility mode parameters
       base_rate: 0.0001           # Minimum slippage in calm markets (0.01%)
-      atr_ma_window: 50           # Lookback period for ATR moving average
+      atr_ma_window: 50           # Lookback period for ATR moving average (match config MA)
       min_slippage: 0.00005       # Floor cap (0.005%)
       max_slippage: 0.002         # Ceiling cap (0.2%)
       # ATR column configuration (optional - auto-detect if not specified)
       atr_column: ATR_7_5m            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
-      atr_ma_column: ATR_7_5m_MA_14         # e.g., 'ATR_7_5m_MA_50' - auto-detect if null  
+      atr_ma_column: ATR_7_MA_14_5m         # e.g., 'ATR_7_MA_50_5m' - auto-detect if null  
       # Auto-detection patterns (used when columns are null)
       atr_pattern: 'ATR_[0-9]+.*'   # Regex pattern to match ATR columns
       atr_ma_pattern: 'ATR_[0-9]+.*_MA_[0-9]+' # Regex pattern to match ATR-MA columns
@@ -272,14 +272,14 @@ evaluation:
   pruning:
     enabled: true
     # usage thresholds
-    k_min: 3
-    tau_use: 0.01
-    tau_ineff: 0.8
+    k_min: 1
+    tau_use: 0.0
+    tau_ineff: 1.1
     # performance thresholds
-    k_perf_min: 3
-    tau_wr: 0.45
+    k_perf_min: 9999999
+    tau_wr: 0.0
     # harmful thresholds
-    k_harm: 5
+    k_harm: 9999999
     delta_harm: 0.001
     # per-branch minimum actions to keep
     m_min: 1

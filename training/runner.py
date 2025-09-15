@@ -309,47 +309,6 @@ def _compute_generation_objectives(
     )
 
 
-def _update_pareto_archive(
-    evaluator,
-    population: GATreePop,
-    train_objectives: np.ndarray,
-    best_chromosomes: Optional[torch.Tensor],
-    best_objectives: Optional[np.ndarray],
-    best_size: int,
-) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
-    """Update Pareto archive given the current generation objectives."""
-    valid_mask = ~np.any(np.isin(train_objectives, [-1e9, 1e9]), axis=1)
-    if not np.any(valid_mask):
-        return best_chromosomes, best_objectives
-
-    valid_objectives = train_objectives[valid_mask]
-    valid_chromosomes = population.population_tensor[valid_mask].clone()
-    pareto_front_mask = evaluator._find_pareto_front(valid_objectives)
-    if not np.any(pareto_front_mask):
-        return best_chromosomes, best_objectives
-
-    pareto_objectives = valid_objectives[pareto_front_mask]
-    pareto_chromosomes = valid_chromosomes[pareto_front_mask]
-
-    if best_chromosomes is None:
-        best_objectives = pareto_objectives.copy()
-        best_chromosomes = pareto_chromosomes.clone()
-    else:
-        combined_objectives = np.vstack([best_objectives, pareto_objectives])
-        combined_chromosomes = torch.cat([best_chromosomes, pareto_chromosomes])
-        combined_pareto_mask = evaluator._find_pareto_front(combined_objectives)
-        best_objectives = combined_objectives[combined_pareto_mask]
-        best_chromosomes = combined_chromosomes[combined_pareto_mask]
-
-        if len(best_objectives) > best_size:
-            distances = evaluator._calculate_crowding_distances(best_objectives)
-            selected_indices = np.argsort(distances)[-best_size:]
-            best_objectives = best_objectives[selected_indices]
-            best_chromosomes = best_chromosomes[selected_indices]
-
-    return best_chromosomes, best_objectives
-
-
 def _slice_node_stats(stats: dict, mask_or_idx) -> dict:
     """Utility to slice node stats dict along batch dimension consistently.
 
