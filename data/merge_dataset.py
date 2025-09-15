@@ -89,7 +89,9 @@ def generate_multi_timeframe_features(
         resample_freq = timeframe.replace('m', 'T').replace('h','H').replace('d','D')
         df_resampled = source_df.resample(resample_freq).agg(agg_rules)
         df_resampled = df_resampled.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-        
+        # 누적 의존 피처를 전달하기 위한 작업용 DataFrame
+        df_work = df_resampled.copy()
+
         for func_name, params_list in feature_params[timeframe].items():
             try:
                 feature_function = getattr(talib_feat, func_name)
@@ -98,17 +100,33 @@ def generate_multi_timeframe_features(
                 continue
 
             for params in params_list:
-                df_with_feature, new_cols = feature_function(df_resampled.copy(), **params)
-                
-                rename_dict = {col: f"{col}_{timeframe}" for col in new_cols}
-                df_with_feature.rename(columns=rename_dict, inplace=True)
-                
-                renamed_cols = list(rename_dict.values())
-                
-                if timeframe not in features_by_timeframe:
-                    features_by_timeframe[timeframe] = df_with_feature[renamed_cols]
+                # 의존 피처가 필요한 함수(예: ATR -> ATR-MA)를 위해 누적 DataFrame을 전달
+                # 주의: feature_function은 df_work를 인플레이스 변경할 수 있음
+                df_with_feature, new_cols = feature_function(df_work, **params)
+
+                # 다음 함수가 방금 생성한 피처를 참조할 수 있도록 누적 반영
+                # df_with_feature가 df_work와 동일 객체일 수 있으므로, 별도의 rename로 인해
+                # df_work의 원본 컬럼명이 바뀌지 않도록 여기서는 "미리" 누적만 수행하고,
+                # rename은 별도의 복사본에서 처리한다.
+                if new_cols:
+                    for c in new_cols:
+                        df_work[c] = df_with_feature[c]
+
+                # 새로 생성된 컬럼들만 별도 복사 후 타임프레임 접미사 부여
+                if new_cols:
+                    renamed_cols = [f"{col}_{timeframe}" for col in new_cols]
+                    renamed_df = df_with_feature[new_cols].copy()
+                    renamed_df.columns = renamed_cols
                 else:
-                    features_by_timeframe[timeframe] = features_by_timeframe[timeframe].join(df_with_feature[renamed_cols])
+                    renamed_cols = []
+                    renamed_df = pd.DataFrame(index=df_with_feature.index)
+
+                # 타임프레임별 피처 모음에 병합
+                if renamed_cols:
+                    if timeframe not in features_by_timeframe:
+                        features_by_timeframe[timeframe] = renamed_df[renamed_cols]
+                    else:
+                        features_by_timeframe[timeframe] = features_by_timeframe[timeframe].join(renamed_df[renamed_cols])
 
                 all_new_columns.extend(renamed_cols)
                 print(f"  - {func_name} ({params}): {len(renamed_cols)}개 컬럼 생성 완료")

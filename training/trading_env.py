@@ -544,9 +544,18 @@ class TradingEnvironment:
         for window in preferred_windows:
             for atr_col in atr_candidates:
                 if f'_{window}' in atr_col or atr_col.endswith(str(window)):
-                    # 해당 ATR에 맞는 MA 컬럼 찾기 (정확한 prefix 매칭)
-                    matching_ma = [ma_col for ma_col in atr_ma_candidates 
-                                   if ma_col.startswith(atr_col + '_MA_')]
+                    # ATR 컬럼과 동일 타임프레임 접미사를 고려한 MA 컬럼 매칭 지원
+                    # 예: ATR_14_5m <-> ATR_14_MA_50_5m
+                    m = re.match(r'^(.*)_(\d+[mhd])$', atr_col)
+                    if m:
+                        atr_base, tf_suffix = m.group(1), m.group(2)
+                    else:
+                        atr_base, tf_suffix = atr_col, None
+                    # 기본 규칙과 접미사 규칙을 모두 허용
+                    matching_ma = [ma_col for ma_col in atr_ma_candidates if (
+                        ma_col.startswith(atr_col + '_MA_') or
+                        (ma_col.startswith(atr_base + '_MA_') and (tf_suffix is None or ma_col.endswith('_' + tf_suffix)))
+                    )]
                     
                     # 우선적으로 설정된 MA 윈도우와 일치하는 컬럼 찾기
                     preferred_ma = [ma_col for ma_col in matching_ma 
@@ -567,11 +576,17 @@ class TradingEnvironment:
         
         # 4. 기본 매칭 시도 (우선순위 매칭이 실패한 경우)
         if not best_atr or not best_atr_ma:
-            # 첫 번째 ATR 컬럼과 매칭되는 MA 컬럼 찾기
+            # 첫 번째 ATR 컬럼과 매칭되는 MA 컬럼 찾기 (타임프레임 접미사 고려)
             for atr_col in sorted(atr_candidates):
-                # ATR 컬럼에서 기본 부분 추출 (예: ATR_7_5m -> ATR_7_5m)
-                matching_ma = [ma_col for ma_col in atr_ma_candidates 
-                               if ma_col.startswith(atr_col + '_MA_')]
+                m = re.match(r'^(.*)_(\d+[mhd])$', atr_col)
+                if m:
+                    atr_base, tf_suffix = m.group(1), m.group(2)
+                else:
+                    atr_base, tf_suffix = atr_col, None
+                matching_ma = [ma_col for ma_col in atr_ma_candidates if (
+                    ma_col.startswith(atr_col + '_MA_') or
+                    (ma_col.startswith(atr_base + '_MA_') and (tf_suffix is None or ma_col.endswith('_' + tf_suffix)))
+                )]
                 if matching_ma:
                     best_atr = atr_col
                     best_atr_ma = matching_ma[0]
