@@ -215,3 +215,12 @@ void compute_equity_batch_cuda(
     float mark_t,
     float equity_base,
     torch::Tensor equity_out);
+
+// Host launcher to update equity aggregates and drawdown metrics in place
+void update_equity_and_drawdown_cuda(
+    torch::Tensor realized_cum,
+    torch::Tensor total_unreal,
+    torch::Tensor cum_sum,
+    torch::Tensor running_max,
+    torch::Tensor max_drawdown,
+    double equity_base);

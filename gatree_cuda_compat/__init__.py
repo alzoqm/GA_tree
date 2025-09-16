@@ -92,6 +92,7 @@ try:
     update_holding_periods = getattr(gatree_env, 'update_holding_periods', None)
     prepare_and_deduplicate_actions = getattr(gatree_env, 'prepare_and_deduplicate_actions', None)
     update_dedup_buffers_after_exec = getattr(gatree_env, 'update_dedup_buffers_after_exec', None)
+    update_equity_and_drawdown = getattr(gatree_env, 'update_equity_and_drawdown', None)
 
 except ImportError as e:
     print("="*60)
@@ -143,3 +144,4 @@ except ImportError as e:
     update_holding_periods = None
     prepare_and_deduplicate_actions = None
     update_dedup_buffers_after_exec = None
+    update_equity_and_drawdown = None
