@@ -476,7 +476,10 @@ class TradingEnvironment:
         self.cum_sum = equity
         self.running_max = torch.maximum(self.running_max, self.cum_sum)
         current_drawdown = self.running_max - self.cum_sum
-        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown)
+        # Convert drawdown to relative percentage (0-1) based on peak equity
+        denom = torch.where(self.running_max > 1e-8, self.running_max, torch.ones_like(self.running_max))
+        current_drawdown_ratio = torch.clamp(current_drawdown / denom, min=0.0, max=1.0)
+        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown_ratio)
         self.profit.zero_()
         self.last_timestamp = timestamp
 
@@ -1301,7 +1304,7 @@ class TradingEnvironment:
         mean_returns[invalid_mask] = -1e9
         profit_factors[invalid_mask] = -1e9
         win_rates[invalid_mask] = -1e9
-        self.max_drawdown[invalid_mask] = 1e9
+        self.max_drawdown[invalid_mask] = 1.0
         self.compound_value[invalid_mask] = -1e9
         # Append trade-based win rate as an extra column for reporting
         metrics = torch.stack([mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value, trade_win_rates], dim=1)

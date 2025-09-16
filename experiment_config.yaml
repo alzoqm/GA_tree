@@ -7,7 +7,7 @@
 # 1. 환경 및 경로 설정
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
-  seed: 135
+  seed: 200
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/GA_tree/dataset"
 
@@ -133,7 +133,7 @@ walk_forward:
   warmup_bars: 8640         # 실제 워밍업 (1개월, 30*288)
   embargo_bars: 0           # IS 끝과 OOS 시작 사이의 누수 방지 갭 (선택적)
   # 윈도우별 품질 제어
-  min_trades_per_window: 40 # 윈도우별 최소 거래 수 (유효성 검증)
+  min_trades_per_window: 24 # 윈도우별 최소 거래 수 (유효성 검증)
   # 집단 관리 설정
   reset_population_each_window: false  # 각 윈도우에서 집단 재설정 여부 (false시 엘리트 계승)
   adjacency_cache: false    # 인접성 캐시 사용 여부 (기본적으로 윈도우마다 재구축)
@@ -195,8 +195,10 @@ evaluation:
   # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
   is_objectives:
     # Use PSR instead of raw Sharpe during evolution
-    objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
-    minimize: [false, true, false, true]
+    # objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
+    # minimize: [false, true, false, true]
+    objectives: ["mean_return", "max_drawdown", "psr"]
+    minimize: [false, true, false]
     normalization: "minmax"
     # PSR benchmark Sharpe (SR*) used in PSR computation
     psr_sr_benchmark: 0.0
