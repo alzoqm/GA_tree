@@ -209,6 +209,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+        "compute_unrealized_pnl",
+        &compute_unrealized_pnl_cuda,
+        "Compute unrealized PnL for a batch",
+        py::arg("pos_list"),
+        py::arg("price_list"),
+        py::arg("leverage_ratio"),
+        py::arg("enter_ratio"),
+        py::arg("mark_t")
+    );
+
+    m.def(
         "compute_equity_batch",
         [](torch::Tensor pos_list,
            torch::Tensor price_list,
