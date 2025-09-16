@@ -569,19 +569,42 @@ class TradingEnvironment:
         return unreal
 
     def _update_equity_and_drawdown(self, total_unreal: torch.Tensor, timestamp):
-        equity = self.equity_base + self.realized_cum + total_unreal
-        self.cum_sum = equity
-        self.running_max = torch.maximum(self.running_max, self.cum_sum)
-        current_drawdown = self.running_max - self.cum_sum
-        # Guard against division by zero while keeping the ratio tied to the peak equity level.
-        denom = torch.clamp(self.running_max, min=1e-8)
-        current_drawdown_ratio = torch.where(
-            self.running_max > 0,
-            current_drawdown / denom,
-            torch.zeros_like(current_drawdown)
+        try:
+            import gatree_cuda_compat as gatree_cuda_local
+        except Exception:
+            gatree_cuda_local = None
+
+        kernel = getattr(gatree_cuda_local, 'update_equity_and_drawdown', None) if gatree_cuda_local is not None else None
+        if kernel is None:
+            raise RuntimeError("CUDA update_equity_and_drawdown kernel is not available")
+
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("CUDA device가 아닙니다. update_equity_and_drawdown는 GPU 전용입니다.")
+
+        realized_cum = self.realized_cum.contiguous()
+        total_unreal = total_unreal.contiguous()
+        cum_sum = self.cum_sum.contiguous()
+        running_max = self.running_max.contiguous()
+        max_drawdown = self.max_drawdown.contiguous()
+
+        kernel(
+            realized_cum,
+            total_unreal,
+            cum_sum,
+            running_max,
+            max_drawdown,
+            float(self.equity_base)
         )
-        current_drawdown_ratio = torch.clamp(current_drawdown_ratio, min=0.0, max=1.0)
-        self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown_ratio)
+
+        if realized_cum.data_ptr() != self.realized_cum.data_ptr():
+            self.realized_cum = realized_cum
+        if cum_sum.data_ptr() != self.cum_sum.data_ptr():
+            self.cum_sum = cum_sum
+        if running_max.data_ptr() != self.running_max.data_ptr():
+            self.running_max = running_max
+        if max_drawdown.data_ptr() != self.max_drawdown.data_ptr():
+            self.max_drawdown = max_drawdown
+
         self.profit.zero_()
         self.last_timestamp = timestamp
 

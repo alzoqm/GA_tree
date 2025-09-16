@@ -228,6 +228,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+        "update_equity_and_drawdown",
+        &update_equity_and_drawdown_cuda,
+        "Update equity aggregates and drawdown metrics in place",
+        py::arg("realized_cum"),
+        py::arg("total_unreal"),
+        py::arg("cum_sum"),
+        py::arg("running_max"),
+        py::arg("max_drawdown"),
+        py::arg("equity_base")
+    );
+
+    m.def(
         "compute_equity_batch",
         [](torch::Tensor pos_list,
            torch::Tensor price_list,

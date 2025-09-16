@@ -1886,3 +1886,86 @@ void compute_equity_batch_cuda(
         B
     );
 }
+
+// ===============================================================
+// Update equity aggregates and drawdown metrics in place
+// ===============================================================
+
+__global__ void update_equity_and_drawdown_kernel(
+    const float* __restrict__ realized_cum,
+    const float* __restrict__ total_unreal,
+    float equity_base,
+    float* __restrict__ cum_sum,
+    float* __restrict__ running_max,
+    float* __restrict__ max_drawdown,
+    int B)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    const float realized = realized_cum[i];
+    const float unreal = total_unreal[i];
+    const float equity = equity_base + realized + unreal;
+
+    float run_max = running_max[i];
+    if (equity > run_max) {
+        run_max = equity;
+    }
+
+    const float drawdown = run_max - equity;
+    float ratio = 0.0f;
+    if (run_max > 0.0f) {
+        const float denom = fmaxf(run_max, 1e-8f);
+        ratio = drawdown / denom;
+        if (ratio < 0.0f) ratio = 0.0f;
+        if (ratio > 1.0f) ratio = 1.0f;
+    }
+
+    const float prev_ratio = max_drawdown[i];
+    cum_sum[i] = equity;
+    running_max[i] = run_max;
+    max_drawdown[i] = (ratio > prev_ratio) ? ratio : prev_ratio;
+}
+
+void update_equity_and_drawdown_cuda(
+    torch::Tensor realized_cum,
+    torch::Tensor total_unreal,
+    torch::Tensor cum_sum,
+    torch::Tensor running_max,
+    torch::Tensor max_drawdown,
+    double equity_base)
+{
+    auto check_cuda_contig = [](const torch::Tensor& t, const char* name){
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA tensor");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+        TORCH_CHECK(t.dtype() == torch::kFloat32, name, " must be float32 tensor");
+    };
+
+    check_cuda_contig(realized_cum, "realized_cum");
+    check_cuda_contig(total_unreal, "total_unreal");
+    check_cuda_contig(cum_sum, "cum_sum");
+    check_cuda_contig(running_max, "running_max");
+    check_cuda_contig(max_drawdown, "max_drawdown");
+
+    const int B = static_cast<int>(realized_cum.numel());
+    TORCH_CHECK(total_unreal.numel() == B, "size mismatch for total_unreal");
+    TORCH_CHECK(cum_sum.numel() == B, "size mismatch for cum_sum");
+    TORCH_CHECK(running_max.numel() == B, "size mismatch for running_max");
+    TORCH_CHECK(max_drawdown.numel() == B, "size mismatch for max_drawdown");
+    if (B == 0) {
+        return;
+    }
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+
+    update_equity_and_drawdown_kernel<<<blocks, threads>>>(
+        realized_cum.data_ptr<float>(),
+        total_unreal.data_ptr<float>(),
+        static_cast<float>(equity_base),
+        cum_sum.data_ptr<float>(),
+        running_max.data_ptr<float>(),
+        max_drawdown.data_ptr<float>(),
+        B
+    );
+}
