@@ -422,6 +422,7 @@ class WalkForwardOptimizer:
         
         # Handle resumption if checkpoint manager is provided
         start_window_idx = 0
+        latest_generation_checkpoint = None
         if checkpoint_manager is not None:
             resumption_state = self.load_wfo_state(checkpoint_manager)
             if resumption_state is not None:
@@ -434,15 +435,62 @@ class WalkForwardOptimizer:
                     start_window_idx = len(windows)
             else:
                 logging.info("No valid checkpoint found, starting from beginning")
+            latest_generation_checkpoint = checkpoint_manager.find_latest_checkpoint()
 
         for window_idx, (train_start, train_end, oos_start, oos_end) in enumerate(tqdm(windows[start_window_idx:], desc="WFO Windows", initial=start_window_idx, total=len(windows)), start=start_window_idx):
             # Per-window checkpoint directory
             window_checkpoint_dir = os.path.join(output_dir or env_cfg['output_dir'], 'checkpoints', f'wf_window_{window_idx}')
             os.makedirs(window_checkpoint_dir, exist_ok=True)
 
+            population = evolution_engine.population
+            window_start_gen = 0
+            resume_archive = None
+
+            if checkpoint_manager is not None and latest_generation_checkpoint is not None:
+                latest_window, latest_generation = latest_generation_checkpoint
+                if latest_window == window_idx and latest_generation >= 0:
+                    from training.runner import GenerationRunner
+
+                    restored = GenerationRunner.load_generation_checkpoint(
+                        checkpoint_manager=checkpoint_manager,
+                        window_idx=window_idx,
+                        generation=latest_generation,
+                        config=ga_cfg,
+                    )
+                    if restored is not None:
+                        restored_population, restored_best_chromosomes, restored_best_objectives, evolution_state = restored
+
+                        try:
+                            restored_population.move_to(env_cfg['device'])
+                        except Exception:
+                            restored_population.population_tensor = restored_population.population_tensor.to(env_cfg['device'])
+                        restored_population.initialized = True
+                        restored_population.set_next_idx()
+                        evolution_engine.population = restored_population
+                        population = evolution_engine.population
+
+                        resume_best_node_stats = None
+                        if isinstance(evolution_state, dict):
+                            resume_best_node_stats = evolution_state.get('best_node_stats')
+                            if 'generation_stats' in evolution_state and hasattr(evolution_engine, 'generation_stats'):
+                                evolution_engine.generation_stats = evolution_state['generation_stats']
+
+                        if restored_best_chromosomes is not None:
+                            restored_best_chromosomes = restored_best_chromosomes.to(env_cfg['device'])
+                        if isinstance(restored_best_objectives, torch.Tensor):
+                            restored_best_objectives = restored_best_objectives.cpu().numpy()
+
+                        if restored_best_chromosomes is not None and restored_best_objectives is not None:
+                            resume_archive = (restored_best_chromosomes, restored_best_objectives, resume_best_node_stats)
+
+                        window_start_gen = min(latest_generation + 1, ga_cfg['evolution_loop']['generations'])
+                        logging.info(f"Resuming window {window_idx} from generation {window_start_gen}")
+                    latest_generation_checkpoint = None
+
             # Reset population if requested
             if window_idx > 0 and wfo_cfg.get('reset_population_each_window', False):
-                population.make_population(device=env_cfg['device'])
+                if not (window_idx == start_window_idx and window_start_gen > 0):
+                    population.make_population(device=env_cfg['device'])
 
             # In-Sample training
             is_objectives_config = self.evaluation_config.get('is_objectives', self.evaluation_config.get('objectives'))
@@ -466,6 +514,8 @@ class WalkForwardOptimizer:
                 wandb_config=wandb_cfg,
                 checkpoint_manager=checkpoint_manager,
                 window_idx=window_idx,
+                best_archive=resume_archive,
+                start_gen=window_start_gen,
             )
 
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:

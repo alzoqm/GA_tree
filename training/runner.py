@@ -178,13 +178,24 @@ class GenerationRunner:
         population = evolution.population
 
         # Pareto archive
-        if best_archive is None:
-            best_chromosomes = None
-            best_objectives = None
-            best_node_stats: Optional[dict] = None
-        else:
-            best_chromosomes, best_objectives = best_archive
-            best_node_stats = None
+        best_chromosomes: Optional[torch.Tensor] = None
+        best_objectives: Optional[np.ndarray] = None
+        best_node_stats: Optional[dict] = None
+        if best_archive is not None:
+            if isinstance(best_archive, tuple):
+                if len(best_archive) >= 1:
+                    best_chromosomes = best_archive[0]
+                if len(best_archive) >= 2:
+                    best_objectives = best_archive[1]
+                if len(best_archive) >= 3:
+                    best_node_stats = best_archive[2]
+            else:
+                best_chromosomes, best_objectives = best_archive
+
+        if isinstance(best_chromosomes, torch.Tensor) and str(best_chromosomes.device) != str(self.device):
+            best_chromosomes = best_chromosomes.to(self.device)
+        if isinstance(best_objectives, torch.Tensor):
+            best_objectives = best_objectives.detach().cpu().numpy()
 
         for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
             print(f'Generation {gen_idx}:')
