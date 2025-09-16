@@ -8,6 +8,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "CUDA kernels for trading environment actions execution";
 
     m.def(
+        "prepare_and_deduplicate_actions",
+        &prepare_and_deduplicate_actions_cuda,
+        "Prepare actions by applying duplicate detection on GPU",
+        py::arg("actions"),
+        py::arg("raw_actions"),
+        py::arg("prev_actions_raw"),
+        py::arg("prev_applied_mask"),
+        py::arg("dedup_exclude_types"),
+        py::arg("compare_cols"),
+        py::arg("rtol"),
+        py::arg("atol"),
+        py::arg("require_applied"),
+        py::arg("action_not_found"),
+        py::arg("last_action_node_idx") = py::none(),
+        py::arg("node_attempt_count") = py::none(),
+        py::arg("node_stall_count") = py::none(),
+        py::arg("max_nodes") = 0
+    );
+
+    m.def(
         "execute_actions_batch",
         &execute_actions_batch_cuda,
         "Executes trading actions for a batch (thread-per-individual)",

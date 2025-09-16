@@ -4,6 +4,258 @@
 #include "trading_env_kernel.cuh"
 #include "constants.h"
 #include <cuda_runtime.h>
+#include <cmath>
+#include <algorithm>
+#include <string>
+#include <c10/cuda/CUDAException.h>
+
+__device__ inline int ftoi_nearest(float v) {
+    return __float2int_rn(v);
+}
+
+__device__ inline bool is_same_inf(float a, float b) {
+    return isinf(a) && isinf(b) && ((a > 0.0f && b > 0.0f) || (a < 0.0f && b < 0.0f));
+}
+
+__global__ void prepare_and_deduplicate_kernel(
+    float* __restrict__ actions,
+    const float* __restrict__ raw_actions,
+    const float* __restrict__ prev_actions,
+    const bool* __restrict__ prev_applied,
+    const int32_t* __restrict__ exclude_types,
+    int exclude_count,
+    int compare_cols,
+    float rtol,
+    float atol,
+    bool require_applied,
+    int action_dim,
+    int batch_size,
+    int action_not_found,
+    bool* __restrict__ duplicate_mask,
+    const int32_t* __restrict__ last_action_node_idx,
+    int max_nodes,
+    int32_t* __restrict__ node_attempt_count,
+    int node_attempt_stride,
+    int node_cols,
+    int32_t* __restrict__ node_stall_count,
+    int node_stall_stride)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= batch_size) return;
+
+    float* action_row = actions + static_cast<size_t>(i) * action_dim;
+    const float* raw_row = raw_actions + static_cast<size_t>(i) * action_dim;
+    const float* prev_row = prev_actions + static_cast<size_t>(i) * action_dim;
+
+    const int curr_type = ftoi_nearest(action_row[0]);
+    const int prev_type = ftoi_nearest(prev_row[0]);
+    const bool type_equal = (curr_type == prev_type);
+
+    const int cmp_cols = compare_cols < action_dim ? compare_cols : action_dim;
+    bool same_params = true;
+    if (cmp_cols > 1) {
+        for (int col = 1; col < cmp_cols; ++col) {
+            const float a = action_row[col];
+            const float b = prev_row[col];
+            if (a != a || b != b) { // NaN check
+                same_params = false;
+                break;
+            }
+            if (!isfinite(a) || !isfinite(b)) {
+                if (!is_same_inf(a, b)) {
+                    same_params = false;
+                }
+                continue;
+            }
+            const float diff = fabsf(a - b);
+            const float tol = atol + rtol * fabsf(b);
+            if (!(diff <= tol)) {
+                same_params = false;
+                break;
+            }
+        }
+    }
+
+    bool excluded = false;
+    if (exclude_count > 0) {
+        for (int k = 0; k < exclude_count; ++k) {
+            if (curr_type == exclude_types[k]) {
+                excluded = true;
+                break;
+            }
+        }
+    }
+
+    bool duplicate = type_equal && same_params && !excluded;
+    if (require_applied && duplicate) {
+        if (!prev_applied[i]) {
+            duplicate = false;
+        }
+    }
+
+    if (duplicate) {
+        for (int col = 0; col < action_dim; ++col) {
+            action_row[col] = 0.0f;
+        }
+        action_row[0] = static_cast<float>(action_not_found);
+    }
+
+    const bool valid_pred = (ftoi_nearest(raw_row[0]) != action_not_found);
+    duplicate_mask[i] = duplicate;
+
+    if (!valid_pred || last_action_node_idx == nullptr || node_attempt_count == nullptr || node_attempt_stride <= 0 || node_cols <= 0) {
+        return;
+    }
+
+    int node_idx = last_action_node_idx[i];
+    int clamp_max = (max_nodes > 0) ? (max_nodes - 1) : (node_cols - 1);
+    if (clamp_max < 0) clamp_max = 0;
+    if (node_idx < 0) node_idx = 0;
+    if (node_idx > clamp_max) node_idx = clamp_max;
+
+    int32_t* attempt_row = node_attempt_count + static_cast<size_t>(i) * node_attempt_stride;
+    attempt_row[node_idx] += 1;
+
+    if (duplicate && node_stall_count != nullptr && node_stall_stride > 0) {
+        int32_t* stall_row = node_stall_count + static_cast<size_t>(i) * node_stall_stride;
+        stall_row[node_idx] += 1;
+    }
+}
+
+torch::Tensor prepare_and_deduplicate_actions_cuda(
+    torch::Tensor actions,
+    torch::Tensor raw_actions,
+    torch::Tensor prev_actions_raw,
+    torch::Tensor prev_applied_mask,
+    torch::Tensor dedup_exclude_types,
+    int64_t compare_cols,
+    double rtol,
+    double atol,
+    bool require_applied,
+    int action_not_found,
+    c10::optional<torch::Tensor> last_action_node_idx,
+    c10::optional<torch::Tensor> node_attempt_count,
+    c10::optional<torch::Tensor> node_stall_count,
+    int64_t max_nodes)
+{
+    TORCH_CHECK(actions.is_cuda(), "actions must be CUDA tensor");
+    TORCH_CHECK(raw_actions.is_cuda(), "raw_actions must be CUDA tensor");
+    TORCH_CHECK(prev_actions_raw.is_cuda(), "prev_actions_raw must be CUDA tensor");
+    TORCH_CHECK(prev_applied_mask.is_cuda(), "prev_applied_mask must be CUDA tensor");
+    TORCH_CHECK(dedup_exclude_types.is_cuda(), "dedup_exclude_types must be CUDA tensor");
+    TORCH_CHECK(actions.dim() == 2, "actions must be 2D");
+    TORCH_CHECK(raw_actions.sizes() == actions.sizes(), "raw_actions shape mismatch");
+    TORCH_CHECK(prev_actions_raw.dim() == 2 && prev_actions_raw.size(0) == actions.size(0), "prev_actions_raw shape mismatch");
+    TORCH_CHECK(prev_applied_mask.dim() == 1 && prev_applied_mask.size(0) == actions.size(0), "prev_applied_mask must be (B,)");
+    TORCH_CHECK(prev_applied_mask.dtype() == torch::kBool, "prev_applied_mask must be bool tensor");
+    TORCH_CHECK(actions.dtype() == torch::kFloat32 && raw_actions.dtype() == torch::kFloat32,
+                "actions/raw_actions must be float32");
+    TORCH_CHECK(prev_actions_raw.dtype() == torch::kFloat32, "prev_actions_raw must be float32");
+    TORCH_CHECK(dedup_exclude_types.dtype() == torch::kInt32, "dedup_exclude_types must be int32");
+
+    actions = actions.contiguous();
+    raw_actions = raw_actions.contiguous();
+    prev_actions_raw = prev_actions_raw.contiguous();
+    prev_applied_mask = prev_applied_mask.contiguous();
+    if (dedup_exclude_types.numel() > 0) {
+        dedup_exclude_types = dedup_exclude_types.contiguous();
+    }
+
+    const int batch_size = static_cast<int>(actions.size(0));
+    const int action_dim = static_cast<int>(actions.size(1));
+    if (batch_size == 0) {
+        return torch::empty({0}, torch::TensorOptions().dtype(torch::kBool).device(actions.device()));
+    }
+
+    int cmp_cols = static_cast<int>(compare_cols);
+    if (cmp_cols < 1) cmp_cols = 1;
+    cmp_cols = std::min(cmp_cols, action_dim);
+    cmp_cols = std::min(cmp_cols, static_cast<int>(prev_actions_raw.size(1)));
+
+    auto dup_mask = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(actions.device()));
+
+    const int threads = 256;
+    const int blocks = (batch_size + threads - 1) / threads;
+
+    const int exclude_count = static_cast<int>(dedup_exclude_types.numel());
+    const int32_t* exclude_ptr = exclude_count > 0 ? dedup_exclude_types.data_ptr<int32_t>() : nullptr;
+
+    const int32_t* last_idx_ptr = nullptr;
+    if (last_action_node_idx.has_value() && last_action_node_idx->defined()) {
+        const auto& tensor = *last_action_node_idx;
+        TORCH_CHECK(tensor.is_cuda(), "last_action_node_idx must be CUDA tensor");
+        TORCH_CHECK(tensor.dtype() == torch::kInt32, "last_action_node_idx must be int32 tensor");
+        TORCH_CHECK(tensor.is_contiguous(), "last_action_node_idx must be contiguous");
+        TORCH_CHECK(tensor.dim() == 1 && tensor.size(0) == actions.size(0), "last_action_node_idx must be (B,)");
+        last_idx_ptr = tensor.data_ptr<int32_t>();
+    }
+
+    int32_t* attempt_ptr = nullptr;
+    int attempt_stride = 0;
+    int node_cols = 0;
+    if (node_attempt_count.has_value() && node_attempt_count->defined()) {
+        const auto& tensor = *node_attempt_count;
+        TORCH_CHECK(tensor.is_cuda(), "node_attempt_count must be CUDA tensor");
+        TORCH_CHECK(tensor.dtype() == torch::kInt32, "node_attempt_count must be int32 tensor");
+        TORCH_CHECK(tensor.is_contiguous(), "node_attempt_count must be contiguous");
+        TORCH_CHECK(tensor.dim() == 2 && tensor.size(0) == actions.size(0), "node_attempt_count must be (B,N)");
+        attempt_ptr = tensor.data_ptr<int32_t>();
+        attempt_stride = static_cast<int>(tensor.stride(0));
+        node_cols = static_cast<int>(tensor.size(1));
+    }
+
+    int32_t* stall_ptr = nullptr;
+    int stall_stride = 0;
+    if (node_stall_count.has_value() && node_stall_count->defined()) {
+        const auto& tensor = *node_stall_count;
+        TORCH_CHECK(tensor.is_cuda(), "node_stall_count must be CUDA tensor");
+        TORCH_CHECK(tensor.dtype() == torch::kInt32, "node_stall_count must be int32 tensor");
+        TORCH_CHECK(tensor.is_contiguous(), "node_stall_count must be contiguous");
+        TORCH_CHECK(tensor.dim() == 2 && tensor.size(0) == actions.size(0), "node_stall_count must be (B,N)");
+        stall_ptr = tensor.data_ptr<int32_t>();
+        stall_stride = static_cast<int>(tensor.stride(0));
+        if (node_cols == 0) {
+            node_cols = static_cast<int>(tensor.size(1));
+        }
+    }
+
+    int max_nodes_int = static_cast<int>(max_nodes);
+    if (max_nodes_int <= 0 && node_cols > 0) {
+        max_nodes_int = node_cols;
+    }
+
+    prepare_and_deduplicate_kernel<<<blocks, threads>>>(
+        actions.data_ptr<float>(),
+        raw_actions.data_ptr<float>(),
+        prev_actions_raw.data_ptr<float>(),
+        prev_applied_mask.data_ptr<bool>(),
+        exclude_ptr,
+        exclude_count,
+        cmp_cols,
+        static_cast<float>(rtol),
+        static_cast<float>(atol),
+        require_applied,
+        action_dim,
+        batch_size,
+        action_not_found,
+        dup_mask.data_ptr<bool>(),
+        last_idx_ptr,
+        max_nodes_int,
+        attempt_ptr,
+        attempt_stride,
+        node_cols,
+        stall_ptr,
+        stall_stride
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::string msg = std::string("prepare_and_deduplicate_actions kernel launch failed: ") + cudaGetErrorString(err);
+        TORCH_CHECK(false, msg);
+    }
+
+    return dup_mask;
+}
 
 // Helper: clamp float
 __device__ inline float fclamp(float v, float lo, float hi) {

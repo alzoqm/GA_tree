@@ -2,6 +2,24 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <c10/util/Optional.h>
+
+// Host launcher to prepare and deduplicate predicted actions
+torch::Tensor prepare_and_deduplicate_actions_cuda(
+    torch::Tensor actions,
+    torch::Tensor raw_actions,
+    torch::Tensor prev_actions_raw,
+    torch::Tensor prev_applied_mask,
+    torch::Tensor dedup_exclude_types,
+    int64_t compare_cols,
+    double rtol,
+    double atol,
+    bool require_applied,
+    int action_not_found,
+    c10::optional<torch::Tensor> last_action_node_idx,
+    c10::optional<torch::Tensor> node_attempt_count,
+    c10::optional<torch::Tensor> node_stall_count,
+    int64_t max_nodes);
 
 // Host launcher exposed to Python
 void execute_actions_batch_cuda(

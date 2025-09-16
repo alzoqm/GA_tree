@@ -175,6 +175,9 @@ class TradingEnvironment:
         self.dedup_rtol = float(env_config.get('dedup_rtol', 1e-4))
         # 직전 스텝의 액션이 실제 적용된 경우에만 중복 스킵
         self.dedup_require_applied = bool(env_config.get('dedup_require_applied', True))
+        self._dedup_exclude_tensor_cuda: Optional[torch.Tensor] = None
+        if self.enable_action_dedup and str(self.device).startswith('cuda'):
+            self._refresh_dedup_exclude_buffers()
 
         # === CUDA 실행 옵션 ===
         # debug_compare_cpu_gpu는 더 이상 사용하지 않지만, 호환을 위해 남겨둡니다.
@@ -271,6 +274,77 @@ class TradingEnvironment:
             exec_base_price=next_open_price,
         )
 
+    def _refresh_dedup_exclude_buffers(self):
+        if not self.enable_action_dedup:
+            self._dedup_exclude_tensor_cuda = None
+            return
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("CUDA device required for action deduplication")
+        values = sorted(int(v) for v in self.dedup_exclude_types)
+        self._dedup_exclude_tensor_cuda = torch.tensor(
+            values,
+            dtype=torch.int32,
+            device=self.device
+        ) if len(values) > 0 else torch.empty(0, dtype=torch.int32, device=self.device)
+
+    def _deduplicate_actions_cuda(
+        self,
+        actions: torch.Tensor,
+        raw_actions: torch.Tensor,
+        dedup_cols: int
+    ) -> torch.Tensor:
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+
+        if gatree_cuda is None:
+            raise RuntimeError("gatree CUDA extension is required for action deduplication")
+
+        kernel = getattr(gatree_cuda, 'prepare_and_deduplicate_actions', None)
+        if kernel is None:
+            raise RuntimeError("prepare_and_deduplicate_actions kernel not available in gatree CUDA extension")
+
+        if (
+            self._dedup_exclude_tensor_cuda is None
+            or self._dedup_exclude_tensor_cuda.device != actions.device
+        ):
+            self._refresh_dedup_exclude_buffers()
+
+        exclude_tensor = (
+            self._dedup_exclude_tensor_cuda
+            if self._dedup_exclude_tensor_cuda is not None
+            else torch.empty(0, dtype=torch.int32, device=self.device)
+        )
+
+        prev_actions = self.prev_actions_raw
+        prev_applied = self.prev_applied_mask
+        last_node_idx = self._last_action_node_idx if self._last_action_node_idx is not None else None
+        attempt = self.node_attempt_count if self.node_attempt_count is not None else None
+        stall = getattr(self, 'node_stall_count', None)
+
+        duplicate_mask = kernel(
+            actions,
+            raw_actions,
+            prev_actions,
+            prev_applied,
+            exclude_tensor,
+            int(dedup_cols),
+            float(self.dedup_rtol),
+            float(self.dedup_atol),
+            bool(self.dedup_require_applied),
+            int(ACTION_NOT_FOUND),
+            last_node_idx,
+            attempt,
+            stall,
+            int(self.max_nodes) if self.max_nodes else 0
+        )
+
+        if not isinstance(duplicate_mask, torch.Tensor):
+            raise RuntimeError("CUDA deduplication kernel did not return a tensor")
+
+        return duplicate_mask
+
     def _prepare_and_deduplicate_actions(self, predicted_actions) -> Tuple[torch.Tensor, torch.Tensor]:
         # Accept either tensor or (actions, node_idx)
         if isinstance(predicted_actions, tuple) or isinstance(predicted_actions, list):
@@ -281,58 +355,30 @@ class TradingEnvironment:
                 self._last_action_node_idx = node_idx.to(device=self.device, dtype=torch.int32)
         else:
             actions = predicted_actions.to(self.device)
+
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("TradingEnvironment requires CUDA device for action deduplication")
+
+        actions = actions.contiguous()
         raw_actions = actions.clone()
 
         if self.enable_action_dedup:
             cols = max(1, min(self.dedup_compare_cols, actions.shape[1], self.prev_actions_raw.shape[1]))
-            curr_type = actions[:, 0].long()
-            prev_type = self.prev_actions_raw[:, 0].long()
-            type_equal = curr_type == prev_type
-
-            if cols > 1:
-                same_params = torch.isclose(
-                    actions[:, 1:cols],
-                    self.prev_actions_raw[:, 1:cols],
-                    rtol=self.dedup_rtol,
-                    atol=self.dedup_atol,
-                    equal_nan=False
-                ).all(dim=1)
+            duplicate_mask = self._deduplicate_actions_cuda(actions, raw_actions, cols)
+            if self._last_dedup_mask is None:
+                self._last_dedup_mask = duplicate_mask.clone()
+            elif self._last_dedup_mask.shape != duplicate_mask.shape:
+                self._last_dedup_mask = duplicate_mask.clone()
             else:
-                same_params = torch.ones_like(type_equal, dtype=torch.bool)
-
-            if len(self.dedup_exclude_types) > 0:
-                exclude_tensor = torch.tensor(list(self.dedup_exclude_types), dtype=torch.long, device=self.device)
-                excluded_mask = torch.isin(curr_type, exclude_tensor)
+                self._last_dedup_mask.copy_(duplicate_mask)
+        else:
+            duplicate_mask = torch.zeros(actions.shape[0], dtype=torch.bool, device=self.device)
+            if self._last_dedup_mask is None:
+                self._last_dedup_mask = duplicate_mask.clone()
+            elif self._last_dedup_mask.shape != duplicate_mask.shape:
+                self._last_dedup_mask = duplicate_mask.clone()
             else:
-                excluded_mask = torch.zeros_like(type_equal, dtype=torch.bool)
-
-            duplicate_mask = type_equal & same_params & (~excluded_mask)
-            if self.dedup_require_applied:
-                duplicate_mask &= self.prev_applied_mask
-
-            if duplicate_mask.any():
-                actions[duplicate_mask, :] = 0.0
-                actions[duplicate_mask, 0] = float(ACTION_NOT_FOUND)
-            # Update per-node attempt/stall counters
-            if self.node_attempt_count is not None and self._last_action_node_idx is not None:
-                # Everyone who predicted a valid action (not NOT_FOUND) attempts++
-                valid_pred = (raw_actions[:, 0].long() != ACTION_NOT_FOUND)
-                idx_valid = torch.where(valid_pred)[0]
-                if idx_valid.numel() > 0:
-                    rows = idx_valid
-                    cols = self._last_action_node_idx[idx_valid].clamp(min=0, max=self.max_nodes-1)
-                    self.node_attempt_count[rows, cols] += 1
-                # Stall = dedup skipped
-                stalled = duplicate_mask & valid_pred
-                idx_stall = torch.where(stalled)[0]
-                if idx_stall.numel() > 0:
-                    rows = idx_stall
-                    cols = self._last_action_node_idx[idx_stall].clamp(min=0, max=self.max_nodes-1)
-                    self.node_stall_count = getattr(self, 'node_stall_count', torch.zeros_like(self.node_attempt_count))
-                    self.node_stall_count[rows, cols] += 1
-                self._last_dedup_mask = duplicate_mask
-            else:
-                self._last_dedup_mask = torch.zeros(actions.shape[0], dtype=torch.bool, device=self.device)
+                self._last_dedup_mask.zero_()
 
         return actions, raw_actions
 
