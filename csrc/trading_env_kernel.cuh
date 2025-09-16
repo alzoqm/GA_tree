@@ -192,6 +192,14 @@ void check_liquidation_with_attrib_cuda(
     float maintenance_margin_rate,
     float liq_clearance_fee_rate);
 
+// Host launcher to compute unrealized PnL per individual
+torch::Tensor compute_unrealized_pnl_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor price_list,
+    torch::Tensor leverage_ratio,
+    torch::Tensor enter_ratio,
+    float mark_t);
+
 // Host launcher to compute equity (realized + unrealized) per individual
 void compute_equity_batch_cuda(
     torch::Tensor pos_list,

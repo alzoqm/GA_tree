@@ -88,9 +88,10 @@ try:
     check_liquidation_batch = getattr(gatree_env, 'check_liquidation_batch', None)
     check_liquidation_with_attrib = getattr(gatree_env, 'check_liquidation_with_attrib', None)
     compute_equity_batch = getattr(gatree_env, 'compute_equity_batch', None)
+    compute_unrealized_pnl = getattr(gatree_env, 'compute_unrealized_pnl', None)
     prepare_and_deduplicate_actions = getattr(gatree_env, 'prepare_and_deduplicate_actions', None)
     update_dedup_buffers_after_exec = getattr(gatree_env, 'update_dedup_buffers_after_exec', None)
-    
+
 except ImportError as e:
     print("="*60)
     print(">>> 경고: CUDA 확장 모듈을 찾을 수 없습니다.")
@@ -137,5 +138,6 @@ except ImportError as e:
     check_liquidation_batch = None
     check_liquidation_with_attrib = None
     compute_equity_batch = None
+    compute_unrealized_pnl = None
     prepare_and_deduplicate_actions = None
     update_dedup_buffers_after_exec = None

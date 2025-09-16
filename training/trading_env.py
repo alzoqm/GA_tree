@@ -509,19 +509,49 @@ class TradingEnvironment:
             self.compound_value = compound_value
 
     def _compute_unrealized_pnl(self, mark_t: torch.Tensor) -> torch.Tensor:
-        open_mask = self.pos_list != 0
-        if open_mask.any():
-            side = torch.where(self.pos_list == 2, 1.0, -1.0)
-            entry = self.price_list
-            lev = self.leverage_ratio.float()
-            er = self.enter_ratio
-            pnl_pct = side * (mark_t - entry) / (entry + 1e-9)
-            unreal_vec = pnl_pct * lev * er
-            total_unreal = torch.zeros_like(self.sum_returns)
-            total_unreal[open_mask] = unreal_vec[open_mask]
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("TradingEnvironment requires CUDA device for unrealized PnL computation")
+
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
+
+        kernel = getattr(gatree_cuda, 'compute_unrealized_pnl', None) if gatree_cuda is not None else None
+        if kernel is None:
+            raise RuntimeError("compute_unrealized_pnl CUDA kernel is unavailable")
+
+        pos_list = self.pos_list.contiguous()
+        price_list = self.price_list.contiguous()
+        leverage_ratio = self.leverage_ratio.contiguous()
+        enter_ratio = self.enter_ratio.contiguous()
+
+        if isinstance(mark_t, torch.Tensor):
+            mark_scalar = float(mark_t.item())
         else:
-            total_unreal = torch.zeros_like(self.sum_returns)
-        return total_unreal
+            mark_scalar = float(mark_t)
+
+        unreal = kernel(
+            pos_list,
+            price_list,
+            leverage_ratio,
+            enter_ratio,
+            float(mark_scalar)
+        )
+
+        if not isinstance(unreal, torch.Tensor):
+            raise RuntimeError("compute_unrealized_pnl CUDA kernel did not return a tensor")
+
+        expected_shape = self.sum_returns.shape
+        if unreal.shape != expected_shape:
+            raise RuntimeError(
+                f"CUDA unrealized PnL kernel returned shape {unreal.shape}, expected {expected_shape}"
+            )
+
+        if unreal.dtype != self.sum_returns.dtype or unreal.device != self.sum_returns.device:
+            unreal = unreal.to(device=self.sum_returns.device, dtype=self.sum_returns.dtype)
+
+        return unreal
 
     def _update_equity_and_drawdown(self, total_unreal: torch.Tensor, timestamp):
         equity = self.realized_cum + total_unreal
