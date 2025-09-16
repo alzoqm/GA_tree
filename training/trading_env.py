@@ -14,6 +14,8 @@ from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
+
+import gatree_cuda_compat as gatree_cuda
  
 # ##############################################################################
 #           통합 거래 환경 및 시뮬레이션 (원본 로직 완전 보존 + 다중 목표 기능)
@@ -102,6 +104,7 @@ class TradingEnvironment:
         self.holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.profit = torch.zeros((chromosomes_size,), dtype=torch.float32, device=device)
         self.last_timestamp = None
+        self.equity_base = float(env_config.get('equity_base', 1.0))
         self.sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
         self.sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
@@ -111,8 +114,12 @@ class TradingEnvironment:
         self.total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
-        self.cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-        self.running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        self.cum_sum = torch.full(
+            (chromosomes_size,), self.equity_base, device=device, dtype=torch.float32
+        )
+        self.running_max = torch.full(
+            (chromosomes_size,), self.equity_base, device=device, dtype=torch.float32
+        )
         self.max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
         # Mark-to-market equity tracking
@@ -441,9 +448,17 @@ class TradingEnvironment:
         else:
             raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
 
+
     def _update_holding_periods(self):
-        self.holding_period[self.pos_list != 0] += 1
-        self.holding_period[self.pos_list == 0] = 0
+        kernel = getattr(gatree_cuda, 'update_holding_periods', None)
+
+        pos_list = self.pos_list.contiguous()
+        holding_period = self.holding_period.contiguous()
+
+        kernel(pos_list, holding_period)
+
+        if holding_period.data_ptr() != self.holding_period.data_ptr():
+            self.holding_period = holding_period
 
     def _accumulate_realized_pnl_and_stats(self):
         """Accumulate realized P&L and event-based stats using CUDA only."""
@@ -554,13 +569,18 @@ class TradingEnvironment:
         return unreal
 
     def _update_equity_and_drawdown(self, total_unreal: torch.Tensor, timestamp):
-        equity = self.realized_cum + total_unreal
+        equity = self.equity_base + self.realized_cum + total_unreal
         self.cum_sum = equity
         self.running_max = torch.maximum(self.running_max, self.cum_sum)
         current_drawdown = self.running_max - self.cum_sum
-        # Convert drawdown to relative percentage (0-1) based on peak equity
-        denom = torch.where(self.running_max > 1e-8, self.running_max, torch.ones_like(self.running_max))
-        current_drawdown_ratio = torch.clamp(current_drawdown / denom, min=0.0, max=1.0)
+        # Guard against division by zero while keeping the ratio tied to the peak equity level.
+        denom = torch.clamp(self.running_max, min=1e-8)
+        current_drawdown_ratio = torch.where(
+            self.running_max > 0,
+            current_drawdown / denom,
+            torch.zeros_like(current_drawdown)
+        )
+        current_drawdown_ratio = torch.clamp(current_drawdown_ratio, min=0.0, max=1.0)
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown_ratio)
         self.profit.zero_()
         self.last_timestamp = timestamp
@@ -1365,7 +1385,7 @@ class TradingEnvironment:
 
         equity = gatree_cuda.compute_equity_batch(
             pos_list, price_list, leverage_ratio, enter_ratio, realized_cum,
-            float(mark_t_scalar), 1.0
+            float(mark_t_scalar), float(self.equity_base)
         )
         return equity
 

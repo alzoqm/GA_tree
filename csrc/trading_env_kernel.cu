@@ -1183,6 +1183,55 @@ void execute_actions_with_attrib_batch_cuda(
 }
 
 // ===============================================================
+// Update holding periods (thread-per-individual)
+// ===============================================================
+
+__global__ void update_holding_periods_kernel(
+    const int64_t* __restrict__ pos_list,
+    int64_t* __restrict__ holding_period,
+    int B)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+
+    if (pos_list[i] != 0) {
+        holding_period[i] += 1;
+    } else {
+        holding_period[i] = 0;
+    }
+}
+
+void update_holding_periods_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor holding_period)
+{
+    auto check = [](const torch::Tensor& t, const char* name) {
+        TORCH_CHECK(t.is_cuda(), name, " must be CUDA tensor");
+        TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
+        TORCH_CHECK(t.dtype() == torch::kInt64, name, " must be int64 tensor");
+    };
+
+    check(pos_list, "pos_list");
+    check(holding_period, "holding_period");
+    TORCH_CHECK(pos_list.dim() == 1, "pos_list must be 1D");
+    TORCH_CHECK(holding_period.dim() == 1, "holding_period must be 1D");
+    TORCH_CHECK(pos_list.size(0) == holding_period.size(0),
+                "pos_list and holding_period must have same length");
+
+    const int B = static_cast<int>(pos_list.size(0));
+    if (B == 0) return;
+
+    const int threads = 256;
+    const int blocks = (B + threads - 1) / threads;
+
+    update_holding_periods_kernel<<<blocks, threads>>>(
+        pos_list.data_ptr<int64_t>(),
+        holding_period.data_ptr<int64_t>(),
+        B
+    );
+}
+
+// ===============================================================
 // Accumulate realized PnL and stats (thread-per-individual)
 // ===============================================================
 

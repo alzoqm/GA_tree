@@ -21,7 +21,7 @@ resumption:
 
 # 1.1. Weights & Biases 설정
 wandb:
-  enabled: true          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
+  enabled: false          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
   project: "GA_tree"      # 프로젝트명
   entity: null            # 팀/엔티티 (없으면 null)
   group: "WFO"            # 그룹 태그
@@ -61,16 +61,16 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 10000        # 테스트용으로 작은 크기
-    max_nodes: 256    # 테스트용으로 작은 크기
-    max_depth: 10     # 테스트용으로 작은 깊이
-    max_children: 20  # 테스트용으로 작은 크기
+    size: 30000        # 테스트용으로 작은 크기
+    max_nodes: 128    # 테스트용으로 작은 크기
+    max_depth: 7     # 테스트용으로 작은 깊이
+    max_children: 10  # 테스트용으로 작은 크기
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
-    parent_pool_size: 4000     # 교배 풀(Mating Pool) 크기
+    parent_pool_size: 12000     # 교배 풀(Mating Pool) 크기
     elite_size: 500           # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 500 # 최종까지 보관할 누적 베스트 개체 수
+    best_chromosome_pool_size: 1000 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
@@ -115,22 +115,22 @@ walk_forward:
   # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
   enabled: true
   # 윈도우 크기 설정 (테스트용으로 작게 조정)
-  # train_bars: 1000           # (구) 테스트용 임시 값
-  # oos_bars: 250              # (구) 테스트용 임시 값
-  # step_bars: 125             # (구) 테스트용 임시 값
+  train_bars: 1000           # (구) 테스트용 임시 값
+  oos_bars: 250              # (구) 테스트용 임시 값
+  step_bars: 125             # (구) 테스트용 임시 값
   # === 실제 학습용 윈도우 크기 ===
   # 기준: 총 데이터 길이 563,594 (5m 바), 1일=288바
   # - 인샘플(학습): 2년 ≈ 210,240 바 (2*365*288)
   # - 아웃샘플(OOS): 3개월 ≈ 25,920 바 (90*288)
   # - 스텝: 3개월(분기) 롤링 = 25,920 바
-  train_bars: 210240        # 실제 학습 단위 (2년)
-  oos_bars: 25920           # 실제 검증 단위 (3개월)
-  step_bars: 25920          # 분기 단위 롤링
+  # train_bars: 210240        # 실제 학습 단위 (2년)
+  # oos_bars: 51840           # 실제 검증 단위 (6개월)
+  # step_bars: 51840          # 6개월 단위 롤링
   # 윈도우 생성 방식
   scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
   # 데이터 품질 및 누수 방지
-  # warmup_bars: 50           # (구) 테스트용 임시 값
-  warmup_bars: 8640         # 실제 워밍업 (1개월, 30*288)
+  warmup_bars: 50           # (구) 테스트용 임시 값
+  # warmup_bars: 8640         # 실제 워밍업 (1개월, 30*288)
   embargo_bars: 0           # IS 끝과 OOS 시작 사이의 누수 방지 갭 (선택적)
   # 윈도우별 품질 제어
   min_trades_per_window: 24 # 윈도우별 최소 거래 수 (유효성 검증)
@@ -186,7 +186,7 @@ evaluation:
     risk_free_rate: 0.0
     volatility_lookback: 30
     # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
-    psr_sr_benchmark: 0.5
+    psr_sr_benchmark: 0.
     # Advanced metrics params (optional)
     mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
     benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
@@ -201,7 +201,7 @@ evaluation:
     minimize: [false, true, false]
     normalization: "minmax"
     # PSR benchmark Sharpe (SR*) used in PSR computation
-    psr_sr_benchmark: 0.5
+    psr_sr_benchmark: 0.
     
   # Simulator-side complexity composition
   complexity:
@@ -246,7 +246,7 @@ evaluation:
     risk_free_rate: 0.0
     volatility_lookback: 30
     # PSR benchmark Sharpe (SR*) used in PSR computation
-    psr_sr_benchmark: 0.5
+    psr_sr_benchmark: 0.
     # Advanced metrics params (optional)
     mar: 0.0
     benchmark_mode: "close_to_next_open"
@@ -261,7 +261,7 @@ evaluation:
     include_dsr: true
     dsr_method: "mean"          # mean | median | min | max | pXX
     dsr_minimize: false          # DSR is a maximize metric
-    dsr_sr_benchmark: 0.0        # Optional SR* for DSR
+    dsr_sr_benchmark: 0.        # Optional SR* for DSR
     # 일관성(hit_rate) 임계값
     thresholds:
       min_return: 0.0       # 최소 수익률 임계값
