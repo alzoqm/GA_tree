@@ -128,6 +128,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+        "update_holding_periods",
+        &update_holding_periods_cuda,
+        "Increment or reset holding periods depending on open positions",
+        py::arg("pos_list"),
+        py::arg("holding_period")
+    );
+
+    m.def(
         "accumulate_realized_stats",
         &accumulate_realized_stats_cuda,
         "Accumulate realized PnL and stats for a batch",

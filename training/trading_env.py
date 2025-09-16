@@ -14,6 +14,8 @@ from models.constants import (
     ACTION_NEW_LONG, ACTION_NEW_SHORT, ACTION_CLOSE_ALL,
     ACTION_CLOSE_PARTIAL, ACTION_ADD_POSITION, ACTION_FLIP_POSITION
 )
+
+import gatree_cuda_compat as gatree_cuda
  
 # ##############################################################################
 #           통합 거래 환경 및 시뮬레이션 (원본 로직 완전 보존 + 다중 목표 기능)
@@ -446,9 +448,17 @@ class TradingEnvironment:
         else:
             raise RuntimeError("device가 cuda가 아닙니다. CUDA만 지원되며 Python 경로는 제거되었습니다.")
 
+
     def _update_holding_periods(self):
-        self.holding_period[self.pos_list != 0] += 1
-        self.holding_period[self.pos_list == 0] = 0
+        kernel = getattr(gatree_cuda, 'update_holding_periods', None)
+
+        pos_list = self.pos_list.contiguous()
+        holding_period = self.holding_period.contiguous()
+
+        kernel(pos_list, holding_period)
+
+        if holding_period.data_ptr() != self.holding_period.data_ptr():
+            self.holding_period = holding_period
 
     def _accumulate_realized_pnl_and_stats(self):
         """Accumulate realized P&L and event-based stats using CUDA only."""

@@ -116,6 +116,11 @@ void execute_actions_with_attrib_batch_cuda(
     int64_t max_additional_entries
 );
 
+// Host launcher to update holding periods based on open positions
+void update_holding_periods_cuda(
+    torch::Tensor pos_list,
+    torch::Tensor holding_period);
+
 // Host launcher to accumulate realized PnL and related stats per individual
 void accumulate_realized_stats_cuda(
     torch::Tensor profit,
