@@ -186,7 +186,7 @@ evaluation:
     risk_free_rate: 0.0
     volatility_lookback: 30
     # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
-    psr_sr_benchmark: 0.0
+    psr_sr_benchmark: 0.5
     # Advanced metrics params (optional)
     mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
     benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
@@ -201,7 +201,7 @@ evaluation:
     minimize: [false, true, false]
     normalization: "minmax"
     # PSR benchmark Sharpe (SR*) used in PSR computation
-    psr_sr_benchmark: 0.0
+    psr_sr_benchmark: 0.5
     
   # Simulator-side complexity composition
   complexity:
@@ -246,7 +246,7 @@ evaluation:
     risk_free_rate: 0.0
     volatility_lookback: 30
     # PSR benchmark Sharpe (SR*) used in PSR computation
-    psr_sr_benchmark: 0.0
+    psr_sr_benchmark: 0.5
     # Advanced metrics params (optional)
     mar: 0.0
     benchmark_mode: "close_to_next_open"
