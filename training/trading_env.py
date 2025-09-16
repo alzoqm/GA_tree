@@ -102,6 +102,7 @@ class TradingEnvironment:
         self.holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
         self.profit = torch.zeros((chromosomes_size,), dtype=torch.float32, device=device)
         self.last_timestamp = None
+        self.equity_base = float(env_config.get('equity_base', 1.0))
         self.sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
         self.sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
@@ -111,8 +112,12 @@ class TradingEnvironment:
         self.total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
-        self.cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-        self.running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+        self.cum_sum = torch.full(
+            (chromosomes_size,), self.equity_base, device=device, dtype=torch.float32
+        )
+        self.running_max = torch.full(
+            (chromosomes_size,), self.equity_base, device=device, dtype=torch.float32
+        )
         self.max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
         self.compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
         # Mark-to-market equity tracking
@@ -554,14 +559,18 @@ class TradingEnvironment:
         return unreal
 
     def _update_equity_and_drawdown(self, total_unreal: torch.Tensor, timestamp):
-        equity = self.realized_cum + total_unreal
+        equity = self.equity_base + self.realized_cum + total_unreal
         self.cum_sum = equity
         self.running_max = torch.maximum(self.running_max, self.cum_sum)
         current_drawdown = self.running_max - self.cum_sum
-        # Convert drawdown to ratio relative to peak equity (can exceed 1 when equity drops below zero)
-        denom = torch.where(self.running_max > 1e-8, self.running_max, torch.ones_like(self.running_max))
-        # Express drawdown as a ratio of peak equity without artificially clamping extremes
-        current_drawdown_ratio = current_drawdown / denom
+        # Guard against division by zero while keeping the ratio tied to the peak equity level.
+        denom = torch.clamp(self.running_max, min=1e-8)
+        current_drawdown_ratio = torch.where(
+            self.running_max > 0,
+            current_drawdown / denom,
+            torch.zeros_like(current_drawdown)
+        )
+        current_drawdown_ratio = torch.clamp(current_drawdown_ratio, min=0.0, max=1.0)
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown_ratio)
         self.profit.zero_()
         self.last_timestamp = timestamp
@@ -1366,7 +1375,7 @@ class TradingEnvironment:
 
         equity = gatree_cuda.compute_equity_batch(
             pos_list, price_list, leverage_ratio, enter_ratio, realized_cum,
-            float(mark_t_scalar), 1.0
+            float(mark_t_scalar), float(self.equity_base)
         )
         return equity
 
