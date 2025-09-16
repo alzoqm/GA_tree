@@ -21,6 +21,25 @@ torch::Tensor prepare_and_deduplicate_actions_cuda(
     c10::optional<torch::Tensor> node_stall_count,
     int64_t max_nodes);
 
+// Host launcher to update dedup buffers after trade execution
+void update_dedup_buffers_after_exec_cuda(
+    torch::Tensor actions,
+    torch::Tensor raw_actions,
+    torch::Tensor pos_before,
+    torch::Tensor er_before,
+    torch::Tensor pos_after,
+    torch::Tensor er_after,
+    torch::Tensor prev_actions_raw,
+    torch::Tensor prev_applied_mask,
+    int64_t cols_to_copy,
+    double eps,
+    int64_t action_new_long,
+    int64_t action_new_short,
+    int64_t action_close_all,
+    int64_t action_close_partial,
+    int64_t action_add_position,
+    int64_t action_flip_position);
+
 // Host launcher exposed to Python
 void execute_actions_batch_cuda(
     torch::Tensor actions,

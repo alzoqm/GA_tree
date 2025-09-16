@@ -28,6 +28,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     );
 
     m.def(
+        "update_dedup_buffers_after_exec",
+        &update_dedup_buffers_after_exec_cuda,
+        "Update deduplication buffers after executing actions",
+        py::arg("actions"),
+        py::arg("raw_actions"),
+        py::arg("pos_before"),
+        py::arg("er_before"),
+        py::arg("pos_after"),
+        py::arg("er_after"),
+        py::arg("prev_actions_raw"),
+        py::arg("prev_applied_mask"),
+        py::arg("cols_to_copy"),
+        py::arg("eps"),
+        py::arg("action_new_long"),
+        py::arg("action_new_short"),
+        py::arg("action_close_all"),
+        py::arg("action_close_partial"),
+        py::arg("action_add_position"),
+        py::arg("action_flip_position")
+    );
+
+    m.def(
         "execute_actions_batch",
         &execute_actions_batch_cuda,
         "Executes trading actions for a batch (thread-per-individual)",
