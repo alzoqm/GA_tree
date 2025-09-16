@@ -53,6 +53,14 @@ class CheckpointManager:
                            wfo_state: Optional[Dict] = None,
                            **extra_state) -> None:
         """Save the main training checkpoint."""
+        if wandb_run_id is None and self.main_checkpoint_file.exists():
+            try:
+                with open(self.main_checkpoint_file, 'r') as f:
+                    existing = json.load(f)
+                wandb_run_id = existing.get("wandb_run_id")
+            except Exception:
+                pass
+
         checkpoint_data = {
             "timestamp": datetime.utcnow().isoformat(),
             "config_hash": self.config_hash,
