@@ -61,16 +61,16 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 10000        # 테스트용으로 작은 크기
-    max_nodes: 256    # 테스트용으로 작은 크기
-    max_depth: 10     # 테스트용으로 작은 깊이
-    max_children: 20  # 테스트용으로 작은 크기
+    size: 30000        # 테스트용으로 작은 크기
+    max_nodes: 128    # 테스트용으로 작은 크기
+    max_depth: 7     # 테스트용으로 작은 깊이
+    max_children: 10  # 테스트용으로 작은 크기
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
-    parent_pool_size: 4000     # 교배 풀(Mating Pool) 크기
+    parent_pool_size: 12000     # 교배 풀(Mating Pool) 크기
     elite_size: 500           # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 500 # 최종까지 보관할 누적 베스트 개체 수
+    best_chromosome_pool_size: 1000 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
@@ -124,8 +124,8 @@ walk_forward:
   # - 아웃샘플(OOS): 3개월 ≈ 25,920 바 (90*288)
   # - 스텝: 3개월(분기) 롤링 = 25,920 바
   train_bars: 210240        # 실제 학습 단위 (2년)
-  oos_bars: 25920           # 실제 검증 단위 (3개월)
-  step_bars: 25920          # 분기 단위 롤링
+  oos_bars: 51840           # 실제 검증 단위 (6개월)
+  step_bars: 51840          # 6개월 단위 롤링
   # 윈도우 생성 방식
   scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
   # 데이터 품질 및 누수 방지
@@ -261,7 +261,7 @@ evaluation:
     include_dsr: true
     dsr_method: "mean"          # mean | median | min | max | pXX
     dsr_minimize: false          # DSR is a maximize metric
-    dsr_sr_benchmark: 0.0        # Optional SR* for DSR
+    dsr_sr_benchmark: 0.5        # Optional SR* for DSR
     # 일관성(hit_rate) 임계값
     thresholds:
       min_return: 0.0       # 최소 수익률 임계값

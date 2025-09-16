@@ -558,9 +558,10 @@ class TradingEnvironment:
         self.cum_sum = equity
         self.running_max = torch.maximum(self.running_max, self.cum_sum)
         current_drawdown = self.running_max - self.cum_sum
-        # Convert drawdown to relative percentage (0-1) based on peak equity
+        # Convert drawdown to ratio relative to peak equity (can exceed 1 when equity drops below zero)
         denom = torch.where(self.running_max > 1e-8, self.running_max, torch.ones_like(self.running_max))
-        current_drawdown_ratio = torch.clamp(current_drawdown / denom, min=0.0, max=1.0)
+        # Express drawdown as a ratio of peak equity without artificially clamping extremes
+        current_drawdown_ratio = current_drawdown / denom
         self.max_drawdown = torch.maximum(self.max_drawdown, current_drawdown_ratio)
         self.profit.zero_()
         self.last_timestamp = timestamp
