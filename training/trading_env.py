@@ -258,10 +258,16 @@ class TradingEnvironment:
         low = torch.tensor(market_data['Low'], dtype=torch.float32, device=self.device)
         close = torch.tensor(market_data['Close'], dtype=torch.float32, device=self.device)
         funding_rate = torch.tensor(market_data['fundingRate'], dtype=torch.float32, device=self.device)
-        # Use provided mark price series directly (assumed to exist in input data)
-        mark_t = torch.tensor(market_data['markPrice_est'], dtype=torch.float32, device=self.device)
-        mark_low = torch.tensor(market_data['markLow_est'], dtype=torch.float32, device=self.device)
-        mark_high = torch.tensor(market_data['markHigh_est'], dtype=torch.float32, device=self.device)
+
+        def _safe_get(key, default):
+            if key in market_data and pd.notna(market_data[key]):
+                return float(market_data[key])
+            return float(default)
+
+        typical = (float(market_data['High']) + float(market_data['Low']) + float(market_data['Close'])) / 3.0
+        mark_t = torch.tensor(_safe_get('markPrice_est', typical), dtype=torch.float32, device=self.device)
+        mark_low = torch.tensor(_safe_get('markLow_est', float(market_data['Low'])), dtype=torch.float32, device=self.device)
+        mark_high = torch.tensor(_safe_get('markHigh_est', float(market_data['High'])), dtype=torch.float32, device=self.device)
         return TradingEnvironment.StepState(
             timestamp=ts,
             high=high,
@@ -723,28 +729,52 @@ class TradingEnvironment:
     ):
         if not self.enable_action_dedup:
             return
-        pos_after = self.pos_list
-        er_after = self.enter_ratio
-        atype_eff = actions[:, 0].long()
 
-        eps = 1e-8
-        applied_new_long = (atype_eff == ACTION_NEW_LONG) & (pos_before == 0) & (pos_after == 2)
-        applied_new_short = (atype_eff == ACTION_NEW_SHORT) & (pos_before == 0) & (pos_after == 1)
-        applied_close_all = (atype_eff == ACTION_CLOSE_ALL) & (pos_before != 0) & (pos_after == 0)
-        applied_flip = (atype_eff == ACTION_FLIP_POSITION) & (
-            ((pos_before == 2) & (pos_after == 1)) | ((pos_before == 1) & (pos_after == 2))
-        )
-        applied_close_partial = (atype_eff == ACTION_CLOSE_PARTIAL) & (pos_before != 0) & (er_after < er_before - eps)
-        applied_add = (atype_eff == ACTION_ADD_POSITION) & (pos_before != 0) & (er_after > er_before + eps)
+        if not str(self.device).startswith('cuda'):
+            raise RuntimeError("Action deduplication update requires CUDA device")
 
-        applied_mask = (
-            applied_new_long | applied_new_short | applied_close_all |
-            applied_flip | applied_close_partial | applied_add
-        )
+        try:
+            import gatree_cuda_compat as gatree_cuda
+        except Exception:
+            gatree_cuda = None
 
-        self.prev_applied_mask = applied_mask
+        kernel = None
+        if gatree_cuda is not None:
+            kernel = getattr(gatree_cuda, 'update_dedup_buffers_after_exec', None)
+
+        if kernel is None:
+            raise RuntimeError("update_dedup_buffers_after_exec kernel not available")
+
+        prev_actions = self.prev_actions_raw
+        if not prev_actions.is_contiguous():
+            prev_actions = prev_actions.contiguous()
+            self.prev_actions_raw = prev_actions
+
+        prev_applied = self.prev_applied_mask
+        if not prev_applied.is_contiguous():
+            prev_applied = prev_applied.contiguous()
+            self.prev_applied_mask = prev_applied
+
         cols_copy = min(self.prev_actions_raw.shape[1], raw_actions.shape[1])
-        self.prev_actions_raw[:, :cols_copy] = raw_actions[:, :cols_copy]
+
+        kernel(
+            actions.contiguous(),
+            raw_actions.contiguous(),
+            pos_before.contiguous(),
+            er_before.contiguous(),
+            self.pos_list.contiguous(),
+            self.enter_ratio.contiguous(),
+            self.prev_actions_raw,
+            self.prev_applied_mask,
+            int(cols_copy),
+            1e-8,
+            ACTION_NEW_LONG,
+            ACTION_NEW_SHORT,
+            ACTION_CLOSE_ALL,
+            ACTION_CLOSE_PARTIAL,
+            ACTION_ADD_POSITION,
+            ACTION_FLIP_POSITION,
+        )
 
     def _update_return_histories(self, pre_equity: torch.Tensor, market_data, exec_base_price):
         post_equity = self._calculate_current_equity(market_data)

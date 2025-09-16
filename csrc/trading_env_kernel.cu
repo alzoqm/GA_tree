@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <string>
+#include <cstdint>
 #include <c10/cuda/CUDAException.h>
 
 __device__ inline int ftoi_nearest(float v) {
@@ -255,6 +256,165 @@ torch::Tensor prepare_and_deduplicate_actions_cuda(
     }
 
     return dup_mask;
+}
+
+__global__ void update_dedup_buffers_kernel(
+    const float* __restrict__ actions,
+    const float* __restrict__ raw_actions,
+    const int64_t* __restrict__ pos_before,
+    const float* __restrict__ er_before,
+    const int64_t* __restrict__ pos_after,
+    const float* __restrict__ er_after,
+    bool* __restrict__ prev_applied_mask,
+    float* __restrict__ prev_actions_raw,
+    int batch_size,
+    int action_dim,
+    int prev_action_dim,
+    int copy_cols,
+    int action_new_long,
+    int action_new_short,
+    int action_close_all,
+    int action_close_partial,
+    int action_add_position,
+    int action_flip_position,
+    float eps)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= batch_size) {
+        return;
+    }
+
+    const float* action_row = actions + static_cast<size_t>(i) * action_dim;
+    const float* raw_row = raw_actions + static_cast<size_t>(i) * action_dim;
+    float* prev_row = prev_actions_raw + static_cast<size_t>(i) * prev_action_dim;
+
+    const int curr_type = ftoi_nearest(action_row[0]);
+    const int64_t pos_before_i = pos_before[i];
+    const int64_t pos_after_i = pos_after[i];
+    const float er_before_i = er_before[i];
+    const float er_after_i = er_after[i];
+
+    const bool applied_new_long = (curr_type == action_new_long) && (pos_before_i == 0) && (pos_after_i == 2);
+    const bool applied_new_short = (curr_type == action_new_short) && (pos_before_i == 0) && (pos_after_i == 1);
+    const bool applied_close_all = (curr_type == action_close_all) && (pos_before_i != 0) && (pos_after_i == 0);
+    const bool applied_flip = (curr_type == action_flip_position) && (
+        ((pos_before_i == 2) && (pos_after_i == 1)) || ((pos_before_i == 1) && (pos_after_i == 2))
+    );
+    const bool applied_close_partial = (curr_type == action_close_partial) && (pos_before_i != 0) && (er_after_i < (er_before_i - eps));
+    const bool applied_add = (curr_type == action_add_position) && (pos_before_i != 0) && (er_after_i > (er_before_i + eps));
+
+    const bool applied = (
+        applied_new_long || applied_new_short || applied_close_all ||
+        applied_flip || applied_close_partial || applied_add
+    );
+
+    prev_applied_mask[i] = applied;
+
+    for (int col = 0; col < copy_cols; ++col) {
+        prev_row[col] = raw_row[col];
+    }
+}
+
+void update_dedup_buffers_after_exec_cuda(
+    torch::Tensor actions,
+    torch::Tensor raw_actions,
+    torch::Tensor pos_before,
+    torch::Tensor er_before,
+    torch::Tensor pos_after,
+    torch::Tensor er_after,
+    torch::Tensor prev_actions_raw,
+    torch::Tensor prev_applied_mask,
+    int64_t cols_to_copy,
+    double eps,
+    int64_t action_new_long,
+    int64_t action_new_short,
+    int64_t action_close_all,
+    int64_t action_close_partial,
+    int64_t action_add_position,
+    int64_t action_flip_position)
+{
+    TORCH_CHECK(actions.is_cuda(), "actions must be CUDA tensor");
+    TORCH_CHECK(raw_actions.is_cuda(), "raw_actions must be CUDA tensor");
+    TORCH_CHECK(pos_before.is_cuda(), "pos_before must be CUDA tensor");
+    TORCH_CHECK(er_before.is_cuda(), "er_before must be CUDA tensor");
+    TORCH_CHECK(pos_after.is_cuda(), "pos_after must be CUDA tensor");
+    TORCH_CHECK(er_after.is_cuda(), "er_after must be CUDA tensor");
+    TORCH_CHECK(prev_actions_raw.is_cuda(), "prev_actions_raw must be CUDA tensor");
+    TORCH_CHECK(prev_applied_mask.is_cuda(), "prev_applied_mask must be CUDA tensor");
+
+    TORCH_CHECK(actions.dim() == 2, "actions must be 2D");
+    TORCH_CHECK(raw_actions.sizes() == actions.sizes(), "raw_actions shape mismatch");
+    TORCH_CHECK(pos_before.dim() == 1 && pos_before.size(0) == actions.size(0), "pos_before must be (B,)");
+    TORCH_CHECK(er_before.dim() == 1 && er_before.size(0) == actions.size(0), "er_before must be (B,)");
+    TORCH_CHECK(pos_after.dim() == 1 && pos_after.size(0) == actions.size(0), "pos_after must be (B,)");
+    TORCH_CHECK(er_after.dim() == 1 && er_after.size(0) == actions.size(0), "er_after must be (B,)");
+    TORCH_CHECK(prev_actions_raw.dim() == 2 && prev_actions_raw.size(0) == actions.size(0), "prev_actions_raw must be (B,K)");
+    TORCH_CHECK(prev_applied_mask.dim() == 1 && prev_applied_mask.size(0) == actions.size(0), "prev_applied_mask must be (B,)");
+
+    TORCH_CHECK(actions.dtype() == torch::kFloat32, "actions must be float32");
+    TORCH_CHECK(raw_actions.dtype() == torch::kFloat32, "raw_actions must be float32");
+    TORCH_CHECK(er_before.dtype() == torch::kFloat32, "er_before must be float32");
+    TORCH_CHECK(er_after.dtype() == torch::kFloat32, "er_after must be float32");
+    TORCH_CHECK(prev_actions_raw.dtype() == torch::kFloat32, "prev_actions_raw must be float32");
+    TORCH_CHECK(prev_applied_mask.dtype() == torch::kBool, "prev_applied_mask must be bool");
+    TORCH_CHECK(pos_before.dtype() == torch::kInt64, "pos_before must be int64");
+    TORCH_CHECK(pos_after.dtype() == torch::kInt64, "pos_after must be int64");
+
+    TORCH_CHECK(prev_actions_raw.is_contiguous(), "prev_actions_raw must be contiguous");
+    TORCH_CHECK(prev_applied_mask.is_contiguous(), "prev_applied_mask must be contiguous");
+
+    actions = actions.contiguous();
+    raw_actions = raw_actions.contiguous();
+    pos_before = pos_before.contiguous();
+    er_before = er_before.contiguous();
+    pos_after = pos_after.contiguous();
+    er_after = er_after.contiguous();
+
+    const int batch_size = static_cast<int>(actions.size(0));
+    if (batch_size == 0) {
+        return;
+    }
+
+    const int action_dim = static_cast<int>(actions.size(1));
+    const int prev_action_dim = static_cast<int>(prev_actions_raw.size(1));
+
+    int copy_cols = static_cast<int>(cols_to_copy);
+    if (copy_cols < 0) {
+        copy_cols = 0;
+    }
+    copy_cols = std::min(copy_cols, action_dim);
+    copy_cols = std::min(copy_cols, prev_action_dim);
+
+    const int threads = 256;
+    const int blocks = (batch_size + threads - 1) / threads;
+
+    update_dedup_buffers_kernel<<<blocks, threads>>>(
+        actions.data_ptr<float>(),
+        raw_actions.data_ptr<float>(),
+        pos_before.data_ptr<int64_t>(),
+        er_before.data_ptr<float>(),
+        pos_after.data_ptr<int64_t>(),
+        er_after.data_ptr<float>(),
+        prev_applied_mask.data_ptr<bool>(),
+        prev_actions_raw.data_ptr<float>(),
+        batch_size,
+        action_dim,
+        prev_action_dim,
+        copy_cols,
+        static_cast<int>(action_new_long),
+        static_cast<int>(action_new_short),
+        static_cast<int>(action_close_all),
+        static_cast<int>(action_close_partial),
+        static_cast<int>(action_add_position),
+        static_cast<int>(action_flip_position),
+        static_cast<float>(eps)
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::string msg = std::string("update_dedup_buffers_after_exec kernel launch failed: ") + cudaGetErrorString(err);
+        TORCH_CHECK(false, msg);
+    }
 }
 
 // Helper: clamp float
