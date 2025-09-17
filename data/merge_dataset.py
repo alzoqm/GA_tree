@@ -383,10 +383,20 @@ if __name__ == '__main__':
     # 실제 실행 시에는 main.py에서 experiment_config.yaml로부터 로드됩니다.
     mock_classification_config = {
         'feature_num': {
-            'close_change_pct': (-10, 10), 'body_size': (0, 100), 'upper_wick_size': (0, 100),
-            'lower_wick_size': (0, 100), 'total_range': (0, 200), 'body_to_range_ratio': (0, 1),
-            'RSI': (0, 100), '%K': (0, 100), '%D': (0, 100), 'Williams_R': (-100, 0),
-            'CCI': (-250, 250), 'MACD': (-100, 100), 'ADX': (0, 100), 'ATR': (0, 100)
+            'close_change_pct': (-10, 10),
+            'body_size': (0, 100),
+            'upper_wick_size': (0, 200),
+            'lower_wick_size': (0, 200),
+            'total_range': (0, 200),
+            'body_to_range_ratio': (0, 1),
+            'RSI': (0, 100),
+            '%K': (0, 100),
+            '%D': (0, 100),
+            'Williams_R': (-100, 0),
+            'CCI': (-250, 250),
+            'MACD': (-50, 50),
+            'ADX': (0, 100),
+            'ATR': (0, 200),
         },
         'feature_comparison': [
             'Open', 'High', 'Low', 'Close', 'SMA', 'EMA', 'BB_Upper', 'BB_Mid', 'BB_Lower',

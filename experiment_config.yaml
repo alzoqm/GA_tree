@@ -62,9 +62,9 @@ data:
 ga_core:
   population:
     size: 30000            # population size
-    max_nodes: 32         # maximum number of nodes per individual
-    max_depth: 4           # maximum tree depth
-    max_children: 4       # maximum number of children per node
+    max_nodes: 128         # maximum number of nodes per individual
+    max_depth: 7           # maximum tree depth
+    max_children: 10       # maximum number of children per node
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
@@ -362,9 +362,9 @@ feature_classification:
   feature_num:
     close_change_pct: [-10, 10]
     body_size: [0, 100]
-    upper_wick_size: [0, 100]
-    lower_wick_size: [0, 100]
-    total_range: [0, 200]
+    upper_wick_size: [0, 200]  # % of close
+    lower_wick_size: [0, 200]  # % of close
+    total_range: [0, 200]      # % of close
     body_to_range_ratio: [0, 1]
     RSI: [0, 100]
     '%K': [0, 100]
@@ -376,19 +376,19 @@ feature_classification:
     PPO: [-50, 50]
     ROC: [-50, 50]
     ULTOSC: [0, 100]
-    MOM: [-50, 50]
-    MACD: [-100, 100]
-    MACD_Signal: [-100, 100]
-    MACD_Hist: [-50, 50]
+    MOM: [-100, 100]
+    MACD: [-50, 50]
+    MACD_Signal: [-50, 50]
+    MACD_Hist: [-20, 20]
     ADX: [0, 100]
     DI_plus: [0, 100]
     DI_minus: [0, 100]
     BB_Width: [0, 1]
-    ATR: [0, 100]
+    ATR: [0, 200]       # % of close
     NATR: [0, 5]
-    OBV: [-1e9, 1e9]
+    OBV: [-50, 50]
     CMF: [-1, 1]
-    ADOSC: [-1e9, 1e9]
+    ADOSC: [-50, 50]
     # AD는 제거 (요청 반영)
     HT_DCPERIOD: [0, 100]
     HT_SINE: [-1, 1]

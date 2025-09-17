@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import talib
 
+PERCENT_SCALE = 100.0
+
+
 # ==============================================================================
 # 유틸리티 함수 (기존과 동일)
 # ==============================================================================
@@ -14,6 +17,15 @@ def format_col_name(base_name, window=None, extra_str=None):
     if extra_str:
         name = f"{name}_{extra_str}"
     return name
+
+
+def scale_by_reference(values, reference, multiplier: float = 1.0, eps: float = 1e-9):
+    """주어진 기준(reference)을 사용해 값을 상대 스케일로 변환합니다."""
+    if isinstance(reference, pd.Series):
+        denom = reference.abs().clip(lower=eps)
+    else:
+        denom = np.clip(np.abs(reference), eps, None)
+    return (values / denom) * multiplier
 
 # ==============================================================================
 # 데이터 준비 (TA-Lib 함수에 맞게 numpy 배열 추출)
@@ -44,19 +56,24 @@ def calculate_price_change_features(df):
     df['close_change_pct'] = df['Close'].pct_change() * 100
     new_cols.append('close_change_pct')
 
-    # 캔들 크기
+    # 캔들 크기 (상대 스케일 적용 전 원시값 계산)
     open_price, high_price, low_price, close_price, _ = get_ohlcv_arrays(df)
-    
-    # TA-Lib 함수로 캔들 몸통 계산
-    df['body_size'] = np.abs(open_price - close_price)
-    
-    df['upper_wick_size'] = high_price - np.maximum(open_price, close_price)
-    df['lower_wick_size'] = np.minimum(open_price, close_price) - low_price
-    df['total_range'] = high_price - low_price
+
+    body_size_raw = np.abs(open_price - close_price)
+    upper_wick_raw = high_price - np.maximum(open_price, close_price)
+    lower_wick_raw = np.minimum(open_price, close_price) - low_price
+    total_range_raw = high_price - low_price
+
+    df['body_size'] = body_size_raw
+
+    close_magnitude = df['Close'].abs().clip(lower=1e-9)
+    df['upper_wick_size'] = scale_by_reference(pd.Series(upper_wick_raw, index=df.index), close_magnitude, multiplier=PERCENT_SCALE)
+    df['lower_wick_size'] = scale_by_reference(pd.Series(lower_wick_raw, index=df.index), close_magnitude, multiplier=PERCENT_SCALE)
+    df['total_range'] = scale_by_reference(pd.Series(total_range_raw, index=df.index), close_magnitude, multiplier=PERCENT_SCALE)
     new_cols.extend(['body_size', 'upper_wick_size', 'lower_wick_size', 'total_range'])
 
     # 캔들 크기 비율 (분모가 0이 되는 것을 방지)
-    df['body_to_range_ratio'] = df['body_size'] / (df['total_range'] + 1e-9)
+    df['body_to_range_ratio'] = body_size_raw / (total_range_raw + 1e-9)
     new_cols.append('body_to_range_ratio')
 
     df.fillna({'close_change_pct': 0}, inplace=True)
@@ -106,9 +123,15 @@ def calculate_macd(df, short_window, long_window, signal_window):
         slowperiod=long_window,
         signalperiod=signal_window
     )
-    df[macd_col] = macd
-    df[signal_col] = signal
-    df[hist_col] = hist
+
+    close_series = df['Close'].abs().clip(lower=1e-9)
+    macd_series = pd.Series(macd, index=df.index)
+    signal_series = pd.Series(signal, index=df.index)
+    hist_series = pd.Series(hist, index=df.index)
+
+    df[macd_col] = scale_by_reference(macd_series, close_series, multiplier=PERCENT_SCALE)
+    df[signal_col] = scale_by_reference(signal_series, close_series, multiplier=PERCENT_SCALE)
+    df[hist_col] = scale_by_reference(hist_series, close_series, multiplier=PERCENT_SCALE)
     
     return df, [macd_col, signal_col, hist_col]
 
@@ -269,7 +292,10 @@ def calculate_mom(df, window):
     """MOM (Momentum)을 계산합니다."""
     col_name = format_col_name('MOM', window)
     _, _, _, close_price, _ = get_ohlcv_arrays(df)
-    df[col_name] = talib.MOM(close_price, timeperiod=window)
+    mom_values = talib.MOM(close_price, timeperiod=window)
+    mom_series = pd.Series(mom_values, index=df.index)
+    prev_close = df['Close'].shift(window)
+    df[col_name] = scale_by_reference(mom_series, prev_close, multiplier=PERCENT_SCALE)
     return df, [col_name]
 
 # ==============================================================================
@@ -303,7 +329,10 @@ def calculate_atr(df, window):
     """ATR (평균 실제 범위)을 TA-Lib으로 계산합니다."""
     col_name = format_col_name('ATR', window)
     _, high_price, low_price, close_price, _ = get_ohlcv_arrays(df)
-    df[col_name] = talib.ATR(high_price, low_price, close_price, timeperiod=window)
+    atr_values = talib.ATR(high_price, low_price, close_price, timeperiod=window)
+    atr_series = pd.Series(atr_values, index=df.index)
+    close_series = df['Close'].abs().clip(lower=1e-9)
+    df[col_name] = scale_by_reference(atr_series, close_series, multiplier=PERCENT_SCALE)
     return df, [col_name]
 
 def calculate_natr(df, window):
@@ -343,9 +372,13 @@ def calculate_atr_moving_average(df, atr_window, ma_window):
 # ==============================================================================
 def calculate_obv(df):
     """OBV (On-Balance Volume)를 TA-Lib으로 계산합니다."""
+    OBV_NORMALIZATION_WINDOW = 20
     col_name = 'OBV'
     _, _, _, close_price, volume = get_ohlcv_arrays(df)
-    df[col_name] = talib.OBV(close_price, volume)
+    obv_values = talib.OBV(close_price, volume)
+    obv_series = pd.Series(obv_values, index=df.index)
+    volume_sum = df['Volume'].rolling(window=OBV_NORMALIZATION_WINDOW, min_periods=1).sum()
+    df[col_name] = scale_by_reference(obv_series, volume_sum)
     return df, [col_name]
 
 def calculate_cmf(df, window):
@@ -377,7 +410,17 @@ def calculate_adosc(df, fast_window=3, slow_window=10):
     """Chaikin A/D Oscillator를 계산합니다."""
     col_name = format_col_name('ADOSC', f"{fast_window}_{slow_window}")
     _, high_price, low_price, close_price, volume = get_ohlcv_arrays(df)
-    df[col_name] = talib.ADOSC(high_price, low_price, close_price, volume, fastperiod=fast_window, slowperiod=slow_window)
+    adosc_values = talib.ADOSC(
+        high_price,
+        low_price,
+        close_price,
+        volume,
+        fastperiod=fast_window,
+        slowperiod=slow_window,
+    )
+    adosc_series = pd.Series(adosc_values, index=df.index)
+    avg_volume = df['Volume'].rolling(window=slow_window, min_periods=1).mean()
+    df[col_name] = scale_by_reference(adosc_series, avg_volume, multiplier=PERCENT_SCALE)
     return df, [col_name]
 
 def calculate_ht_dcperiod(df):
