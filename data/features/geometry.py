@@ -1,3 +1,4 @@
+# /data/features/geometry.py
 """Shape-analysis feature generators."""
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+# /data/features/composite.py
 """Composite and cross-feature generators."""
 from __future__ import annotations
 

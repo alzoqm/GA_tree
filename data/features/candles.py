@@ -1,3 +1,4 @@
+# /data/features/__incandles.py
 """Candlestick pattern feature generators."""
 from __future__ import annotations
 

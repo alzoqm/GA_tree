@@ -1,3 +1,4 @@
+# /data/features/cycle.py
 """Cycle-detection helpers and temporal encoders."""
 from __future__ import annotations
 

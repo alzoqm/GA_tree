@@ -1,3 +1,4 @@
+# /data/features/volatility.py
 """Volatility and band-based feature generators."""
 from __future__ import annotations
 
