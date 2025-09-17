@@ -23,6 +23,10 @@
 5m:
   calculate_price_change_features:
     - {}
+  calculate_close_geometry_features:
+    - {window: 12, resample_points: 16}
+    - {window: 24, resample_points: 16}
+    - {window: 48, resample_points: 32}
   calculate_ma:
     - {window: 20}
     - {window: 50}
@@ -178,6 +182,10 @@
 30m:
   calculate_price_change_features:
     - {}
+  calculate_close_geometry_features:
+    - {window: 10, resample_points: 16}
+    - {window: 20, resample_points: 16}
+    - {window: 40, resample_points: 32}
   calculate_ma:
     - {window: 10}
     - {window: 20}
@@ -331,6 +339,10 @@
 1h:
   calculate_price_change_features:
     - {}
+  calculate_close_geometry_features:
+    - {window: 24, resample_points: 16}
+    - {window: 48, resample_points: 16}
+    - {window: 96, resample_points: 32}
   calculate_ma:
     - {window: 20}
     - {window: 50}
@@ -489,6 +501,10 @@
 4h:
   calculate_price_change_features:
     - {}
+  calculate_close_geometry_features:
+    - {window: 12, resample_points: 16}
+    - {window: 24, resample_points: 16}
+    - {window: 42, resample_points: 32}
   calculate_ma:
     - {window: 20}
     - {window: 50}
@@ -644,6 +660,10 @@
 1d:
   calculate_price_change_features:
     - {}
+  calculate_close_geometry_features:
+    - {window: 7, resample_points: 16}
+    - {window: 14, resample_points: 16}
+    - {window: 30, resample_points: 32}
   calculate_ma:
     - {window: 20}
     - {window: 50}

@@ -1,16 +1,36 @@
 # /data/merge_dataset.py
 # === 수정된 data/merge_dataset.py 파일의 전체 코드 ===
 
-import pandas as pd
-import numpy as np
-import yaml
+import gc
 import re
+
+import numpy as np
+import pandas as pd
+import yaml
 try:
     import data.ta_lib_feature_generator as talib_feat
 except Exception:
     # Lazy/optional import to allow using classification helpers without TA-Lib
     talib_feat = None
 from typing import List, Dict, Any, Tuple
+
+
+def optimize_dataframe_memory(df: pd.DataFrame, convert_bool: bool = True) -> pd.DataFrame:
+    """Downcast numeric dtypes (and optional bools) to reduce memory footprint."""
+    float_cols = df.select_dtypes(include=["float64", "float32"]).columns
+    for col in float_cols:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+
+    int_cols = df.select_dtypes(include=["int64", "int32", "int16", "int8", "uint64", "uint32", "uint16", "uint8"]).columns
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+
+    if convert_bool:
+        bool_cols = df.select_dtypes(include=["bool"]).columns
+        for col in bool_cols:
+            df[col] = df[col].astype(np.uint8)
+
+    return df
 
 # ==============================================================================
 #           [수정] 피처 분류 템플릿 제거
@@ -75,6 +95,7 @@ def generate_multi_timeframe_features(
     base_df = source_df.resample(resample_freq).agg(agg_rules)
     # Drop only if essential OHLCV are missing; allow estimated columns to be NaN
     base_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
+    base_df = optimize_dataframe_memory(base_df)
 
     # --- 2. 시간 단위별 피처 계산 및 통합 ---
     features_by_timeframe = {}
@@ -124,9 +145,11 @@ def generate_multi_timeframe_features(
                 # 타임프레임별 피처 모음에 병합
                 if renamed_cols:
                     if timeframe not in features_by_timeframe:
-                        features_by_timeframe[timeframe] = renamed_df[renamed_cols]
+                        optimized_df = optimize_dataframe_memory(renamed_df[renamed_cols])
+                        features_by_timeframe[timeframe] = optimized_df
                     else:
-                        features_by_timeframe[timeframe] = features_by_timeframe[timeframe].join(renamed_df[renamed_cols])
+                        joined = features_by_timeframe[timeframe].join(renamed_df[renamed_cols])
+                        features_by_timeframe[timeframe] = optimize_dataframe_memory(joined)
 
                 all_new_columns.extend(renamed_cols)
                 print(f"  - {func_name} ({params}): {len(renamed_cols)}개 컬럼 생성 완료")
@@ -152,9 +175,13 @@ def generate_multi_timeframe_features(
             )
             print(f"'{timeframe}' 피처가 'merge_asof'로 통합되었습니다.")
 
+        final_df = optimize_dataframe_memory(final_df)
+        gc.collect()
+
     # At final stage, keep rows where essential OHLCV exist; allow feature gaps and est columns
     final_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
     final_df.reset_index(inplace=True)
+    final_df = optimize_dataframe_memory(final_df, convert_bool=False)
 
     print("\n최종 피처 생성 및 통합이 완료되었습니다.")
     return final_df, sorted(list(set(all_new_columns)))

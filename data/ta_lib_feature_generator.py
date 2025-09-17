@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import talib
 
+from typing import Mapping, Sequence
+
 PERCENT_SCALE = 100.0
 EPS = 1e-9
 
@@ -66,6 +68,136 @@ def _slope_to_degrees(slope_series: pd.Series) -> pd.Series:
     """기울기를 각도로 변환합니다."""
     return np.degrees(np.arctan(slope_series))
 
+
+def _resample_series(values: np.ndarray, target_len: int) -> np.ndarray:
+    """선형 보간으로 고정 길이 형태를 생성합니다."""
+    if target_len <= 0:
+        raise ValueError("target_len must be positive")
+    if values.size == 0:
+        return np.zeros(target_len, dtype=np.float64)
+    if values.size == target_len:
+        return values.astype(np.float64, copy=True)
+
+    x_old = np.linspace(0.0, 1.0, num=values.size, dtype=np.float64)
+    x_new = np.linspace(0.0, 1.0, num=target_len, dtype=np.float64)
+    return np.interp(x_new, x_old, values.astype(np.float64))
+
+
+def _prepare_prototype_library(
+    prototype_library: Mapping[str, Sequence[float]] | None,
+    target_len: int,
+) -> dict[str, np.ndarray]:
+    """패턴 유사도 계산을 위한 정규화된 프로토타입을 생성합니다."""
+    if not prototype_library:
+        return {}
+
+    normalized = {}
+    for name, series in prototype_library.items():
+        arr = np.asarray(series, dtype=np.float64).ravel()
+        if arr.size < 2:
+            continue
+        resampled = _resample_series(arr, target_len)
+        base = resampled[0]
+        scaled = (resampled - base) / (np.abs(base) + EPS)
+        scaled -= scaled.mean()
+        norm = np.linalg.norm(scaled)
+        if norm <= EPS:
+            continue
+        normalized[name] = scaled / norm
+    return normalized
+
+
+def _compute_close_shape_features(
+    segment: np.ndarray,
+    resample_points: int,
+    proto_vectors: Mapping[str, np.ndarray],
+) -> dict[str, float]:
+    """단일 윈도우에서 기하학적 특성을 산출합니다."""
+    values = segment.astype(np.float64)
+    base = values[0]
+    norm_series = (values - base) / (np.abs(base) + EPS)
+    length = norm_series.size
+
+    x_idx = np.arange(length, dtype=np.float64)
+    x_mean = x_idx.mean()
+    y_mean = norm_series.mean()
+    denom = np.sum((x_idx - x_mean) ** 2) + EPS
+    slope = np.sum((x_idx - x_mean) * (norm_series - y_mean)) / denom
+
+    mid = length // 2
+    if mid >= 2:
+        front = norm_series[:mid]
+        back = norm_series[mid:]
+    else:
+        front = norm_series
+        back = norm_series
+
+    def _segment_slope(values_slice: np.ndarray) -> float:
+        if values_slice.size < 2:
+            return 0.0
+        idx = np.arange(values_slice.size, dtype=np.float64)
+        idx_mean = idx.mean()
+        val_mean = values_slice.mean()
+        denom_local = np.sum((idx - idx_mean) ** 2) + EPS
+        return np.sum((idx - idx_mean) * (values_slice - val_mean)) / denom_local
+
+    front_slope = _segment_slope(front)
+    back_slope = _segment_slope(back)
+
+    line = np.linspace(norm_series[0], norm_series[-1], num=length, dtype=np.float64)
+    deviation = norm_series - line
+    amplitude = np.max(norm_series) - np.min(norm_series)
+    amp_safe = amplitude + EPS
+
+    diff = np.diff(norm_series)
+    accel = np.diff(norm_series, n=2) if length >= 3 else np.array([], dtype=np.float64)
+
+    swing_changes = 0.0
+    if diff.size >= 2:
+        signs = np.sign(diff)
+        swing_changes = np.sum(signs[1:] * signs[:-1] < 0)
+        swing_changes /= max(diff.size - 1, 1)
+
+    symmetry = 0.0
+    half = length // 2
+    if half > 0:
+        first_half = norm_series[:half]
+        second_half = norm_series[-half:][::-1]
+        symmetry = np.mean(np.abs(first_half - second_half)) / amp_safe
+
+    resampled = _resample_series(norm_series, resample_points)
+    resampled -= resampled.mean()
+    resampled_norm = np.linalg.norm(resampled)
+    if resampled_norm > EPS:
+        resampled /= resampled_norm
+    else:
+        resampled = np.zeros_like(resampled)
+
+    features = {
+        'SlopeDeg': float(np.degrees(np.arctan(slope))),
+        'FrontSlopeDeg': float(np.degrees(np.arctan(front_slope))),
+        'BackSlopeDeg': float(np.degrees(np.arctan(back_slope))),
+        'SlopeDiffDeg': float(np.degrees(np.arctan(back_slope - front_slope))),
+        'EndReturn': float(norm_series[-1]),
+        'Area': float(np.mean(np.abs(deviation)) / amp_safe),
+        'MaxDeviation': float(np.max(np.abs(deviation)) / amp_safe),
+        'Runup': float(np.max(norm_series)),
+        'Drawdown': float(np.abs(np.min(norm_series))),
+        'PeakPos': float(np.argmax(norm_series) / max(length - 1, 1)),
+        'TroughPos': float(np.argmin(norm_series) / max(length - 1, 1)),
+        'Symmetry': float(symmetry),
+        'ShapeVol': float(np.std(norm_series)),
+        'ShapeVelStd': float(np.std(diff) if diff.size > 0 else 0.0),
+        'ShapeAccelStd': float(np.std(accel) if accel.size > 0 else 0.0),
+        'Curvature': float(np.mean(np.abs(accel)) if accel.size > 0 else 0.0),
+        'SwingRate': float(swing_changes),
+    }
+
+    for name, proto_vec in proto_vectors.items():
+        features[f'ProtoSim_{name}'] = float(np.dot(resampled, proto_vec))
+
+    return features
+
 # ==============================================================================
 # 1. 기본 OHLCV 및 캔들 기반 피처
 # ==============================================================================
@@ -104,6 +236,66 @@ def calculate_price_change_features(df):
 
     df.fillna({'close_change_pct': 0}, inplace=True)
     return df, new_cols
+
+
+def calculate_close_geometry_features(
+    df: pd.DataFrame,
+    window: int,
+    resample_points: int = 16,
+    prototype_library: Mapping[str, Sequence[float]] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Close 가격 궤적의 기하학적 특징을 추가합니다."""
+    if 'Close' not in df.columns:
+        raise KeyError("DataFrame must contain 'Close' column.")
+    if window < 3:
+        raise ValueError("window must be >= 3 to describe shape geometry.")
+    if resample_points < 2:
+        raise ValueError("resample_points must be >= 2.")
+
+    proto_vectors = _prepare_prototype_library(prototype_library, resample_points)
+
+    base_metrics = [
+        'SlopeDeg',
+        'FrontSlopeDeg',
+        'BackSlopeDeg',
+        'SlopeDiffDeg',
+        'EndReturn',
+        'Area',
+        'MaxDeviation',
+        'Runup',
+        'Drawdown',
+        'PeakPos',
+        'TroughPos',
+        'Symmetry',
+        'ShapeVol',
+        'ShapeVelStd',
+        'ShapeAccelStd',
+        'Curvature',
+        'SwingRate',
+    ]
+
+    column_map = {metric: format_col_name('CloseGeom', window, metric) for metric in base_metrics}
+    for name in proto_vectors:
+        metric = f'ProtoSim_{name}'
+        column_map[metric] = format_col_name('CloseGeom', window, metric)
+
+    arrays = {col: np.full(df.shape[0], np.nan, dtype=np.float64) for col in column_map.values()}
+
+    close_values = df['Close'].astype(np.float64).values
+
+    for end_idx in range(window - 1, close_values.size):
+        segment = close_values[end_idx - window + 1:end_idx + 1]
+        feature_values = _compute_close_shape_features(segment, resample_points, proto_vectors)
+        for metric_name, value in feature_values.items():
+            col = column_map.get(metric_name)
+            if col is None:
+                continue
+            arrays[col][end_idx] = value
+
+    for col_name, values in arrays.items():
+        df[col_name] = values
+
+    return df, list(arrays.keys())
 
 # ==============================================================================
 # 2. 추세 (Trend) 지표 (TA-Lib 적용)
