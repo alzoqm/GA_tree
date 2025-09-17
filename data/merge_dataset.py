@@ -6,6 +6,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from pandas.api import types as ptypes
 import yaml
 try:
     import data.ta_lib_feature_generator as talib_feat
@@ -192,11 +193,15 @@ def generate_multi_timeframe_features(
 
 def _generate_model_config_from_features(
     all_generated_cols: List[str],
-    classification_config: Dict[str, Any]
+    classification_config: Dict[str, Any],
+    feature_frame: pd.DataFrame | None = None,
 ) -> Dict[str, Any]:
     """
     생성된 전체 피처 목록과 YAML에서 로드한 '분류 설정'을 받아
     모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
+
+    추가로 feature_frame을 전달하면 YAML에서 정의되지 않은 피처들에 대해
+    데이터 기반의 자동 분류(불리언/숫자형)와 범위 추정을 수행합니다.
 
     개선 사항:
     - 접두어 startswith 매칭을 경계 기반 정규식으로 대체: ^key(?:_|$)
@@ -224,6 +229,15 @@ def _generate_model_config_from_features(
     pat_cmp = make_patterns(feature_comparison_template)
     pat_num = make_patterns(list(feature_num_template.keys()))
 
+    fallback_quantiles = classification_config.get('fallback_quantiles', [0.5, 99.5])
+    if not isinstance(fallback_quantiles, (list, tuple)) or len(fallback_quantiles) != 2:
+        fallback_quantiles = [0.5, 99.5]
+    fallback_range = classification_config.get('fallback_feature_num_range', [-1.0, 1.0])
+    if not isinstance(fallback_range, (list, tuple)) or len(fallback_range) != 2:
+        fallback_range = [-1.0, 1.0]
+
+    bool_registry: set[str] = set()
+
     # Cross-category key overlap check (warn only)
     set_bool = set(feature_bool_template)
     set_cmp = set(feature_comparison_template)
@@ -241,6 +255,8 @@ def _generate_model_config_from_features(
     final_feature_bool: List[str] = []
     comparison_feature_list: List[str] = []
     unclassified_cols: List[str] = []
+    auto_classified_num: Dict[str, Tuple[float, float]] = {}
+    auto_classified_bool: List[str] = []
 
     def match_keys(name: str, patterns):
         base = strip_tf(name)
@@ -260,8 +276,9 @@ def _generate_model_config_from_features(
 
         # Priority: bool > cmp > num (backward compatible)
         if matches_bool:
-            # If multiple keys match, first is the longest due to sorting
-            final_feature_bool.append(col_name)
+            if col_name not in bool_registry:
+                final_feature_bool.append(col_name)
+                bool_registry.add(col_name)
             continue
         if matches_cmp:
             comparison_feature_list.append(col_name)
@@ -271,10 +288,54 @@ def _generate_model_config_from_features(
             final_feature_num[col_name] = feature_num_template[key]
             continue
 
-        # No match
+        # Attempt automatic classification for unmatched columns
+        handled = False
+        if feature_frame is not None and col_name in feature_frame.columns:
+            series = feature_frame[col_name]
+
+            def _looks_like_bool(s: pd.Series) -> bool:
+                if ptypes.is_bool_dtype(s):
+                    return True
+                finite = pd.to_numeric(s, errors='coerce')
+                finite = finite.replace([np.inf, -np.inf], np.nan).dropna()
+                if finite.empty:
+                    return False
+                unique_vals = set(finite.unique())
+                return unique_vals.issubset({0.0, 1.0})
+
+            if _looks_like_bool(series):
+                if col_name not in bool_registry:
+                    final_feature_bool.append(col_name)
+                    bool_registry.add(col_name)
+                    auto_classified_bool.append(col_name)
+                handled = True
+            else:
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                numeric_series = numeric_series.replace([np.inf, -np.inf], np.nan).dropna()
+                if not numeric_series.empty:
+                    low_q, high_q = sorted(fallback_quantiles)
+                    lower = float(np.nanpercentile(numeric_series, low_q))
+                    upper = float(np.nanpercentile(numeric_series, high_q))
+                    if lower == upper:
+                        margin = abs(lower) if lower != 0 else 1.0
+                        lower -= margin
+                        upper += margin
+                    final_feature_num[col_name] = (lower, upper)
+                    auto_classified_num[col_name] = (lower, upper)
+                else:
+                    final_feature_num[col_name] = (float(fallback_range[0]), float(fallback_range[1]))
+                    auto_classified_num[col_name] = (float(fallback_range[0]), float(fallback_range[1]))
+                handled = True
+
+        if handled:
+            continue
+
+        # No match after automated handling
         unclassified_cols.append(col_name)
 
     # 5. 최종 feature_comparison_map 생성 (모든 비교 피처 간 pairwise 비교)
+    comparison_feature_list = list(dict.fromkeys(comparison_feature_list))
+
     final_feature_comparison_map = {
         feat: [other for other in comparison_feature_list if other != feat]
         for feat in comparison_feature_list
@@ -283,6 +344,21 @@ def _generate_model_config_from_features(
     print(f"  - 숫자 비교(feature_num) 타입 피처: {len(final_feature_num)}개")
     print(f"  - 피처간 비교(feature_comparison) 타입 피처: {len(final_feature_comparison_map)}개")
     print(f"  - 불리언(feature_bool) 타입 피처: {len(final_feature_bool)}개")
+
+    if auto_classified_num:
+        sample_items = list(auto_classified_num.items())[:3]
+        print(
+            "  - 자동 분류된 숫자형 피처 {}개 (예시: {})".format(
+                len(auto_classified_num), sample_items
+            )
+        )
+
+    if auto_classified_bool:
+        print(
+            "  - 자동 분류된 불리언 피처 {}개 (예시: {})".format(
+                len(auto_classified_bool), auto_classified_bool[:5]
+            )
+        )
 
     if unclassified_cols:
         print(f"  - 경고: 분류되지 않은 피처 {len(unclassified_cols)}개 발견: {unclassified_cols}")
@@ -345,7 +421,11 @@ def run_feature_generation_from_yaml(
     )
     
     # 4. 생성된 피처 목록으로 모델 설정(config) 생성
-    model_config = _generate_model_config_from_features(added_cols, classification_config)
+    model_config = _generate_model_config_from_features(
+        added_cols,
+        classification_config,
+        feature_frame=final_dataframe,
+    )
 
     return final_dataframe, model_config
 
