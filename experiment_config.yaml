@@ -55,8 +55,8 @@ data:
   # --------------------------------------------------------
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
-    # target_timeframes: ['5m', '30m', '1h', '4h', '1d']
-    target_timeframes: ['5m']
+    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    # target_timeframes: ['5m']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
