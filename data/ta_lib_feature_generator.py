@@ -1349,8 +1349,10 @@ def calculate_confirmation_signal(df: pd.DataFrame, rsi_window: int, adx_window:
         new_col = format_col_name('Bearish_Confirmation', f"{rsi_window}_{adx_window}")
     else:
         return df, []
-        
-    df[new_col] = cond
+
+    # Avoid repeated in-place column inserts on a fragmented frame by creating
+    # a defragmented copy that includes the new column in a single assignment.
+    df = df.assign(**{new_col: cond})
     return df, [new_col]
 
 # ==============================================================================

@@ -123,15 +123,15 @@ def generate_multi_timeframe_features(
             for params in params_list:
                 # 의존 피처가 필요한 함수(예: ATR -> ATR-MA)를 위해 누적 DataFrame을 전달
                 # 주의: feature_function은 df_work를 인플레이스 변경할 수 있음
+                original_df = df_work
                 df_with_feature, new_cols = feature_function(df_work, **params)
 
-                # 다음 함수가 방금 생성한 피처를 참조할 수 있도록 누적 반영
-                # df_with_feature가 df_work와 동일 객체일 수 있으므로, 별도의 rename로 인해
-                # df_work의 원본 컬럼명이 바뀌지 않도록 여기서는 "미리" 누적만 수행하고,
-                # rename은 별도의 복사본에서 처리한다.
-                if new_cols:
-                    for c in new_cols:
-                        df_work[c] = df_with_feature[c]
+                # in-place insert가 계속 누적되면 DataFrame이 조각날 수 있으므로,
+                # 동일 객체를 그대로 돌려받고 새 컬럼이 추가된 경우에는 사본으로 치환한다.
+                if new_cols and df_with_feature is original_df:
+                    df_work = df_with_feature.copy()
+                else:
+                    df_work = df_with_feature
 
                 # 새로 생성된 컬럼들만 별도 복사 후 타임프레임 접미사 부여
                 if new_cols:
