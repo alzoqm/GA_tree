@@ -4,6 +4,7 @@ import numpy as np
 import talib
 
 PERCENT_SCALE = 100.0
+EPS = 1e-9
 
 
 # ==============================================================================
@@ -39,6 +40,31 @@ def get_ohlcv_arrays(df):
         df['Close'].values,
         df['Volume'].astype(float).values  # Volume은 float 타입이어야 합니다.
     )
+
+
+def _compute_rolling_slope(series: pd.Series, window: int) -> pd.Series:
+    """윈도우 내 선형 회귀 기울기를 계산합니다."""
+    if window is None or window < 2:
+        return pd.Series(np.nan, index=series.index, dtype=float)
+
+    x = np.arange(window, dtype=np.float64)
+    x_mean = x.mean()
+    denom = ((x - x_mean) ** 2).sum()
+    if denom <= EPS:
+        denom = EPS
+
+    def _slope(values: np.ndarray) -> float:
+        y = values.astype(np.float64)
+        y_mean = y.mean()
+        cov = ((x - x_mean) * (y - y_mean)).sum()
+        return cov / denom
+
+    return series.rolling(window=window, min_periods=window).apply(_slope, raw=True)
+
+
+def _slope_to_degrees(slope_series: pd.Series) -> pd.Series:
+    """기울기를 각도로 변환합니다."""
+    return np.degrees(np.arctan(slope_series))
 
 # ==============================================================================
 # 1. 기본 OHLCV 및 캔들 기반 피처
@@ -184,6 +210,85 @@ def calculate_ichimoku(df, short_window=9, mid_window=26, long_window=52):
     # 반환되는 컬럼 리스트에 수정된 컬럼명 포함
     return df, [tenkan_sen_col, kijun_sen_col, senkou_a_col, senkou_b_col, chikou_ratio_col]
 
+
+def calculate_ichimoku_geometry(
+    df: pd.DataFrame,
+    short_window: int = 9,
+    mid_window: int = 26,
+    long_window: int = 52
+) -> tuple[pd.DataFrame, list[str]]:
+    """일목균형표 기반 기하학 요약 피처를 생성합니다."""
+    tenkan_col = format_col_name('Ichimoku_Tenkan', short_window)
+    kijun_col = format_col_name('Ichimoku_Kijun', mid_window)
+    senkou_a_col = format_col_name('Ichimoku_SenkouA', f"{short_window}_{mid_window}")
+    senkou_b_col = format_col_name('Ichimoku_SenkouB', long_window)
+    chikou_col = format_col_name('Ichimoku_Chikou_Ratio', mid_window)
+
+    required_cols = [tenkan_col, kijun_col, senkou_a_col, senkou_b_col, 'Close']
+    if not all(col in df.columns for col in required_cols):
+        print(f"Warning: Missing Ichimoku columns for geometry calculation: {required_cols}")
+        return df, []
+
+    thickness = (df[senkou_a_col] - df[senkou_b_col]).abs()
+    price_scale = df['Close'].rolling(window=mid_window, min_periods=mid_window).mean().abs().clip(lower=EPS)
+
+    area_col = format_col_name('Ichimoku_Geom_CloudAreaNorm', f"{short_window}_{mid_window}_{long_window}")
+    cloud_area = thickness.rolling(window=mid_window, min_periods=mid_window).mean() * mid_window
+    df[area_col] = cloud_area / price_scale
+
+    senkou_a_slope_col = format_col_name('Ichimoku_Geom_SenkouA_SlopeDeg', f"{short_window}_{mid_window}_{long_window}")
+    senkou_b_slope_col = format_col_name('Ichimoku_Geom_SenkouB_SlopeDeg', f"{short_window}_{mid_window}_{long_window}")
+    senkou_diff_col = format_col_name('Ichimoku_Geom_Senkou_SlopeDiffDeg', f"{short_window}_{mid_window}_{long_window}")
+
+    senkou_a_angle = _slope_to_degrees(_compute_rolling_slope(df[senkou_a_col], mid_window))
+    senkou_b_angle = _slope_to_degrees(_compute_rolling_slope(df[senkou_b_col], mid_window))
+
+    df[senkou_a_slope_col] = senkou_a_angle
+    df[senkou_b_slope_col] = senkou_b_angle
+    df[senkou_diff_col] = senkou_a_angle - senkou_b_angle
+
+    thickness_vol_col = format_col_name('Ichimoku_Geom_CloudThicknessVol', f"{short_window}_{mid_window}_{long_window}")
+    cloud_velocity_col = format_col_name('Ichimoku_Geom_CloudVelocity', f"{short_window}_{mid_window}_{long_window}")
+    close_pos_col = format_col_name('Ichimoku_Geom_ClosePos', f"{short_window}_{mid_window}_{long_window}")
+    tenkan_slope_col = format_col_name('Ichimoku_Geom_Tenkan_SlopeDeg', f"{short_window}_{mid_window}_{long_window}")
+    kijun_slope_col = format_col_name('Ichimoku_Geom_Kijun_SlopeDeg', f"{short_window}_{mid_window}_{long_window}")
+    tenkan_above_col = format_col_name('Ichimoku_Geom_TenkanAboveRate', f"{short_window}_{mid_window}_{long_window}")
+    chikou_slope_col = format_col_name('Ichimoku_Geom_Chikou_SlopeDeg', f"{short_window}_{mid_window}_{long_window}")
+
+    thickness_vol = thickness.rolling(window=mid_window, min_periods=mid_window).std()
+    thickness_velocity = thickness.diff().rolling(window=mid_window, min_periods=mid_window).mean()
+
+    df[thickness_vol_col] = thickness_vol / price_scale
+    df[cloud_velocity_col] = thickness_velocity / price_scale
+
+    cloud_mid = (df[senkou_a_col] + df[senkou_b_col]) / 2
+    close_position = (df['Close'] - cloud_mid) / (thickness + EPS)
+    df[close_pos_col] = close_position.clip(lower=-3.0, upper=3.0)
+
+    df[tenkan_slope_col] = _slope_to_degrees(_compute_rolling_slope(df[tenkan_col], short_window))
+    df[kijun_slope_col] = _slope_to_degrees(_compute_rolling_slope(df[kijun_col], mid_window))
+    df[tenkan_above_col] = (df[tenkan_col] > df[kijun_col]).rolling(window=mid_window, min_periods=mid_window).mean()
+
+    new_cols = [
+        area_col,
+        senkou_a_slope_col,
+        senkou_b_slope_col,
+        senkou_diff_col,
+        thickness_vol_col,
+        cloud_velocity_col,
+        close_pos_col,
+        tenkan_slope_col,
+        kijun_slope_col,
+        tenkan_above_col,
+    ]
+
+    if chikou_col in df.columns:
+        df[chikou_slope_col] = _slope_to_degrees(_compute_rolling_slope(df[chikou_col], mid_window))
+        new_cols.append(chikou_slope_col)
+
+    return df, new_cols
+
+
 def calculate_dema(df, window):
     """DEMA (이중 지수 이동평균)를 계산합니다."""
     col_name = format_col_name('DEMA', window)
@@ -324,6 +429,73 @@ def calculate_bollinger_bands(df, window, num_std=2):
     df[width_col] = (upper - lower) / (middle + 1e-9)
     
     return df, [upper_col, mid_col, lower_col, width_col]
+
+
+def calculate_bollinger_geometry(df: pd.DataFrame, window: int, num_std: int = 2) -> tuple[pd.DataFrame, list[str]]:
+    """볼린저 밴드의 기하학적 요약 피처를 생성합니다."""
+    upper_col = format_col_name('BB_Upper', f"{window}_{num_std}")
+    mid_col = format_col_name('BB_Mid', f"{window}_{num_std}")
+    lower_col = format_col_name('BB_Lower', f"{window}_{num_std}")
+
+    required_cols = [upper_col, mid_col, lower_col, 'Close']
+    if not all(col in df.columns for col in required_cols):
+        print(f"Warning: Missing Bollinger band columns for geometry calculation: {required_cols}")
+        return df, []
+
+    width_actual = df[upper_col] - df[lower_col]
+    mid_abs = df[mid_col].rolling(window=window, min_periods=window).mean().abs().clip(lower=EPS)
+
+    area_col = format_col_name('BB_Geom_AreaNorm', f"{window}_{num_std}")
+    band_area = width_actual.rolling(window=window, min_periods=window).mean() * window
+    df[area_col] = band_area / mid_abs
+
+    upper_angle_col = format_col_name('BB_Geom_UpperSlopeDeg', f"{window}_{num_std}")
+    lower_angle_col = format_col_name('BB_Geom_LowerSlopeDeg', f"{window}_{num_std}")
+    mid_angle_col = format_col_name('BB_Geom_MidSlopeDeg', f"{window}_{num_std}")
+    slope_diff_col = format_col_name('BB_Geom_SlopeDiffDeg', f"{window}_{num_std}")
+
+    upper_angle = _slope_to_degrees(_compute_rolling_slope(df[upper_col], window))
+    lower_angle = _slope_to_degrees(_compute_rolling_slope(df[lower_col], window))
+    mid_angle = _slope_to_degrees(_compute_rolling_slope(df[mid_col], window))
+
+    df[upper_angle_col] = upper_angle
+    df[lower_angle_col] = lower_angle
+    df[mid_angle_col] = mid_angle
+    df[slope_diff_col] = upper_angle - lower_angle
+
+    width_vol_col = format_col_name('BB_Geom_WidthVol', f"{window}_{num_std}")
+    width_velocity_col = format_col_name('BB_Geom_WidthVelocity', f"{window}_{num_std}")
+    price_pos_col = format_col_name('BB_Geom_ClosePos', f"{window}_{num_std}")
+    upper_touch_col = format_col_name('BB_Geom_UpperTouchRate', f"{window}_{num_std}")
+    lower_touch_col = format_col_name('BB_Geom_LowerTouchRate', f"{window}_{num_std}")
+
+    width_vol = width_actual.rolling(window=window, min_periods=window).std()
+    width_velocity = width_actual.diff().rolling(window=window, min_periods=window).mean()
+
+    df[width_vol_col] = width_vol / mid_abs
+    df[width_velocity_col] = width_velocity / mid_abs
+
+    close_position = (df['Close'] - df[lower_col]) / (width_actual + EPS)
+    df[price_pos_col] = close_position.clip(lower=0.0, upper=1.0)
+
+    df[upper_touch_col] = (df['Close'] >= df[upper_col]).rolling(window=window, min_periods=window).mean()
+    df[lower_touch_col] = (df['Close'] <= df[lower_col]).rolling(window=window, min_periods=window).mean()
+
+    new_cols = [
+        area_col,
+        upper_angle_col,
+        lower_angle_col,
+        mid_angle_col,
+        slope_diff_col,
+        width_vol_col,
+        width_velocity_col,
+        price_pos_col,
+        upper_touch_col,
+        lower_touch_col,
+    ]
+
+    return df, new_cols
+
 
 def calculate_atr(df, window):
     """ATR (평균 실제 범위)을 TA-Lib으로 계산합니다."""

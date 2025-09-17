@@ -57,6 +57,8 @@
     - {short_window: 24, long_window: 52, signal_window: 9}
   calculate_ichimoku:
     - {short_window: 9, mid_window: 26, long_window: 52}
+  calculate_ichimoku_geometry:
+    - {short_window: 9, mid_window: 26, long_window: 52}
   calculate_sar:
     - {acceleration: 0.02, maximum: 0.2}
   calculate_rsi:
@@ -96,6 +98,10 @@
     - {window: 10}
     - {window: 20}
   calculate_bollinger_bands:
+    - {window: 10, num_std: 2}
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+  calculate_bollinger_geometry:
     - {window: 10, num_std: 2}
     - {window: 20, num_std: 2}
     - {window: 50, num_std: 2}
@@ -206,6 +212,8 @@
     - {short_window: 5, long_window: 35, signal_window: 5}
   calculate_ichimoku:
     - {short_window: 9, mid_window: 26, long_window: 52}
+  calculate_ichimoku_geometry:
+    - {short_window: 9, mid_window: 26, long_window: 52}
   calculate_sar:
     - {acceleration: 0.02, maximum: 0.2}
   calculate_rsi:
@@ -245,6 +253,10 @@
     - {window: 14}
     - {window: 28}
   calculate_bollinger_bands:
+    - {window: 10, num_std: 2}
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+  calculate_bollinger_geometry:
     - {window: 10, num_std: 2}
     - {window: 20, num_std: 2}
     - {window: 50, num_std: 2}
@@ -355,6 +367,10 @@
     - {short_window: 9, mid_window: 26, long_window: 52}
     - {short_window: 10, mid_window: 30, long_window: 60}
     - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_ichimoku_geometry:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 10, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
   calculate_sar:
     - {acceleration: 0.02, maximum: 0.2}
   calculate_rsi:
@@ -394,6 +410,10 @@
     - {window: 20}
     - {window: 50}
   calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 100, num_std: 2}
+  calculate_bollinger_geometry:
     - {window: 20, num_std: 2}
     - {window: 50, num_std: 2}
     - {window: 100, num_std: 2}
@@ -505,6 +525,10 @@
     - {short_window: 9, mid_window: 26, long_window: 52}
     - {short_window: 10, mid_window: 30, long_window: 60}
     - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_ichimoku_geometry:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 10, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
   calculate_sar:
     - {acceleration: 0.02, maximum: 0.2}
   calculate_rsi:
@@ -544,6 +568,10 @@
     - {window: 28}
     - {window: 50}
   calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 100, num_std: 2}
+  calculate_bollinger_geometry:
     - {window: 20, num_std: 2}
     - {window: 50, num_std: 2}
     - {window: 100, num_std: 2}
@@ -652,6 +680,10 @@
     - {short_window: 9, mid_window: 26, long_window: 52}
     - {short_window: 15, mid_window: 30, long_window: 60}
     - {short_window: 20, mid_window: 60, long_window: 120}
+  calculate_ichimoku_geometry:
+    - {short_window: 9, mid_window: 26, long_window: 52}
+    - {short_window: 15, mid_window: 30, long_window: 60}
+    - {short_window: 20, mid_window: 60, long_window: 120}
   calculate_sar:
     - {acceleration: 0.02, maximum: 0.2}
   calculate_rsi:
@@ -691,6 +723,10 @@
     - {window: 20}
     - {window: 50}
   calculate_bollinger_bands:
+    - {window: 20, num_std: 2}
+    - {window: 50, num_std: 2}
+    - {window: 200, num_std: 2}
+  calculate_bollinger_geometry:
     - {window: 20, num_std: 2}
     - {window: 50, num_std: 2}
     - {window: 200, num_std: 2}
