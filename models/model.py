@@ -30,8 +30,58 @@ except ImportError:
 
 
 # --- 예시 Feature 및 설정 (실제 사용 시 변경) ---
-FEATURE_NUM = {'RSI': (0, 100), 'ATR': (0, 1), 'WR': (-100, 0), 'STOCH_K':(0, 100)}
-FEATURE_BOOL = ['IsBullishMarket', 'IsHighVolatility']
+FEATURE_NUM = {
+    'RSI': (0, 100),
+    'ATR': (0, 1),
+    'WR': (-100, 0),
+    'STOCH_K': (0, 100),
+    'Volume_Log': (0, 25),
+    'Volume_ChangePct': (-100, 400),
+    'Volume_PerTrade': (0, 1_000_000),
+    'QuoteVolume_PerTrade': (0, 1_000_000),
+    'Volume_QuoteRatio': (0, 100),
+    'TakerBuyBase_Ratio': (0, 1),
+    'TakerBuyBase_Imbalance': (-1, 1),
+    'TakerBuyQuote_Ratio': (0, 1),
+    'TakerBuyQuote_Imbalance': (-1, 1),
+    'Volume_14_ToMean': (0, 6),
+    'Volume_14_ToMedian': (0, 6),
+    'Volume_14_Z': (-3, 6),
+    'Volume_14_SlopeDeg': (-90, 90),
+    'Volume_14_PctRank': (0, 1),
+    'Volume_14_ToEma': (0, 6),
+    'Volume_30_ToMean': (0, 6),
+    'Volume_30_ToMedian': (0, 6),
+    'Volume_30_Z': (-3, 5),
+    'Volume_30_SlopeDeg': (-90, 90),
+    'Volume_30_PctRank': (0, 1),
+    'Volume_30_ToEma': (0, 5),
+    'Volume_60_ToMean': (0, 6),
+    'Volume_60_ToMedian': (0, 6),
+    'Volume_60_Z': (-3, 5),
+    'Volume_60_SlopeDeg': (-90, 90),
+    'Volume_60_PctRank': (0, 1),
+    'Volume_60_ToEma': (0, 5),
+    'Volume_120_ToMean': (0, 6),
+    'Volume_120_ToMedian': (0, 6),
+    'Volume_120_Z': (-3, 5),
+    'Volume_120_SlopeDeg': (-90, 90),
+    'Volume_120_PctRank': (0, 1),
+    'Volume_120_ToEma': (0, 5),
+}
+
+FEATURE_BOOL = [
+    'IsBullishMarket',
+    'IsHighVolatility',
+    'Volume_14_SpikeFlag',
+    'Volume_14_DryFlag',
+    'Volume_30_SpikeFlag',
+    'Volume_30_DryFlag',
+    'Volume_60_SpikeFlag',
+    'Volume_60_DryFlag',
+    'Volume_120_SpikeFlag',
+    'Volume_120_DryFlag',
+]
 
 FEATURE_COMPARISON_MAP = {
     'SMA_5': ['SMA_20', 'EMA_10', 'EMA_30'],
@@ -39,7 +89,18 @@ FEATURE_COMPARISON_MAP = {
     'EMA_10': ['SMA_5', 'SMA_20', 'BB_upper', 'BB_lower'],
     'EMA_30': ['SMA_5', 'SMA_20'],
     'BB_upper': ['EMA_10', 'BB_lower'],
-    'BB_lower': ['EMA_10', 'BB_upper']
+    'BB_lower': ['EMA_10', 'BB_upper'],
+    'Volume_PerTrade': ['QuoteVolume_PerTrade'],
+    'Volume_14_ToMean': ['Volume_14_ToMedian', 'Volume_14_ToEma', 'Volume_14_Z'],
+    'Volume_30_ToMean': ['Volume_30_ToMedian', 'Volume_30_ToEma', 'Volume_30_Z'],
+    'Volume_60_ToMean': ['Volume_60_ToMedian', 'Volume_60_ToEma', 'Volume_60_Z'],
+    'Volume_120_ToMean': ['Volume_120_ToMedian', 'Volume_120_ToEma', 'Volume_120_Z'],
+    'Volume_30_Z': ['Volume_60_Z'],
+    'Volume_60_Z': ['Volume_120_Z'],
+    'Volume_30_PctRank': ['Volume_60_PctRank'],
+    'Volume_60_PctRank': ['Volume_120_PctRank'],
+    'TakerBuyBase_Ratio': ['TakerBuyBase_Imbalance', 'TakerBuyQuote_Ratio'],
+    'TakerBuyQuote_Ratio': ['TakerBuyQuote_Imbalance'],
 }
 
 def get_all_features(feature_num, feature_map, feature_bool):

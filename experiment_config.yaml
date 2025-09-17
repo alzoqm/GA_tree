@@ -55,7 +55,8 @@ data:
   # --------------------------------------------------------
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
-    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    # target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    target_timeframes: ['5m']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
@@ -424,6 +425,119 @@ feature_classification:
     ATR_ROC: [-100, 100]
     MACD_Hist_ROC: [-100, 100]
     CCI_ROC: [-100, 100]
+    Volume_Log: [0, 25]
+    Volume_ChangePct: [-100, 400]
+    Volume_PerTrade: [0, 1000000]
+    QuoteVolume_PerTrade: [0, 1000000]
+    Volume_QuoteRatio: [0, 100]
+    TakerBuyBase_Ratio: [0, 1]
+    TakerBuyBase_Imbalance: [-1, 1]
+    TakerBuyQuote_Ratio: [0, 1]
+    TakerBuyQuote_Imbalance: [-1, 1]
+    Volume_14_ToMean: [0, 6]
+    Volume_14_ToMedian: [0, 6]
+    Volume_14_Z: [-3, 6]
+    Volume_14_SlopeDeg: [-90, 90]
+    Volume_14_PctRank: [0, 1]
+    Volume_14_ToEma: [0, 6]
+    Volume_14_StdRatio: [0, 2]
+    Volume_30_ToMean: [0, 6]
+    Volume_30_ToMedian: [0, 6]
+    Volume_30_Z: [-3, 5]
+    Volume_30_SlopeDeg: [-90, 90]
+    Volume_30_PctRank: [0, 1]
+    Volume_30_ToEma: [0, 5]
+    Volume_30_StdRatio: [0, 2]
+    Volume_60_ToMean: [0, 6]
+    Volume_60_ToMedian: [0, 6]
+    Volume_60_Z: [-3, 5]
+    Volume_60_SlopeDeg: [-90, 90]
+    Volume_60_PctRank: [0, 1]
+    Volume_60_ToEma: [0, 5]
+    Volume_60_StdRatio: [0, 2]
+    Volume_120_ToMean: [0, 6]
+    Volume_120_ToMedian: [0, 6]
+    Volume_120_Z: [-3, 5]
+    Volume_120_SlopeDeg: [-90, 90]
+    Volume_120_PctRank: [0, 1]
+    Volume_120_ToEma: [0, 5]
+    Volume_120_StdRatio: [0, 2]
+    VolumeGeom_14_SlopeDeg: [-90, 90]
+    VolumeGeom_14_Area: [0, 5]
+    VolumeGeom_14_Runup: [0, 3]
+    VolumeGeom_14_Drawdown: [0, 3]
+    VolumeGeom_14_Symmetry: [0, 2]
+    VolumeGeom_30_SlopeDeg: [-90, 90]
+    VolumeGeom_30_Area: [0, 5]
+    VolumeGeom_30_Runup: [0, 3]
+    VolumeGeom_30_Drawdown: [0, 3]
+    VolumeGeom_30_Symmetry: [0, 2]
+    VolumeGeom_60_SlopeDeg: [-90, 90]
+    VolumeGeom_60_Area: [0, 5]
+    VolumeGeom_60_Runup: [0, 3]
+    VolumeGeom_60_Drawdown: [0, 3]
+    VolumeGeom_60_Symmetry: [0, 2]
+    VolumeGeom_120_SlopeDeg: [-90, 90]
+    VolumeGeom_120_Area: [0, 5]
+    VolumeGeom_120_Runup: [0, 3]
+    VolumeGeom_120_Drawdown: [0, 3]
+    VolumeGeom_120_Symmetry: [0, 2]
+    # Close geometry summaries (price trajectory)
+    CloseGeom_7_SlopeDeg: [-90, 90]
+    CloseGeom_7_Area: [0, 5]
+    CloseGeom_7_Runup: [0, 3]
+    CloseGeom_7_Drawdown: [0, 3]
+    CloseGeom_7_Symmetry: [0, 2]
+    CloseGeom_10_SlopeDeg: [-90, 90]
+    CloseGeom_10_Area: [0, 5]
+    CloseGeom_10_Runup: [0, 3]
+    CloseGeom_10_Drawdown: [0, 3]
+    CloseGeom_10_Symmetry: [0, 2]
+    CloseGeom_12_SlopeDeg: [-90, 90]
+    CloseGeom_12_Area: [0, 5]
+    CloseGeom_12_Runup: [0, 3]
+    CloseGeom_12_Drawdown: [0, 3]
+    CloseGeom_12_Symmetry: [0, 2]
+    CloseGeom_14_SlopeDeg: [-90, 90]
+    CloseGeom_14_Area: [0, 5]
+    CloseGeom_14_Runup: [0, 3]
+    CloseGeom_14_Drawdown: [0, 3]
+    CloseGeom_14_Symmetry: [0, 2]
+    CloseGeom_20_SlopeDeg: [-90, 90]
+    CloseGeom_20_Area: [0, 5]
+    CloseGeom_20_Runup: [0, 3]
+    CloseGeom_20_Drawdown: [0, 3]
+    CloseGeom_20_Symmetry: [0, 2]
+    CloseGeom_24_SlopeDeg: [-90, 90]
+    CloseGeom_24_Area: [0, 5]
+    CloseGeom_24_Runup: [0, 3]
+    CloseGeom_24_Drawdown: [0, 3]
+    CloseGeom_24_Symmetry: [0, 2]
+    CloseGeom_30_SlopeDeg: [-90, 90]
+    CloseGeom_30_Area: [0, 5]
+    CloseGeom_30_Runup: [0, 3]
+    CloseGeom_30_Drawdown: [0, 3]
+    CloseGeom_30_Symmetry: [0, 2]
+    CloseGeom_40_SlopeDeg: [-90, 90]
+    CloseGeom_40_Area: [0, 5]
+    CloseGeom_40_Runup: [0, 3]
+    CloseGeom_40_Drawdown: [0, 3]
+    CloseGeom_40_Symmetry: [0, 2]
+    CloseGeom_42_SlopeDeg: [-90, 90]
+    CloseGeom_42_Area: [0, 5]
+    CloseGeom_42_Runup: [0, 3]
+    CloseGeom_42_Drawdown: [0, 3]
+    CloseGeom_42_Symmetry: [0, 2]
+    CloseGeom_48_SlopeDeg: [-90, 90]
+    CloseGeom_48_Area: [0, 5]
+    CloseGeom_48_Runup: [0, 3]
+    CloseGeom_48_Drawdown: [0, 3]
+    CloseGeom_48_Symmetry: [0, 2]
+    CloseGeom_96_SlopeDeg: [-90, 90]
+    CloseGeom_96_Area: [0, 5]
+    CloseGeom_96_Runup: [0, 3]
+    CloseGeom_96_Drawdown: [0, 3]
+    CloseGeom_96_Symmetry: [0, 2]
     # ----------------------------------------------
 
   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
@@ -442,6 +556,22 @@ feature_classification:
     - BB_Upper
     - BB_Mid
     - BB_Lower
+    - Volume_PerTrade
+    - QuoteVolume_PerTrade
+    - Volume_14_ToMean
+    - Volume_30_ToMean
+    - Volume_60_ToMean
+    - Volume_14_ToMedian
+    - Volume_30_ToMedian
+    - Volume_60_ToMedian
+    - Volume_14_ToEma
+    - Volume_30_ToEma
+    - Volume_60_ToEma
+    - Volume_120_ToMean
+    - Volume_120_ToMedian
+    - Volume_120_ToEma
+    - TakerBuyBase_Ratio
+    - TakerBuyQuote_Ratio
     - Ichimoku_Tenkan
     - Ichimoku_Kijun
     - Ichimoku_SenkouA
@@ -489,6 +619,14 @@ feature_classification:
     - HT_TRENDMODE
     # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
     - Volume_Spike
+    - Volume_14_SpikeFlag
+    - Volume_14_DryFlag
+    - Volume_30_SpikeFlag
+    - Volume_30_DryFlag
+    - Volume_60_SpikeFlag
+    - Volume_60_DryFlag
+    - Volume_120_SpikeFlag
+    - Volume_120_DryFlag
     - Consecutive_Bullish
     - Consecutive_Bearish
     - Bullish_Confirmation

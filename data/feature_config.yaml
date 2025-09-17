@@ -163,6 +163,8 @@
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 1}
     - {indicator_name: 'ATR', indicator_window: 14, roc_period: 3}
     - {indicator_name: 'RSI', indicator_window: 9, roc_period: 5}
+  calculate_volume_features:
+    - {windows: [5, 14, 30, 60], shape_windows: [14, 30, 60], shape_resample_points: 16}
   calculate_volume_spike:
     - {window: 10, factor: 3.0}
     - {window: 20, factor: 2.0}
@@ -320,6 +322,8 @@
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 2}
     - {indicator_name: 'ATR', indicator_window: 14, roc_period: 3}
     - {indicator_name: 'CCI', indicator_window: 20, roc_period: 1}
+  calculate_volume_features:
+    - {windows: [14, 30, 60, 120], shape_windows: [14, 30, 60], shape_resample_points: 16}
   calculate_volume_spike:
     - {window: 20, factor: 2.5}
     - {window: 48, factor: 1.8}
@@ -482,6 +486,8 @@
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
     - {indicator_name: 'ATR', indicator_window: 14, roc_period: 5}
     - {indicator_name: 'MACD_Hist', indicator_window: '12_26', roc_period: 1} # MACD Hist 변화율
+  calculate_volume_features:
+    - {windows: [14, 30, 60, 120], shape_windows: [14, 30, 60], shape_resample_points: 16}
   calculate_volume_spike:
     - {window: 24, factor: 2.0}
     - {window: 48, factor: 1.8}
@@ -640,6 +646,8 @@
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
     - {indicator_name: 'ATR', indicator_window: 14, roc_period: 5}
     - {indicator_name: 'CCI', indicator_window: 20, roc_period: 2}
+  calculate_volume_features:
+    - {windows: [14, 30, 60, 120], shape_windows: [14, 30, 60], shape_resample_points: 16}
   calculate_volume_spike:
     - {window: 30, factor: 1.8}
     - {window: 60, factor: 1.5}
@@ -798,6 +806,8 @@
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 1}
     - {indicator_name: 'RSI', indicator_window: 14, roc_period: 3}
     - {indicator_name: 'ATR', indicator_window: 14, roc_period: 7}
+  calculate_volume_features:
+    - {windows: [14, 30, 60, 120], shape_windows: [30, 60, 120], shape_resample_points: 16}
   calculate_volume_spike:
     - {window: 20, factor: 1.5} # 일봉에서는 1.5배도 의미가 큼
     - {window: 50, factor: 1.2}
@@ -812,3 +822,20 @@
     - {rsi_window: 14, adx_window: 14, macd_short: 12, macd_long: 26, rsi_threshold: 50, adx_threshold: 20, direction: 'bearish'}
     - {rsi_window: 7, adx_window: 20, macd_short: 5, macd_long: 35, rsi_threshold: 50, adx_threshold: 25, direction: 'bullish'}
     - {rsi_window: 7, adx_window: 20, macd_short: 5, macd_long: 35, rsi_threshold: 50, adx_threshold: 25, direction: 'bearish'}
+
+
+# --- Close Geometry Feature Catalog (공통 메타데이터) ---
+close_geometry_feature_catalog:
+  metrics: [SlopeDeg, Area, Runup, Drawdown, Symmetry]
+  windows_by_timeframe:
+    5m: [12, 24, 48]
+    30m: [10, 20, 40]
+    1h: [24, 48, 96]
+    4h: [12, 24, 42]
+    1d: [7, 14, 30]
+  ranges:
+    SlopeDeg: [-90, 90]
+    Area: [0, 5]
+    Runup: [0, 3]
+    Drawdown: [0, 3]
+    Symmetry: [0, 2]
