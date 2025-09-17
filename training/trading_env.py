@@ -89,7 +89,16 @@ class TradingEnvironment:
         self.liq_clearance_fee_rate = env_config.get('liq_clearance_fee_rate', 0.0)
         self.funding_fee_hours = {0, 8, 16}
         # Minimum constraints
-        self.min_entry_ratio = env_config.get('min_entry_ratio', 0.05)
+        self.min_entry_ratio = float(env_config.get('min_entry_ratio', 0.05))
+        self.max_entry_ratio = float(env_config.get('max_entry_ratio', 1.0))
+        if not (0.0 < self.min_entry_ratio <= 1.0):
+            raise ValueError(f"min_entry_ratio must be in (0, 1], got {self.min_entry_ratio}")
+        if self.max_entry_ratio <= 0:
+            raise ValueError(f"max_entry_ratio must be positive, got {self.max_entry_ratio}")
+        if self.max_entry_ratio < self.min_entry_ratio:
+            raise ValueError(
+                f"max_entry_ratio ({self.max_entry_ratio}) must be >= min_entry_ratio ({self.min_entry_ratio})"
+            )
         self.min_leverage = int(env_config.get('min_leverage', 2))
         self.max_leverage = int(env_config.get('max_leverage', 1_000_000))
         self.min_additional_enter_ratio = env_config.get('min_additional_enter_ratio', 0.05)
@@ -437,7 +446,7 @@ class TradingEnvironment:
                     self.node_apply_count, self.node_noop_count, self.node_win_count, self.node_realized_pnl_sum, self.node_exposure_sum,
                     int(self._sim_step),
                     float(buy_exec), float(sell_exec),
-                    float(self.taker_fee_rate), float(self.min_entry_ratio),
+                    float(self.taker_fee_rate), float(self.min_entry_ratio), float(self.max_entry_ratio),
                     int(self.min_leverage), int(self.max_leverage),
                     float(self.min_additional_enter_ratio), int(self.max_additional_entries)
                 )
@@ -1031,7 +1040,7 @@ class TradingEnvironment:
                 continue
             enter_ratio = actions_tensor[action_mask, 1]
             # Enforce minimum entry ratio and cap at remaining capacity (for new pos, remaining is 1.0)
-            enter_ratio = torch.clamp(enter_ratio, min=self.min_entry_ratio, max=1.0)
+            enter_ratio = torch.clamp(enter_ratio, min=self.min_entry_ratio, max=self.max_entry_ratio)
             # Enforce leverage bounds
             leverage = torch.clamp(
                 actions_tensor[action_mask, 2].long(),
@@ -1227,7 +1236,7 @@ class TradingEnvironment:
             current_enter_ratio = self.enter_ratio[add_mask]
             current_requested_ratio = actions_tensor[add_mask, 1]
             # Remaining capacity to add
-            remaining_capital = torch.clamp(1.0 - current_enter_ratio, min=0.0)
+            remaining_capital = torch.clamp(self.max_entry_ratio - current_enter_ratio, min=0.0)
             # Require at least 5% remaining capacity; otherwise skip adding
             capacity_ok_mask = remaining_capital >= self.min_additional_enter_ratio
             if not capacity_ok_mask.any():
@@ -1261,7 +1270,7 @@ class TradingEnvironment:
         if flip_to_short_mask.any():
             ratio = actions_tensor[flip_to_short_mask, 1]
             # Enforce minimum entry ratio for the new flipped position
-            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=1.0)
+            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=self.max_entry_ratio)
             # Enforce leverage bounds for the new flipped position
             lev = torch.clamp(
                 actions_tensor[flip_to_short_mask, 2].long(),
@@ -1300,7 +1309,7 @@ class TradingEnvironment:
         flip_to_long_mask = action_mask & currently_short
         if flip_to_long_mask.any():
             ratio = actions_tensor[flip_to_long_mask, 1]
-            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=1.0)
+            ratio = torch.clamp(ratio, min=self.min_entry_ratio, max=self.max_entry_ratio)
             lev = torch.clamp(
                 actions_tensor[flip_to_long_mask, 2].long(),
                 min=self.min_leverage,
@@ -1372,7 +1381,7 @@ class TradingEnvironment:
             self.curr_win_streak, self.curr_loss_streak, self.max_win_streak, self.max_loss_streak,
             self.holding_period,
             float(buy_exec_price), float(sell_exec_price),
-            float(self.taker_fee_rate), float(self.min_entry_ratio),
+            float(self.taker_fee_rate), float(self.min_entry_ratio), float(self.max_entry_ratio),
             int(self.min_leverage), int(self.max_leverage),
             float(self.min_additional_enter_ratio), int(self.max_additional_entries)
         )

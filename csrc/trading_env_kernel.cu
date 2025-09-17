@@ -480,6 +480,7 @@ __global__ void execute_actions_kernel(
     float sell_exec_price,
     float taker_fee_rate,
     float min_entry_ratio,
+    float max_entry_ratio,
     long long min_leverage,
     long long max_leverage,
     float min_additional_enter_ratio,
@@ -505,7 +506,7 @@ __global__ void execute_actions_kernel(
 
     // Open new positions
     if ((atype == ACTION_NEW_LONG || atype == ACTION_NEW_SHORT) && pos == 0) {
-        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        float ratio = fclamp(a1, min_entry_ratio, max_entry_ratio);
         long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
         fee_apply(ratio, static_cast<float>(lev));
         pos_list[i] = (atype == ACTION_NEW_LONG) ? 2 : 1;
@@ -605,7 +606,7 @@ __global__ void execute_actions_kernel(
     // Add position
     if (atype == ACTION_ADD_POSITION && pos != 0 && additional_count[i] < max_additional_entries) {
         const float er = enter_ratio[i];
-        const float remaining = fmaxf(0.0f, 1.0f - er);
+        const float remaining = fmaxf(0.0f, max_entry_ratio - er);
         if (remaining >= min_additional_enter_ratio) {
             const float desired = fmaxf(a1, min_additional_enter_ratio);
             const float add = fminf(desired, remaining);
@@ -648,7 +649,7 @@ __global__ void execute_actions_kernel(
         trade_realized_pnl[i] = 0.0f;
 
         // Open new in opposite direction
-        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        float ratio = fclamp(a1, min_entry_ratio, max_entry_ratio);
         long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
         fee_apply(ratio, static_cast<float>(lev));
         const int64_t new_pos = (pos == 2) ? 1 : 2;
@@ -686,6 +687,7 @@ void execute_actions_batch_cuda(
     float sell_exec_price,
     float taker_fee_rate,
     float min_entry_ratio,
+    float max_entry_ratio,
     int64_t min_leverage,
     int64_t max_leverage,
     float min_additional_enter_ratio,
@@ -747,6 +749,7 @@ void execute_actions_batch_cuda(
         sell_exec_price,
         taker_fee_rate,
         min_entry_ratio,
+        max_entry_ratio,
         (long long)min_leverage,
         (long long)max_leverage,
         min_additional_enter_ratio,
@@ -802,6 +805,7 @@ __global__ void execute_actions_with_attrib_kernel(
     float sell_exec_price,
     float taker_fee_rate,
     float min_entry_ratio,
+    float max_entry_ratio,
     long long min_leverage,
     long long max_leverage,
     float min_additional_enter_ratio,
@@ -862,7 +866,7 @@ __global__ void execute_actions_with_attrib_kernel(
 
     // OPEN: NEW LONG/SHORT
     if ((atype == ACTION_NEW_LONG || atype == ACTION_NEW_SHORT) && pos == 0){
-        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        float ratio = fclamp(a1, min_entry_ratio, max_entry_ratio);
         long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
         // apply and attribute entry fee to source node
         float fee = ratio * static_cast<float>(lev) * taker_fee_rate;
@@ -975,7 +979,7 @@ __global__ void execute_actions_with_attrib_kernel(
     // ADD POSITION
     if (atype == ACTION_ADD_POSITION && pos != 0 && additional_count[i] < max_additional_entries){
         const float er = enter_ratio[i];
-        const float remaining = fmaxf(0.0f, 1.0f - er);
+        const float remaining = fmaxf(0.0f, max_entry_ratio - er);
         if (remaining >= min_additional_enter_ratio){
             const float desired = fmaxf(a1, min_additional_enter_ratio);
             const float add = fminf(desired, remaining);
@@ -1043,7 +1047,7 @@ __global__ void execute_actions_with_attrib_kernel(
         trade_realized_pnl[i] = 0.0f;
 
         // open new opposite lot
-        float ratio = fclamp(a1, min_entry_ratio, 1.0f);
+        float ratio = fclamp(a1, min_entry_ratio, max_entry_ratio);
         long long lev = iclamp(static_cast<long long>(llroundf(a2)), min_leverage, max_leverage);
         // apply and attribute entry fee for the new flipped position
         float fee_open = ratio * static_cast<float>(lev) * taker_fee_rate;
@@ -1116,6 +1120,7 @@ void execute_actions_with_attrib_batch_cuda(
     float sell_exec_price,
     float taker_fee_rate,
     float min_entry_ratio,
+    float max_entry_ratio,
     int64_t min_leverage,
     int64_t max_leverage,
     float min_additional_enter_ratio,
@@ -1175,6 +1180,7 @@ void execute_actions_with_attrib_batch_cuda(
         sell_exec_price,
         taker_fee_rate,
         min_entry_ratio,
+        max_entry_ratio,
         (long long)min_leverage,
         (long long)max_leverage,
         min_additional_enter_ratio,
