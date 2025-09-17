@@ -223,8 +223,13 @@ __global__ void subtree_crossover_kernel(
 
         if (p1_cand_count == 0 || p2_cand_count == 0) continue;
         
-        int p1_idx = p1_candidates[(int)(curand_uniform(&state) * p1_cand_count)];
-        int p2_idx = p2_candidates[(int)(curand_uniform(&state) * p2_cand_count)];
+        int p1_pick = (int)(curand_uniform(&state) * p1_cand_count);
+        if (p1_pick >= p1_cand_count) p1_pick = p1_cand_count - 1; // guard against curand returning 1.0
+        int p2_pick = (int)(curand_uniform(&state) * p2_cand_count);
+        if (p2_pick >= p2_cand_count) p2_pick = p2_cand_count - 1;
+
+        int p1_idx = p1_candidates[p1_pick];
+        int p2_idx = p2_candidates[p2_pick];
 
         int s1_count = find_subtree_nodes_device(p1_ptr, p1_idx, my_queue1, my_results1, max_nodes);
         int s2_count = find_subtree_nodes_device(p2_ptr, p2_idx, my_queue2, my_results2, max_nodes);

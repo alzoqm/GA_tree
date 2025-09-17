@@ -7,7 +7,7 @@
 # 1. 환경 및 경로 설정
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
-  seed: 200
+  seed: 42
   output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
   data_dir: "/root/workspace/GA_tree/dataset"
 
@@ -62,9 +62,9 @@ data:
 ga_core:
   population:
     size: 30000            # population size
-    max_nodes: 64         # maximum number of nodes per individual
-    max_depth: 5           # maximum tree depth
-    max_children: 7       # maximum number of children per node
+    max_nodes: 32         # maximum number of nodes per individual
+    max_depth: 4           # maximum tree depth
+    max_children: 4       # maximum number of children per node
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
