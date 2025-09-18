@@ -445,6 +445,7 @@ class WalkForwardOptimizer:
             population = evolution_engine.population
             window_start_gen = 0
             resume_archive = None
+            resume_early_stopping_state = None
 
             if checkpoint_manager is not None and latest_generation_checkpoint is not None:
                 latest_window, latest_generation = latest_generation_checkpoint
@@ -472,6 +473,7 @@ class WalkForwardOptimizer:
                         resume_best_node_stats = None
                         if isinstance(evolution_state, dict):
                             resume_best_node_stats = evolution_state.get('best_node_stats')
+                            resume_early_stopping_state = evolution_state.get('early_stopping_state')
                             if 'generation_stats' in evolution_state and hasattr(evolution_engine, 'generation_stats'):
                                 evolution_engine.generation_stats = evolution_state['generation_stats']
 
@@ -516,6 +518,8 @@ class WalkForwardOptimizer:
                 window_idx=window_idx,
                 best_archive=resume_archive,
                 start_gen=window_start_gen,
+                early_stopping_config=ga_cfg['evolution_loop'].get('early_stopping'),
+                early_stopping_state=resume_early_stopping_state,
             )
 
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:

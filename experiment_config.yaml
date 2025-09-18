@@ -21,7 +21,7 @@ resumption:
 
 # 1.1. Weights & Biases 설정
 wandb:
-  enabled: false          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
+  enabled: true          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
   project: "GA_tree"      # 프로젝트명
   entity: null            # 팀/엔티티 (없으면 null)
   group: "WFO"            # 그룹 태그
@@ -62,17 +62,26 @@ data:
 # 3. GA 핵심 파라미터
 ga_core:
   population:
-    size: 30000            # population size
+    size: 10000            # population size
     max_nodes: 128         # maximum number of nodes per individual
     max_depth: 7           # maximum tree depth
     max_children: 10       # maximum number of children per node
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
-    parent_pool_size: 18000     # 교배 풀(Mating Pool) 크기
-    elite_size: 1000           # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 4000 # 최종까지 보관할 누적 베스트 개체 수
+    parent_pool_size: 6000     # 교배 풀(Mating Pool) 크기
+    elite_size: 300           # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 500 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
+    # --- Early stopping configuration ---
+    early_stopping:
+      enabled: false          # true로 설정 시 세대 루프가 조기 종료됩니다.
+      metric: "mean_return"   # generation_summary 통계에서 모니터링할 지표 이름
+      stat: "mean"            # 사용할 통계 (mean, median, max, min 등)
+      minimize: null          # null이면 summary의 minimize 플래그를 따름
+      patience: 5             # 개선이 없을 때 허용할 최대 세대 수
+      min_delta: 0.0          # 개선으로 간주할 최소 변화량
+      warmup_generations: 0   # 모니터링을 시작하기 전 건너뛸 세대 수
 
 # 4. GA 연산자 상세 설정
 operators:
@@ -116,17 +125,17 @@ walk_forward:
   # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
   enabled: true
   # 윈도우 크기 설정 (테스트용으로 작게 조정)
-  # train_bars: 1000           # (구) 테스트용 임시 값
-  # oos_bars: 250              # (구) 테스트용 임시 값
-  # step_bars: 125             # (구) 테스트용 임시 값
+  train_bars: 1000           # (구) 테스트용 임시 값
+  oos_bars: 250              # (구) 테스트용 임시 값
+  step_bars: 125             # (구) 테스트용 임시 값
   # === 실제 학습용 윈도우 크기 ===
   # 기준: 총 데이터 길이 563,594 (5m 바), 1일=288바
   # - 인샘플(학습): 2년 ≈ 210,240 바 (2*365*288)
   # - 아웃샘플(OOS): 3개월 ≈ 25,920 바 (90*288)
   # - 스텝: 3개월(분기) 롤링 = 25,920 바
-  train_bars: 210240        # 실제 학습 단위 (2년)
-  oos_bars: 103680           # 실제 검증 단위 (1년)
-  step_bars: 103680          # 1년 단위 롤링
+  # train_bars: 210240        # 실제 학습 단위 (2년)
+  # oos_bars: 103680           # 실제 검증 단위 (1년)
+  # step_bars: 103680          # 1년 단위 롤링
   # 윈도우 생성 방식
   scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
   # 데이터 품질 및 누수 방지

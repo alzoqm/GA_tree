@@ -12,6 +12,7 @@ from models.model import GATreePop
 from training.predictor import build_adjacency_list_cuda
 from training.simulator import FitnessSimulator
 from utils.checkpoint_manager import CheckpointManager
+from training.early_stopping import build_early_stopping_monitor
 
 
 class GenerationRunner:
@@ -24,12 +25,15 @@ class GenerationRunner:
         output_dir: str,
         checkpoint_manager: Optional[CheckpointManager] = None,
         wandb_config: Optional[Dict] = None,
+        early_stopping_config: Optional[dict] = None,
     ) -> None:
         self.device = device
         self.evaluation_config = evaluation_config
         self.output_dir = output_dir
         self.checkpoint_manager = checkpoint_manager
         self.wandb_config = wandb_config or {}
+        self.early_stopping = build_early_stopping_monitor(early_stopping_config)
+        self._early_stopping_warning_emitted = False
 
     # ----- internal helpers (formerly module-level) -----
     def compute_generation_objectives(
@@ -123,6 +127,7 @@ class GenerationRunner:
         objectives_config: dict,
         evolution: Any,
         window_idx: Optional[int] = None,
+        early_stopping_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         checkpoint_dir = os.path.join(self.output_dir, 'checkpoints')
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -138,7 +143,57 @@ class GenerationRunner:
             evolution=evolution,
             checkpoint_manager=self.checkpoint_manager,
             window_idx=window_idx,
+            early_stopping_state=early_stopping_state,
         )
+
+    def _update_early_stopping(self, generation: int, generation_summary: Dict[str, Any]) -> bool:
+        """Update early stopping monitor with current generation statistics."""
+        if self.early_stopping is None:
+            return False
+
+        statistics = generation_summary.get('statistics', {}) if isinstance(generation_summary, dict) else {}
+        metric_name = self.early_stopping.metric
+        metric_stats = statistics.get(metric_name)
+
+        if metric_stats is None:
+            if not self._early_stopping_warning_emitted:
+                logging.warning(
+                    "Early stopping metric '%s' not present in generation summary; monitoring suspended.",
+                    metric_name,
+                )
+                self._early_stopping_warning_emitted = True
+            return False
+
+        minimize_flag = self.early_stopping.config.minimize
+        if minimize_flag is None:
+            minimize_flag = metric_stats.get('minimize')
+        if minimize_flag is None and self.early_stopping.minimize is not None:
+            minimize_flag = self.early_stopping.minimize
+
+        value = None
+        if metric_stats.get('valid_count', 0) > 0:
+            value = metric_stats.get(self.early_stopping.stat)
+
+        if minimize_flag is None and self.early_stopping.minimize is None:
+            if not self._early_stopping_warning_emitted:
+                logging.warning(
+                    "Unable to infer optimization direction for early stopping metric '%s'.",
+                    metric_name,
+                )
+                self._early_stopping_warning_emitted = True
+            return False
+
+        try:
+            return self.early_stopping.update(
+                value=value,
+                generation=generation,
+                minimize=minimize_flag,
+            )
+        except ValueError as exc:
+            if not self._early_stopping_warning_emitted:
+                logging.warning("Skipping early stopping update: %s", exc)
+                self._early_stopping_warning_emitted = True
+            return False
 
     @staticmethod
     def load_generation_checkpoint(
@@ -165,6 +220,7 @@ class GenerationRunner:
         best_archive=None,
         start_gen: int = 0,
         window_idx: Optional[int] = None,
+        early_stopping_state: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[dict]]:
         from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
 
@@ -196,6 +252,15 @@ class GenerationRunner:
             best_chromosomes = best_chromosomes.to(self.device)
         if isinstance(best_objectives, torch.Tensor):
             best_objectives = best_objectives.detach().cpu().numpy()
+
+        if self.early_stopping and early_stopping_state:
+            try:
+                self.early_stopping.load_state_dict(early_stopping_state)
+            except Exception as exc:
+                logging.warning(
+                    "Failed to restore early stopping state: %s. Restarting patience counters.",
+                    exc,
+                )
 
         for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
             print(f'Generation {gen_idx}:')
@@ -247,6 +312,11 @@ class GenerationRunner:
             )
 
             generation_summary = evaluator.get_objective_summary(train_objectives)
+
+            stop_triggered = False
+            if self.early_stopping is not None:
+                stop_triggered = self._update_early_stopping(gen_idx, generation_summary)
+
             self.save_generation_checkpoint(
                 gen_idx=gen_idx,
                 population=population,
@@ -257,7 +327,16 @@ class GenerationRunner:
                 objectives_config=objectives_config,
                 evolution=evolution,
                 window_idx=window_idx,
+                early_stopping_state=self.early_stopping.state_dict() if self.early_stopping is not None else None,
             )
+
+            if stop_triggered:
+                logging.info(
+                    "Early stopping triggered at generation %s. %s",
+                    gen_idx,
+                    self.early_stopping.describe() if self.early_stopping is not None else "",
+                )
+                break
 
             evolution.evolve(train_objectives_tensor)
             # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
@@ -518,6 +597,7 @@ def _save_generation_checkpoint(
     evolution: Any,
     checkpoint_manager: Optional[CheckpointManager] = None,
     window_idx: Optional[int] = None,
+    early_stopping_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Save generation checkpoint with enhanced resumption support."""
     # Legacy checkpoint format for compatibility
@@ -530,6 +610,7 @@ def _save_generation_checkpoint(
         "generation_stats": generation_summary,
         "objectives_config": objectives_config,
         "evolution_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {},
+        "early_stopping_state": early_stopping_state,
     }
     checkpoint_path = os.path.join(checkpoint_dir, f'generation_{gen_idx}.pt')
     torch.save(checkpoint_data, checkpoint_path)
@@ -556,8 +637,9 @@ def _save_generation_checkpoint(
                 "generation_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {},
                 "parent_size": getattr(evolution, 'parent_size', None),
                 "num_elites": getattr(evolution, 'num_elites', None),
+                "early_stopping_state": early_stopping_state,
             }
-            
+
             checkpoint_manager.save_window_checkpoint(
                 window_idx=window_idx,
                 generation=gen_idx,
@@ -568,6 +650,7 @@ def _save_generation_checkpoint(
                 evolution_state=evolution_state,
                 generation_stats=generation_summary,
                 objectives_config=objectives_config,
+                early_stopping_state=early_stopping_state,
             )
         except Exception as e:
             logging.warning(f"Failed to save enhanced checkpoint: {e}")
@@ -619,9 +702,14 @@ def load_generation_checkpoint(
                 evolution_state['best_node_stats'] = checkpoint_data['best_node_stats']
             except Exception:
                 pass
-        
+        if 'early_stopping_state' in checkpoint_data:
+            try:
+                evolution_state['early_stopping_state'] = checkpoint_data['early_stopping_state']
+            except Exception:
+                pass
+
         logging.info(f"Successfully loaded checkpoint: window {window_idx}, generation {generation}")
-        
+
         return population, best_chromosomes, best_objectives, evolution_state
         
     except Exception as e:
@@ -648,6 +736,8 @@ def generation_training(
     wandb_config: Optional[Dict] = None,
     checkpoint_manager: Optional[CheckpointManager] = None,
     window_idx: Optional[int] = None,
+    early_stopping_config: Optional[dict] = None,
+    early_stopping_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """
     Generation training loop using the decoupled FitnessSimulator.
@@ -660,6 +750,7 @@ def generation_training(
         output_dir=output_dir,
         checkpoint_manager=checkpoint_manager,
         wandb_config=wandb_config,
+        early_stopping_config=early_stopping_config,
     )
     return runner.train(
         data_1m=data_1m,
@@ -675,6 +766,7 @@ def generation_training(
         best_archive=best_archive,
         start_gen=start_gen,
         window_idx=window_idx,
+        early_stopping_state=early_stopping_state,
     )
 
 
