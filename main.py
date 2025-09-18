@@ -13,6 +13,17 @@ import json
 from datetime import datetime
 from typing import List, Optional
 
+
+def _construct_python_tuple(loader, node):
+    """Allow YAML !!python/tuple tags when using SafeLoader."""
+    return tuple(loader.construct_sequence(node))
+
+
+yaml.SafeLoader.add_constructor(
+    'tag:yaml.org,2002:python/tuple',
+    _construct_python_tuple,
+)
+
 # --- 프로젝트 모듈 임포트 ---
 from models.model import GATreePop
 from evolution.evolution import Evolution
