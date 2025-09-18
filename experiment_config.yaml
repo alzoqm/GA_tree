@@ -56,21 +56,22 @@ data:
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
     target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    # target_timeframes: ['5m']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
 ga_core:
   population:
     size: 30000            # population size
-    max_nodes: 32         # maximum number of nodes per individual
-    max_depth: 4           # maximum tree depth
-    max_children: 4       # maximum number of children per node
+    max_nodes: 128         # maximum number of nodes per individual
+    max_depth: 7           # maximum tree depth
+    max_children: 10       # maximum number of children per node
   evolution_loop:
     # generations: 3           # 더 많은 세대로 테스트
     generations: 20           # 더 많은 세대로 테스트
-    parent_pool_size: 12000     # 교배 풀(Mating Pool) 크기
-    elite_size: 500           # 다음 세대로 보존될 엘리트 개체 수
-    best_chromosome_pool_size: 1000 # 최종까지 보관할 누적 베스트 개체 수
+    parent_pool_size: 18000     # 교배 풀(Mating Pool) 크기
+    elite_size: 1000           # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 4000 # 최종까지 보관할 누적 베스트 개체 수
     warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
 
 # 4. GA 연산자 상세 설정
@@ -362,9 +363,9 @@ feature_classification:
   feature_num:
     close_change_pct: [-10, 10]
     body_size: [0, 100]
-    upper_wick_size: [0, 100]
-    lower_wick_size: [0, 100]
-    total_range: [0, 200]
+    upper_wick_size: [0, 200]  # % of close
+    lower_wick_size: [0, 200]  # % of close
+    total_range: [0, 200]      # % of close
     body_to_range_ratio: [0, 1]
     RSI: [0, 100]
     '%K': [0, 100]
@@ -376,19 +377,19 @@ feature_classification:
     PPO: [-50, 50]
     ROC: [-50, 50]
     ULTOSC: [0, 100]
-    MOM: [-50, 50]
-    MACD: [-100, 100]
-    MACD_Signal: [-100, 100]
-    MACD_Hist: [-50, 50]
+    MOM: [-100, 100]
+    MACD: [-50, 50]
+    MACD_Signal: [-50, 50]
+    MACD_Hist: [-20, 20]
     ADX: [0, 100]
     DI_plus: [0, 100]
     DI_minus: [0, 100]
     BB_Width: [0, 1]
-    ATR: [0, 100]
+    ATR: [0, 200]       # % of close
     NATR: [0, 5]
-    OBV: [-1e9, 1e9]
+    OBV: [-50, 50]
     CMF: [-1, 1]
-    ADOSC: [-1e9, 1e9]
+    ADOSC: [-50, 50]
     # AD는 제거 (요청 반영)
     HT_DCPERIOD: [0, 100]
     HT_SINE: [-1, 1]
@@ -399,10 +400,144 @@ feature_classification:
     RSI_Ratio: [0, 5]
     BB_Width_Ratio: [0, 5]
     Ichimoku_Chikou_Ratio: [0, 5]
+    BB_Geom_AreaNorm: [0, 50]
+    BB_Geom_UpperSlopeDeg: [-90, 90]
+    BB_Geom_LowerSlopeDeg: [-90, 90]
+    BB_Geom_MidSlopeDeg: [-90, 90]
+    BB_Geom_SlopeDiffDeg: [-180, 180]
+    BB_Geom_WidthVol: [0, 5]
+    BB_Geom_WidthVelocity: [-10, 10]
+    BB_Geom_ClosePos: [0, 1]
+    BB_Geom_UpperTouchRate: [0, 1]
+    BB_Geom_LowerTouchRate: [0, 1]
+    Ichimoku_Geom_CloudAreaNorm: [0, 50]
+    Ichimoku_Geom_SenkouA_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_SenkouB_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_Senkou_SlopeDiffDeg: [-180, 180]
+    Ichimoku_Geom_CloudThicknessVol: [0, 5]
+    Ichimoku_Geom_CloudVelocity: [-10, 10]
+    Ichimoku_Geom_ClosePos: [-3, 3]
+    Ichimoku_Geom_Tenkan_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_Kijun_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_TenkanAboveRate: [0, 1]
+    Ichimoku_Geom_Chikou_SlopeDeg: [-90, 90]
     RSI_ROC: [-100, 100]
     ATR_ROC: [-100, 100]
     MACD_Hist_ROC: [-100, 100]
     CCI_ROC: [-100, 100]
+    Volume_Log: [0, 25]
+    Volume_ChangePct: [-100, 400]
+    Volume_PerTrade: [0, 1000000]
+    QuoteVolume_PerTrade: [0, 1000000]
+    Volume_QuoteRatio: [0, 100]
+    TakerBuyBase_Ratio: [0, 1]
+    TakerBuyBase_Imbalance: [-1, 1]
+    TakerBuyQuote_Ratio: [0, 1]
+    TakerBuyQuote_Imbalance: [-1, 1]
+    Volume_14_ToMean: [0, 6]
+    Volume_14_ToMedian: [0, 6]
+    Volume_14_Z: [-3, 6]
+    Volume_14_SlopeDeg: [-90, 90]
+    Volume_14_PctRank: [0, 1]
+    Volume_14_ToEma: [0, 6]
+    Volume_14_StdRatio: [0, 2]
+    Volume_30_ToMean: [0, 6]
+    Volume_30_ToMedian: [0, 6]
+    Volume_30_Z: [-3, 5]
+    Volume_30_SlopeDeg: [-90, 90]
+    Volume_30_PctRank: [0, 1]
+    Volume_30_ToEma: [0, 5]
+    Volume_30_StdRatio: [0, 2]
+    Volume_60_ToMean: [0, 6]
+    Volume_60_ToMedian: [0, 6]
+    Volume_60_Z: [-3, 5]
+    Volume_60_SlopeDeg: [-90, 90]
+    Volume_60_PctRank: [0, 1]
+    Volume_60_ToEma: [0, 5]
+    Volume_60_StdRatio: [0, 2]
+    Volume_120_ToMean: [0, 6]
+    Volume_120_ToMedian: [0, 6]
+    Volume_120_Z: [-3, 5]
+    Volume_120_SlopeDeg: [-90, 90]
+    Volume_120_PctRank: [0, 1]
+    Volume_120_ToEma: [0, 5]
+    Volume_120_StdRatio: [0, 2]
+    VolumeGeom_14_SlopeDeg: [-90, 90]
+    VolumeGeom_14_Area: [0, 5]
+    VolumeGeom_14_Runup: [0, 3]
+    VolumeGeom_14_Drawdown: [0, 3]
+    VolumeGeom_14_Symmetry: [0, 2]
+    VolumeGeom_30_SlopeDeg: [-90, 90]
+    VolumeGeom_30_Area: [0, 5]
+    VolumeGeom_30_Runup: [0, 3]
+    VolumeGeom_30_Drawdown: [0, 3]
+    VolumeGeom_30_Symmetry: [0, 2]
+    VolumeGeom_60_SlopeDeg: [-90, 90]
+    VolumeGeom_60_Area: [0, 5]
+    VolumeGeom_60_Runup: [0, 3]
+    VolumeGeom_60_Drawdown: [0, 3]
+    VolumeGeom_60_Symmetry: [0, 2]
+    VolumeGeom_120_SlopeDeg: [-90, 90]
+    VolumeGeom_120_Area: [0, 5]
+    VolumeGeom_120_Runup: [0, 3]
+    VolumeGeom_120_Drawdown: [0, 3]
+    VolumeGeom_120_Symmetry: [0, 2]
+    # Close geometry summaries (price trajectory)
+    CloseGeom_7_SlopeDeg: [-90, 90]
+    CloseGeom_7_Area: [0, 5]
+    CloseGeom_7_Runup: [0, 3]
+    CloseGeom_7_Drawdown: [0, 3]
+    CloseGeom_7_Symmetry: [0, 2]
+    CloseGeom_10_SlopeDeg: [-90, 90]
+    CloseGeom_10_Area: [0, 5]
+    CloseGeom_10_Runup: [0, 3]
+    CloseGeom_10_Drawdown: [0, 3]
+    CloseGeom_10_Symmetry: [0, 2]
+    CloseGeom_12_SlopeDeg: [-90, 90]
+    CloseGeom_12_Area: [0, 5]
+    CloseGeom_12_Runup: [0, 3]
+    CloseGeom_12_Drawdown: [0, 3]
+    CloseGeom_12_Symmetry: [0, 2]
+    CloseGeom_14_SlopeDeg: [-90, 90]
+    CloseGeom_14_Area: [0, 5]
+    CloseGeom_14_Runup: [0, 3]
+    CloseGeom_14_Drawdown: [0, 3]
+    CloseGeom_14_Symmetry: [0, 2]
+    CloseGeom_20_SlopeDeg: [-90, 90]
+    CloseGeom_20_Area: [0, 5]
+    CloseGeom_20_Runup: [0, 3]
+    CloseGeom_20_Drawdown: [0, 3]
+    CloseGeom_20_Symmetry: [0, 2]
+    CloseGeom_24_SlopeDeg: [-90, 90]
+    CloseGeom_24_Area: [0, 5]
+    CloseGeom_24_Runup: [0, 3]
+    CloseGeom_24_Drawdown: [0, 3]
+    CloseGeom_24_Symmetry: [0, 2]
+    CloseGeom_30_SlopeDeg: [-90, 90]
+    CloseGeom_30_Area: [0, 5]
+    CloseGeom_30_Runup: [0, 3]
+    CloseGeom_30_Drawdown: [0, 3]
+    CloseGeom_30_Symmetry: [0, 2]
+    CloseGeom_40_SlopeDeg: [-90, 90]
+    CloseGeom_40_Area: [0, 5]
+    CloseGeom_40_Runup: [0, 3]
+    CloseGeom_40_Drawdown: [0, 3]
+    CloseGeom_40_Symmetry: [0, 2]
+    CloseGeom_42_SlopeDeg: [-90, 90]
+    CloseGeom_42_Area: [0, 5]
+    CloseGeom_42_Runup: [0, 3]
+    CloseGeom_42_Drawdown: [0, 3]
+    CloseGeom_42_Symmetry: [0, 2]
+    CloseGeom_48_SlopeDeg: [-90, 90]
+    CloseGeom_48_Area: [0, 5]
+    CloseGeom_48_Runup: [0, 3]
+    CloseGeom_48_Drawdown: [0, 3]
+    CloseGeom_48_Symmetry: [0, 2]
+    CloseGeom_96_SlopeDeg: [-90, 90]
+    CloseGeom_96_Area: [0, 5]
+    CloseGeom_96_Runup: [0, 3]
+    CloseGeom_96_Drawdown: [0, 3]
+    CloseGeom_96_Symmetry: [0, 2]
     # ----------------------------------------------
 
   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
@@ -421,6 +556,22 @@ feature_classification:
     - BB_Upper
     - BB_Mid
     - BB_Lower
+    - Volume_PerTrade
+    - QuoteVolume_PerTrade
+    - Volume_14_ToMean
+    - Volume_30_ToMean
+    - Volume_60_ToMean
+    - Volume_14_ToMedian
+    - Volume_30_ToMedian
+    - Volume_60_ToMedian
+    - Volume_14_ToEma
+    - Volume_30_ToEma
+    - Volume_60_ToEma
+    - Volume_120_ToMean
+    - Volume_120_ToMedian
+    - Volume_120_ToEma
+    - TakerBuyBase_Ratio
+    - TakerBuyQuote_Ratio
     - Ichimoku_Tenkan
     - Ichimoku_Kijun
     - Ichimoku_SenkouA
@@ -468,6 +619,14 @@ feature_classification:
     - HT_TRENDMODE
     # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
     - Volume_Spike
+    - Volume_14_SpikeFlag
+    - Volume_14_DryFlag
+    - Volume_30_SpikeFlag
+    - Volume_30_DryFlag
+    - Volume_60_SpikeFlag
+    - Volume_60_DryFlag
+    - Volume_120_SpikeFlag
+    - Volume_120_DryFlag
     - Consecutive_Bullish
     - Consecutive_Bearish
     - Bullish_Confirmation

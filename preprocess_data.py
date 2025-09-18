@@ -8,7 +8,7 @@ import logging
 # --- 프로젝트 모듈 임포트 ---
 from data.data_download import fetch_historical_data, fetch_funding_rate_history
 from data.funding_mark_proxy import fetch_perp_klines, estimate_funding_and_mark
-from data.merge_dataset import run_feature_generation_from_yaml
+from data.merge_dataset import run_feature_generation_from_yaml, optimize_dataframe_memory
 
 # ==============================================================================
 #                      환경 설정 및 유틸리티 함수
@@ -226,6 +226,11 @@ def run_preprocessing():
     if final_df.empty:
         logging.error("Feature dataframe is empty after generation. Check dropna rules and inputs.")
         # Continue to save for inspection, but flag as error
+
+    # Downcast dtypes once more before serialization to reduce peak memory usage
+    final_df = optimize_dataframe_memory(final_df)
+    approx_mb = final_df.memory_usage(deep=True).sum() / (1024 ** 2)
+    logging.info(f"Optimized feature dataframe memory: {approx_mb:.2f} MB")
 
     # --- 3. 생성된 최종 데이터 및 설정 저장 ---
     logging.info(f"Saving generated feature data (pickle) to '{final_features_pkl}'...")

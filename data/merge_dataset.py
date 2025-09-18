@@ -1,16 +1,37 @@
 # /data/merge_dataset.py
 # === 수정된 data/merge_dataset.py 파일의 전체 코드 ===
 
-import pandas as pd
-import numpy as np
-import yaml
+import gc
 import re
+
+import numpy as np
+import pandas as pd
+from pandas.api import types as ptypes
+import yaml
 try:
     import data.ta_lib_feature_generator as talib_feat
 except Exception:
     # Lazy/optional import to allow using classification helpers without TA-Lib
     talib_feat = None
 from typing import List, Dict, Any, Tuple
+
+
+def optimize_dataframe_memory(df: pd.DataFrame, convert_bool: bool = True) -> pd.DataFrame:
+    """Downcast numeric dtypes (and optional bools) to reduce memory footprint."""
+    float_cols = df.select_dtypes(include=["float64", "float32"]).columns
+    for col in float_cols:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+
+    int_cols = df.select_dtypes(include=["int64", "int32", "int16", "int8", "uint64", "uint32", "uint16", "uint8"]).columns
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+
+    if convert_bool:
+        bool_cols = df.select_dtypes(include=["bool"]).columns
+        for col in bool_cols:
+            df[col] = df[col].astype(np.uint8)
+
+    return df
 
 # ==============================================================================
 #           [수정] 피처 분류 템플릿 제거
@@ -75,6 +96,7 @@ def generate_multi_timeframe_features(
     base_df = source_df.resample(resample_freq).agg(agg_rules)
     # Drop only if essential OHLCV are missing; allow estimated columns to be NaN
     base_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
+    base_df = optimize_dataframe_memory(base_df)
 
     # --- 2. 시간 단위별 피처 계산 및 통합 ---
     features_by_timeframe = {}
@@ -102,15 +124,15 @@ def generate_multi_timeframe_features(
             for params in params_list:
                 # 의존 피처가 필요한 함수(예: ATR -> ATR-MA)를 위해 누적 DataFrame을 전달
                 # 주의: feature_function은 df_work를 인플레이스 변경할 수 있음
+                original_df = df_work
                 df_with_feature, new_cols = feature_function(df_work, **params)
 
-                # 다음 함수가 방금 생성한 피처를 참조할 수 있도록 누적 반영
-                # df_with_feature가 df_work와 동일 객체일 수 있으므로, 별도의 rename로 인해
-                # df_work의 원본 컬럼명이 바뀌지 않도록 여기서는 "미리" 누적만 수행하고,
-                # rename은 별도의 복사본에서 처리한다.
-                if new_cols:
-                    for c in new_cols:
-                        df_work[c] = df_with_feature[c]
+                # in-place insert가 계속 누적되면 DataFrame이 조각날 수 있으므로,
+                # 동일 객체를 그대로 돌려받고 새 컬럼이 추가된 경우에는 사본으로 치환한다.
+                if new_cols and df_with_feature is original_df:
+                    df_work = df_with_feature.copy()
+                else:
+                    df_work = df_with_feature
 
                 # 새로 생성된 컬럼들만 별도 복사 후 타임프레임 접미사 부여
                 if new_cols:
@@ -124,9 +146,11 @@ def generate_multi_timeframe_features(
                 # 타임프레임별 피처 모음에 병합
                 if renamed_cols:
                     if timeframe not in features_by_timeframe:
-                        features_by_timeframe[timeframe] = renamed_df[renamed_cols]
+                        optimized_df = optimize_dataframe_memory(renamed_df[renamed_cols])
+                        features_by_timeframe[timeframe] = optimized_df
                     else:
-                        features_by_timeframe[timeframe] = features_by_timeframe[timeframe].join(renamed_df[renamed_cols])
+                        joined = features_by_timeframe[timeframe].join(renamed_df[renamed_cols])
+                        features_by_timeframe[timeframe] = optimize_dataframe_memory(joined)
 
                 all_new_columns.extend(renamed_cols)
                 print(f"  - {func_name} ({params}): {len(renamed_cols)}개 컬럼 생성 완료")
@@ -152,9 +176,13 @@ def generate_multi_timeframe_features(
             )
             print(f"'{timeframe}' 피처가 'merge_asof'로 통합되었습니다.")
 
+        final_df = optimize_dataframe_memory(final_df)
+        gc.collect()
+
     # At final stage, keep rows where essential OHLCV exist; allow feature gaps and est columns
     final_df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
     final_df.reset_index(inplace=True)
+    final_df = optimize_dataframe_memory(final_df, convert_bool=False)
 
     print("\n최종 피처 생성 및 통합이 완료되었습니다.")
     return final_df, sorted(list(set(all_new_columns)))
@@ -165,11 +193,15 @@ def generate_multi_timeframe_features(
 
 def _generate_model_config_from_features(
     all_generated_cols: List[str],
-    classification_config: Dict[str, Any]
+    classification_config: Dict[str, Any],
+    feature_frame: pd.DataFrame | None = None,
 ) -> Dict[str, Any]:
     """
     생성된 전체 피처 목록과 YAML에서 로드한 '분류 설정'을 받아
     모델 초기화에 필요한 설정 딕셔너리들을 생성합니다.
+
+    추가로 feature_frame을 전달하면 YAML에서 정의되지 않은 피처들에 대해
+    데이터 기반의 자동 분류(불리언/숫자형)와 범위 추정을 수행합니다.
 
     개선 사항:
     - 접두어 startswith 매칭을 경계 기반 정규식으로 대체: ^key(?:_|$)
@@ -197,6 +229,15 @@ def _generate_model_config_from_features(
     pat_cmp = make_patterns(feature_comparison_template)
     pat_num = make_patterns(list(feature_num_template.keys()))
 
+    fallback_quantiles = classification_config.get('fallback_quantiles', [0.5, 99.5])
+    if not isinstance(fallback_quantiles, (list, tuple)) or len(fallback_quantiles) != 2:
+        fallback_quantiles = [0.5, 99.5]
+    fallback_range = classification_config.get('fallback_feature_num_range', [-1.0, 1.0])
+    if not isinstance(fallback_range, (list, tuple)) or len(fallback_range) != 2:
+        fallback_range = [-1.0, 1.0]
+
+    bool_registry: set[str] = set()
+
     # Cross-category key overlap check (warn only)
     set_bool = set(feature_bool_template)
     set_cmp = set(feature_comparison_template)
@@ -214,6 +255,8 @@ def _generate_model_config_from_features(
     final_feature_bool: List[str] = []
     comparison_feature_list: List[str] = []
     unclassified_cols: List[str] = []
+    auto_classified_num: Dict[str, Tuple[float, float]] = {}
+    auto_classified_bool: List[str] = []
 
     def match_keys(name: str, patterns):
         base = strip_tf(name)
@@ -233,8 +276,9 @@ def _generate_model_config_from_features(
 
         # Priority: bool > cmp > num (backward compatible)
         if matches_bool:
-            # If multiple keys match, first is the longest due to sorting
-            final_feature_bool.append(col_name)
+            if col_name not in bool_registry:
+                final_feature_bool.append(col_name)
+                bool_registry.add(col_name)
             continue
         if matches_cmp:
             comparison_feature_list.append(col_name)
@@ -244,10 +288,54 @@ def _generate_model_config_from_features(
             final_feature_num[col_name] = feature_num_template[key]
             continue
 
-        # No match
+        # Attempt automatic classification for unmatched columns
+        handled = False
+        if feature_frame is not None and col_name in feature_frame.columns:
+            series = feature_frame[col_name]
+
+            def _looks_like_bool(s: pd.Series) -> bool:
+                if ptypes.is_bool_dtype(s):
+                    return True
+                finite = pd.to_numeric(s, errors='coerce')
+                finite = finite.replace([np.inf, -np.inf], np.nan).dropna()
+                if finite.empty:
+                    return False
+                unique_vals = set(finite.unique())
+                return unique_vals.issubset({0.0, 1.0})
+
+            if _looks_like_bool(series):
+                if col_name not in bool_registry:
+                    final_feature_bool.append(col_name)
+                    bool_registry.add(col_name)
+                    auto_classified_bool.append(col_name)
+                handled = True
+            else:
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                numeric_series = numeric_series.replace([np.inf, -np.inf], np.nan).dropna()
+                if not numeric_series.empty:
+                    low_q, high_q = sorted(fallback_quantiles)
+                    lower = float(np.nanpercentile(numeric_series, low_q))
+                    upper = float(np.nanpercentile(numeric_series, high_q))
+                    if lower == upper:
+                        margin = abs(lower) if lower != 0 else 1.0
+                        lower -= margin
+                        upper += margin
+                    final_feature_num[col_name] = (lower, upper)
+                    auto_classified_num[col_name] = (lower, upper)
+                else:
+                    final_feature_num[col_name] = (float(fallback_range[0]), float(fallback_range[1]))
+                    auto_classified_num[col_name] = (float(fallback_range[0]), float(fallback_range[1]))
+                handled = True
+
+        if handled:
+            continue
+
+        # No match after automated handling
         unclassified_cols.append(col_name)
 
     # 5. 최종 feature_comparison_map 생성 (모든 비교 피처 간 pairwise 비교)
+    comparison_feature_list = list(dict.fromkeys(comparison_feature_list))
+
     final_feature_comparison_map = {
         feat: [other for other in comparison_feature_list if other != feat]
         for feat in comparison_feature_list
@@ -256,6 +344,21 @@ def _generate_model_config_from_features(
     print(f"  - 숫자 비교(feature_num) 타입 피처: {len(final_feature_num)}개")
     print(f"  - 피처간 비교(feature_comparison) 타입 피처: {len(final_feature_comparison_map)}개")
     print(f"  - 불리언(feature_bool) 타입 피처: {len(final_feature_bool)}개")
+
+    if auto_classified_num:
+        sample_items = list(auto_classified_num.items())[:3]
+        print(
+            "  - 자동 분류된 숫자형 피처 {}개 (예시: {})".format(
+                len(auto_classified_num), sample_items
+            )
+        )
+
+    if auto_classified_bool:
+        print(
+            "  - 자동 분류된 불리언 피처 {}개 (예시: {})".format(
+                len(auto_classified_bool), auto_classified_bool[:5]
+            )
+        )
 
     if unclassified_cols:
         print(f"  - 경고: 분류되지 않은 피처 {len(unclassified_cols)}개 발견: {unclassified_cols}")
@@ -318,7 +421,11 @@ def run_feature_generation_from_yaml(
     )
     
     # 4. 생성된 피처 목록으로 모델 설정(config) 생성
-    model_config = _generate_model_config_from_features(added_cols, classification_config)
+    model_config = _generate_model_config_from_features(
+        added_cols,
+        classification_config,
+        feature_frame=final_dataframe,
+    )
 
     return final_dataframe, model_config
 
@@ -383,10 +490,20 @@ if __name__ == '__main__':
     # 실제 실행 시에는 main.py에서 experiment_config.yaml로부터 로드됩니다.
     mock_classification_config = {
         'feature_num': {
-            'close_change_pct': (-10, 10), 'body_size': (0, 100), 'upper_wick_size': (0, 100),
-            'lower_wick_size': (0, 100), 'total_range': (0, 200), 'body_to_range_ratio': (0, 1),
-            'RSI': (0, 100), '%K': (0, 100), '%D': (0, 100), 'Williams_R': (-100, 0),
-            'CCI': (-250, 250), 'MACD': (-100, 100), 'ADX': (0, 100), 'ATR': (0, 100)
+            'close_change_pct': (-10, 10),
+            'body_size': (0, 100),
+            'upper_wick_size': (0, 200),
+            'lower_wick_size': (0, 200),
+            'total_range': (0, 200),
+            'body_to_range_ratio': (0, 1),
+            'RSI': (0, 100),
+            '%K': (0, 100),
+            '%D': (0, 100),
+            'Williams_R': (-100, 0),
+            'CCI': (-250, 250),
+            'MACD': (-50, 50),
+            'ADX': (0, 100),
+            'ATR': (0, 200),
         },
         'feature_comparison': [
             'Open', 'High', 'Low', 'Close', 'SMA', 'EMA', 'BB_Upper', 'BB_Mid', 'BB_Lower',
