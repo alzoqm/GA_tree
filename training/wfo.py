@@ -6,7 +6,7 @@ import pandas as pd
 import logging
 from typing import List, Tuple, Optional, Dict, Any
 
-from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+from .multi_objective_fitness import MultiObjectiveFitnessEvaluator, OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX
 from analysis.stat_tests import window_level_dsr
 from utils.checkpoint_manager import CheckpointManager
 from .pruner import PopulationPruner
@@ -31,7 +31,11 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config
                 aggregated.append(1e9 if base_minimize[i] else -1e9)
                 continue
 
-            valid_values = obj_values[valid_mask]
+            valid_values = np.clip(
+                obj_values[valid_mask].astype(np.float64, copy=False),
+                OBJECTIVE_CLAMP_MIN,
+                OBJECTIVE_CLAMP_MAX,
+            )
 
             if method == 'mean':
                 result = np.mean(valid_values)
@@ -42,7 +46,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config
             elif method == 'max':
                 result = np.max(valid_values)
             elif method == 'std':
-                result = np.std(valid_values)
+                result = np.std(valid_values, dtype=np.float64)
             elif method.startswith('p'):
                 percentile = float(method[1:])
                 result = np.percentile(valid_values, percentile)

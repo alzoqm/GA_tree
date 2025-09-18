@@ -563,12 +563,13 @@ def _log_generation(
                     col = -col
                 m = (~np.isin(col, [-1e9, 1e9])) & np.isfinite(col)
                 if np.any(m):
-                    payload[f"gen/is/{name}/mean"] = float(np.mean(col[m]))
-                    payload[f"gen/is/{name}/std"] = float(np.std(col[m]))
-                    payload[f"gen/is/{name}/min"] = float(np.min(col[m]))
-                    payload[f"gen/is/{name}/max"] = float(np.max(col[m]))
-                    payload[f"gen/is/{name}/p05"] = float(np.percentile(col[m], 5))
-                    payload[f"gen/is/{name}/p95"] = float(np.percentile(col[m], 95))
+                    clipped = np.clip(col[m], -1e6, 1e6)
+                    payload[f"gen/is/{name}/mean"] = float(np.mean(clipped))
+                    payload[f"gen/is/{name}/std"] = float(np.std(clipped, dtype=np.float64))
+                    payload[f"gen/is/{name}/min"] = float(np.min(clipped))
+                    payload[f"gen/is/{name}/max"] = float(np.max(clipped))
+                    payload[f"gen/is/{name}/p05"] = float(np.percentile(clipped, 5))
+                    payload[f"gen/is/{name}/p95"] = float(np.percentile(clipped, 95))
                     payload[f"gen/is/{name}/valid_count"] = int(np.sum(m))
                     # Also log raw (non orientation-flipped) statistics so metrics like
                     # root_balance_penalty can be monitored directly in wandb.

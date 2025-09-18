@@ -8,6 +8,10 @@ from typing import List, Dict, Tuple, Optional, Union
 # from .trading_env import TradingEnvironment, fitness_fn
 
 
+# Guardrails for objective statistics – prevents runaway values from skewing normalization
+OBJECTIVE_CLAMP_MIN = -1e6
+OBJECTIVE_CLAMP_MAX = 1e6
+
 # --- Module-level CUDA crowding distance helper ---
 def _crowding_distance_cuda(front_obj: torch.Tensor) -> torch.Tensor:
     """
@@ -128,19 +132,23 @@ class MultiObjectiveFitnessEvaluator:
                 # No valid values - keep as is
                 continue
             
-            valid_values = obj_values[valid_mask]
+            obj_values_f64 = obj_values.astype(np.float64, copy=False)
+            valid_values = np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
             
             if self.normalization == 'minmax':
                 min_val, max_val = np.min(valid_values), np.max(valid_values)
                 if min_val != max_val:
-                    normalized[valid_mask, i] = (obj_values[valid_mask] - min_val) / (max_val - min_val)
+                    normalized_vals = (np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX) - min_val) / (max_val - min_val)
+                    normalized[valid_mask, i] = normalized_vals
                 else:
                     normalized[valid_mask, i] = 0.5
             
             elif self.normalization == 'zscore':
-                mean_val, std_val = np.mean(valid_values), np.std(valid_values)
+                mean_val = np.mean(valid_values)
+                std_val = np.std(valid_values, dtype=np.float64)
                 if std_val > 1e-8:
-                    normalized[valid_mask, i] = (obj_values[valid_mask] - mean_val) / std_val
+                    normalized_vals = (np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX) - mean_val) / std_val
+                    normalized[valid_mask, i] = normalized_vals
                 else:
                     normalized[valid_mask, i] = 0.0
             
@@ -148,7 +156,7 @@ class MultiObjectiveFitnessEvaluator:
             if valid_mask.any():
                 self.objective_stats[self.objective_names[i]] = {
                     'mean': np.mean(valid_values),
-                    'std': np.std(valid_values),
+                    'std': np.std(valid_values, dtype=np.float64),
                     'min': np.min(valid_values),
                     'max': np.max(valid_values)
                 }
@@ -511,12 +519,12 @@ class MultiObjectiveFitnessEvaluator:
             if np.any(valid_mask):
                 # Convert to natural display form: maximize metrics were negated upstream
                 if self.minimize_objectives[i]:
-                    valid_values = obj_values[valid_mask]
+                    valid_values = np.clip(obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
                 else:
-                    valid_values = -obj_values[valid_mask]
+                    valid_values = np.clip(-obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
                 summary['statistics'][obj_name] = {
                     'mean': float(np.mean(valid_values)),
-                    'std': float(np.std(valid_values)),
+                    'std': float(np.std(valid_values, dtype=np.float64)),
                     'min': float(np.min(valid_values)),
                     'max': float(np.max(valid_values)),
                     'median': float(np.median(valid_values)),
@@ -813,7 +821,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray,
                 aggregated.append(1e9 if base_minimize[i] else -1e9)
                 continue
                 
-            valid_values = obj_values[valid_mask]
+            valid_values = np.clip(obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
             
             if method == 'mean':
                 result = np.mean(valid_values)
@@ -824,7 +832,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray,
             elif method == 'max':
                 result = np.max(valid_values)
             elif method == 'std':
-                result = np.std(valid_values)
+                result = np.std(valid_values, dtype=np.float64)
             elif method.startswith('p'):
                 # Percentile (e.g., 'p95', 'p05')
                 percentile = float(method[1:])
