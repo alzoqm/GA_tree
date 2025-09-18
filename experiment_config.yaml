@@ -184,8 +184,9 @@ evaluation:
   
   # === WFO 미사용시 기본 목표 설정 (호환성) ===
   objectives:
-    objectives: ["mean_return", "max_drawdown", "psr", "win_rate"]
-    minimize: [false, true, false, false]
+    objectives: ["mean_return", "max_drawdown", "psr", "win_rate", "root_balance_penalty"]
+    minimize: [false, true, false, false, true]
+    # root_balance_penalty keeps the three root branches structurally balanced (lower is better)
     risk_free_rate: 0.0
     volatility_lookback: 30
     # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
@@ -200,8 +201,8 @@ evaluation:
     # Use PSR instead of raw Sharpe during evolution
     # objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
     # minimize: [false, true, false, true]
-    objectives: ["mean_return", "max_drawdown", "psr"]
-    minimize: [false, true, false]
+    objectives: ["mean_return", "max_drawdown", "psr", "root_balance_penalty"]
+    minimize: [false, true, false, true]
     normalization: "minmax"
     # PSR benchmark Sharpe (SR*) used in PSR computation
     psr_sr_benchmark: 0.5

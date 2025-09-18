@@ -10,10 +10,72 @@ from training.trading_env import TradingEnvironment
 from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 from models.model import GATreePop
 from models.constants import (
-    COL_NODE_TYPE, COL_DEPTH, NODE_TYPE_UNUSED,
+    COL_NODE_TYPE,
+    COL_PARENT_IDX,
+    COL_DEPTH,
+    COL_PARAM_1,
+    NODE_TYPE_UNUSED,
+    NODE_TYPE_ROOT_BRANCH,
+    ROOT_BRANCH_LONG,
+    ROOT_BRANCH_HOLD,
+    ROOT_BRANCH_SHORT,
 )
 
 torch.set_grad_enabled(False)
+
+
+def _compute_root_branch_balance_penalty(population: GATreePop) -> torch.Tensor:
+    """Return per-tree penalties (0~1) for imbalance across root branches."""
+
+    pt = population.population_tensor
+    if pt.numel() == 0:
+        return torch.zeros((0,), dtype=torch.float32, device=pt.device)
+
+    node_types = pt[:, :, COL_NODE_TYPE]
+    parent_idx = pt[:, :, COL_PARENT_IDX].to(torch.long)
+    depths = pt[:, :, COL_DEPTH].to(torch.long)
+
+    used_mask = node_types != float(NODE_TYPE_UNUSED)
+    non_root_mask = used_mask & (parent_idx >= 0)
+
+    B, N = parent_idx.shape
+    branch_ids = torch.full((B, N), -1, dtype=torch.long, device=pt.device)
+
+    root_mask = (node_types == float(NODE_TYPE_ROOT_BRANCH)) & (parent_idx == -1)
+    if root_mask.any():
+        branch_ids[root_mask] = pt[:, :, COL_PARAM_1].to(torch.long)[root_mask]
+
+    max_depth = int(depths.max().item()) if depths.numel() > 0 else 0
+    parent_idx_safe = torch.where(parent_idx >= 0, parent_idx, torch.zeros_like(parent_idx))
+
+    for depth_val in range(1, max_depth + 1):
+        depth_mask = used_mask & (depths == depth_val)
+        if not depth_mask.any():
+            continue
+        parent_branch = branch_ids.gather(1, parent_idx_safe.clamp_max(N - 1))
+        parent_branch = torch.where(parent_idx >= 0, parent_branch, torch.full_like(parent_branch, -1))
+        branch_ids[depth_mask] = parent_branch[depth_mask]
+
+    total_nodes = non_root_mask.sum(dim=1)
+    total_nodes_clamped = torch.clamp(total_nodes, min=1)
+    total_nodes_float = total_nodes_clamped.to(torch.float32)
+
+    counts = []
+    for branch_type in (ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT):
+        branch_mask = non_root_mask & (branch_ids == branch_type)
+        counts.append(branch_mask.sum(dim=1).to(torch.float32))
+    counts = torch.stack(counts, dim=1) if counts else torch.zeros((B, 0), dtype=torch.float32, device=pt.device)
+
+    ratios = torch.where(
+        total_nodes_float.unsqueeze(1) > 0,
+        counts / total_nodes_float.unsqueeze(1),
+        torch.zeros_like(counts),
+    )
+
+    dev = torch.abs(ratios - (1.0 / 3.0))
+    penalty = dev.sum(dim=1) / (4.0 / 3.0)
+    penalty = torch.where(total_nodes == 0, torch.ones_like(penalty), penalty)
+    return penalty.clamp_(0.0, 1.0).to(torch.float32)
 
 
 class FitnessSimulator:
@@ -57,7 +119,12 @@ class FitnessSimulator:
             'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio'
         }
         # Simulator-side complexity metrics
-        SUPPORTED_COMPLEXITY_OBJECTIVES = {'comp_size_norm', 'comp_depth_norm', 'complexity'}
+        SUPPORTED_COMPLEXITY_OBJECTIVES = {
+            'comp_size_norm',
+            'comp_depth_norm',
+            'complexity',
+            'root_balance_penalty',
+        }
 
         req_names = list(requested_cfg.get('objectives', []))
         req_minimize = list(requested_cfg.get('minimize', []))
@@ -118,7 +185,6 @@ class FitnessSimulator:
         features = torch.empty((F,), dtype=torch.float32, device=device)
 
         # LUT: env.pos_list (0: HOLD, 1: SHORT, 2: LONG) -> ROOT_BRANCH_*
-        from models.constants import ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG
         lut = torch.tensor([ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG], dtype=torch.int32, device=device)
 
         # Monotonic step id for kernel visited generation marking
@@ -183,6 +249,14 @@ class FitnessSimulator:
         B = population.pop_size
         if env_objectives is None:
             env_objectives = np.zeros((B, 0), dtype=np.float32)
+
+        need_size = 'comp_size_norm' in req_names or 'complexity' in req_names
+        need_depth = 'comp_depth_norm' in req_names or 'complexity' in req_names
+        need_root_balance = 'root_balance_penalty' in req_names
+        comp_cols: dict[str, np.ndarray] = {}
+        comp_size_np = None
+        comp_depth_np = None
+
         # Derive invalid mask from env outputs
         if env_objectives.size > 0:
             invalid_mask = np.any(
@@ -191,13 +265,13 @@ class FitnessSimulator:
         else:
             invalid_mask = np.zeros((B,), dtype=bool)
 
-        # Complexity components computation as needed
-        need_size = 'comp_size_norm' in req_names or 'complexity' in req_names
-        need_depth = 'comp_depth_norm' in req_names or 'complexity' in req_names
-        comp_cols: dict[str, np.ndarray] = {}
-        comp_size_np = None
-        comp_depth_np = None
+        if need_root_balance:
+            balance_penalty = _compute_root_branch_balance_penalty(population)
+            balance_penalty_np = balance_penalty.detach().to('cpu').numpy().astype(np.float32)
+            balance_penalty_np[invalid_mask] = 1e9
+            comp_cols['root_balance_penalty'] = balance_penalty_np
 
+        # Complexity components computation as needed
         if need_size or need_depth:
             pt = population.population_tensor
             used = (pt[:, :, COL_NODE_TYPE] != float(NODE_TYPE_UNUSED))
