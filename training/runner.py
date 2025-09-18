@@ -491,6 +491,14 @@ def _log_generation(
                     payload[f"gen/is/{name}/p05"] = float(np.percentile(col[m], 5))
                     payload[f"gen/is/{name}/p95"] = float(np.percentile(col[m], 95))
                     payload[f"gen/is/{name}/valid_count"] = int(np.sum(m))
+                    # Also log raw (non orientation-flipped) statistics so metrics like
+                    # root_balance_penalty can be monitored directly in wandb.
+                    raw_col = arr[:, j]
+                    raw_mask = (~np.isin(raw_col, [-1e9, 1e9])) & np.isfinite(raw_col)
+                    if np.any(raw_mask):
+                        payload[f"gen/is_raw/{name}/mean"] = float(np.mean(raw_col[raw_mask]))
+                        payload[f"gen/is_raw/{name}/min"] = float(np.min(raw_col[raw_mask]))
+                        payload[f"gen/is_raw/{name}/max"] = float(np.max(raw_col[raw_mask]))
                 else:
                     payload[f"gen/is/{name}/valid_count"] = 0
             wandb_logger.log(payload, step=int(gen_idx))
