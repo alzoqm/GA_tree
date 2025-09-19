@@ -235,6 +235,7 @@ def run_preprocessing():
     # --- 3. 생성된 최종 데이터 및 설정 저장 ---
     logging.info(f"Saving generated feature data (pickle) to '{final_features_pkl}'...")
     try:
+        final_df.dropna().reset_index(drop=True)
         final_df.to_pickle(final_features_pkl)
         logging.info("Feature data saved successfully (pickle).")
     except Exception as e:

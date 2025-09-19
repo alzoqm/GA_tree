@@ -21,7 +21,7 @@ resumption:
 
 # 1.1. Weights & Biases 설정
 wandb:
-  enabled: true          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
+  enabled: false          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
   project: "GA_tree"      # 프로젝트명
   entity: null            # 팀/엔티티 (없으면 null)
   group: "WFO"            # 그룹 태그
@@ -45,7 +45,7 @@ wandb:
 data:
   symbol: "BTCUSDT"
   interval: "5m"
-  days_to_fetch: 2555
+  days_to_fetch: 365
   train_ratio: 0.8 # 학습 데이터 비율
   # 생성된 데이터가 저장될 경로
   merged_csv_path: "BTCUSDT_5m_30d.csv"
@@ -55,8 +55,8 @@ data:
   # --------------------------------------------------------
   # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
   feature_engineering:
-    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
-    # target_timeframes: ['5m']
+    # target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    target_timeframes: ['5m']
     config_yaml_path: "data/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
