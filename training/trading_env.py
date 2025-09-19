@@ -1709,6 +1709,8 @@ class TradingEnvironment:
         max_drawdown = torch.tensor(base_metrics[:, 3], device=self.device)
         compound_value = torch.tensor(base_metrics[:, 4], device=self.device)
         trade_win_rates = torch.tensor(base_metrics[:, 5], device=self.device)
+        total_steps = max(1, len(self.returns_history))
+        turnover = self.trade_total_count.to(torch.float32) / float(total_steps)
         
         # Calculate additional advanced metrics if we have return history
         if len(self.returns_history) >= 2:
@@ -1743,6 +1745,7 @@ class TradingEnvironment:
             'profit_factor': profit_factors,
             'compound_value': compound_value,
             'trade_win_rate': trade_win_rates,
+            'turnover': turnover,
             'volatility': volatilities,
             'calmar_ratio': calmar_ratios,
             'sortino_ratio': sortino_ratios,

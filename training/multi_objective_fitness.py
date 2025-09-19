@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
+
+from fitness.cpcv_objectives import CPCVObjectiveAggregator
 # Note: Now using unified trading_env which includes all multi-objective functionality
 # from .trading_env import TradingEnvironment, fitness_fn
 
@@ -96,6 +98,32 @@ class MultiObjectiveFitnessEvaluator:
         Returns:
             objectives: [population_size, num_objectives] array of objective values
         """
+        mode = evaluation_config.get('mode') if isinstance(evaluation_config, dict) else None
+
+        if mode == 'cpcv':
+            scheduler = evaluation_config.get('cpcv_scheduler', None)
+            if scheduler is None:
+                raise ValueError("CPCV mode requires 'cpcv_scheduler' in evaluation_config")
+
+            is_objectives = evaluation_config.get('is_objectives', evaluation_config.get('objectives', {}))
+            oos_objectives = evaluation_config.get('oos_objectives', evaluation_config.get('objectives', {}))
+            aggregator = CPCVObjectiveAggregator(
+                scheduler=scheduler,
+                evaluation_config=evaluation_config,
+                cpcv_objectives={'names': self.objective_names, 'minimize': self.minimize_objectives},
+                is_objectives=is_objectives,
+                oos_objectives=oos_objectives,
+                device=device,
+                min_trades_per_split=int(evaluation_config.get('min_trades_per_split', 32)),
+            )
+            result = aggregator.evaluate(
+                population=population,
+                data=data,
+                all_feature_names=all_feature_names,
+            )
+            self.history.append({'mode': 'cpcv', 'summary': result.summary, 'combos': result.combo_ids})
+            return result.objectives
+
         # Use the simulator's wrapper to avoid legacy dependency on trading_env.fitness_fn
         from training.simulator import fitness_fn
         return fitness_fn(

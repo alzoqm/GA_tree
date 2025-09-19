@@ -262,6 +262,8 @@ class GenerationRunner:
                     exc,
                 )
 
+        eval_mode = str(self.evaluation_config.get('mode', '') if isinstance(self.evaluation_config, dict) else '').lower()
+
         for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
             print(f'Generation {gen_idx}:')
 
@@ -271,18 +273,33 @@ class GenerationRunner:
                 raise RuntimeError("Failed to build adjacency list on GPU.")
             del adj_offsets, adj_indices
 
-            # Compute objectives; when pruning is enabled, also gather node stats
-            comp_ret = self.compute_generation_objectives(
-                population=population,
-                data_1m=data_1m,
-                start_cnt=skip_data_cnt,
-                stop_cnt=valid_skip_data_cnt,
-            )
-            if isinstance(comp_ret, tuple) and len(comp_ret) == 2:
-                train_objectives, current_node_stats = comp_ret
-            else:
-                train_objectives = comp_ret  # type: ignore[assignment]
+            if eval_mode == 'cpcv':
+                # Evaluate across CPCV combinations via the multi-objective evaluator
+                train_objectives = evaluator.evaluate_population(
+                    population=population,
+                    data=data_1m,
+                    all_feature_names=population.all_features,
+                    adj_offsets=None,
+                    adj_indices=None,
+                    start_data_cnt=0,
+                    stop_data_cnt=len(data_1m),
+                    device=self.device,
+                    evaluation_config=self.evaluation_config,
+                )
                 current_node_stats = None
+            else:
+                # Compute objectives on the contiguous slice; gather node stats when enabled
+                comp_ret = self.compute_generation_objectives(
+                    population=population,
+                    data_1m=data_1m,
+                    start_cnt=skip_data_cnt,
+                    stop_cnt=valid_skip_data_cnt,
+                )
+                if isinstance(comp_ret, tuple) and len(comp_ret) == 2:
+                    train_objectives, current_node_stats = comp_ret
+                else:
+                    train_objectives = comp_ret  # type: ignore[assignment]
+                    current_node_stats = None
 
             train_objectives_tensor = torch.from_numpy(train_objectives).to(self.device)
 

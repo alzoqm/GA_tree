@@ -120,6 +120,24 @@ operators:
     add_subtree_mutation:
       node_count_range: [4, 10]
 
+# 5. 학습 전략 및 Walk-Forward Optimization 설정
+training_strategy:
+  mode: "wfo"              # "wfo" | "cpcv"
+  max_hold_period_bars: 1440  # CPCV purge/embargo fallback (기본: 5일@5m)
+
+# === CPCV (Combinatorial Purged Cross-Validation) 설정 ===
+cpcv:
+  folds: 10
+  test_folds: 2
+  shuffle_seed: 42
+  purge_bars: null          # null이면 training_strategy.max_hold_period_bars 사용
+  embargo_bars: null        # null이면 training_strategy.max_hold_period_bars 사용
+  min_trades_per_split: 32
+  max_combinations: null
+  parallel_chunks: 4
+  reuse_population: true
+  evaluation_cache_dir: "results/cpcv_cache"
+
 # 5. Walk-Forward Optimization 설정
 walk_forward:
   # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
@@ -238,7 +256,8 @@ evaluation:
       "omega_ratio",
       "information_ratio",
       "compound_value",
-      "trade_win_rate"
+      "trade_win_rate",
+      "turnover"
     ]
     minimize: [
       false,  # mean_return (maximize)
@@ -253,7 +272,8 @@ evaluation:
       false,  # omega_ratio (maximize)
       false,  # information_ratio (maximize)
       false,  # compound_value (maximize)
-      false   # trade_win_rate (maximize)
+      false,  # trade_win_rate (maximize)
+      true    # turnover (minimize)
     ]
     normalization: "minmax"
     risk_free_rate: 0.0
@@ -307,6 +327,66 @@ evaluation:
   fitness_function:
     # 최소 거래 수 등 유틸 파라미터 (일부 로직에서 활용)
     minimum_trades: 5
+
+# === CPCV 전용 다중 목적 지표 설정 ===
+fitness_objectives:
+  cpcv_objectives:
+    names: [
+      "median_oos_return",
+      "median_oos_sharpe",
+      "iqr_oos_sharpe",
+      "cvar95_oos_return",
+      "oos_turnover",
+      "tree_complexity",
+      "median_oos_psr",
+      "median_oos_profit_factor",
+      "iqr_oos_drawdown",
+      "is_mean_return",
+      "is_max_drawdown",
+      "is_psr",
+      "is_root_balance_penalty"
+    ]
+    minimize: [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+    normalization: "minmax"
+
+# Robustness Filter 설정 (CPCV post-selection)
+robustness_filter:
+  pbo:
+    enabled: true
+    min_splits: 12
+    cscv_k: 2
+    threshold: 0.2
+  dsr:
+    enabled: true
+    sr_benchmark: 0.0
+    min_value: 0.0
+  spa:
+    enabled: true
+    bootstrap_samples: 5000
+    studentized: true
+    alpha: 0.05
+  block_bootstrap:
+    enabled: true
+    method: "stationary"
+    block_length: 50
+    samples: 5000
+  mintrl:
+    enabled: true
+    confidence: 0.95
 
 # 7. 피처 분류 및 모델 입력 설정 (수정됨)
 # feature_classification:

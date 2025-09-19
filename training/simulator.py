@@ -94,7 +94,15 @@ class FitnessSimulator:
         device: str,
         evaluation_config: dict,
         return_returns: bool = False,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, dict] | tuple[np.ndarray, np.ndarray, dict]:
+        return_env_state: bool = False,
+    ) -> (
+        np.ndarray
+        | tuple[np.ndarray, np.ndarray]
+        | tuple[np.ndarray, dict]
+        | tuple[np.ndarray, np.ndarray, dict]
+        | tuple[np.ndarray, np.ndarray, dict, dict]
+        | tuple[np.ndarray, dict, dict]
+    ):
         env_config = evaluation_config['simulation_env']
 
         # Pull the requested objective set (could be IS/OOS config); may include
@@ -116,7 +124,7 @@ class FitnessSimulator:
         SUPPORTED_ENV_OBJECTIVES = {
             'mean_return', 'max_drawdown', 'sharpe_ratio', 'psr', 't_stat', 'win_rate',
             'profit_factor', 'compound_value', 'trade_win_rate', 'volatility',
-            'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio'
+            'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio', 'turnover'
         }
         # Simulator-side complexity metrics
         SUPPORTED_COMPLEXITY_OBJECTIVES = {
@@ -336,9 +344,17 @@ class FitnessSimulator:
         # Optionally return node-level CUDA attribution stats for pruning
         return_node_stats = bool(evaluation_config.get('return_node_stats', False)) if isinstance(evaluation_config, dict) else False
 
-        if return_returns and return_node_stats:
+        def _collect_returns() -> np.ndarray:
             try:
-                stats = {
+                if len(environment.returns_history) > 0:
+                    return torch.stack(environment.returns_history).cpu().numpy()
+            except Exception:
+                pass
+            return np.zeros((0, population.pop_size), dtype=np.float32)
+
+        def _collect_node_stats() -> dict:
+            try:
+                return {
                     'node_attempt_count': environment.node_attempt_count,
                     'node_apply_count': environment.node_apply_count,
                     'node_noop_count': environment.node_noop_count,
@@ -349,7 +365,7 @@ class FitnessSimulator:
                     'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
                 }
             except Exception:
-                stats = {
+                return {
                     'node_attempt_count': None,
                     'node_apply_count': None,
                     'node_noop_count': None,
@@ -359,51 +375,80 @@ class FitnessSimulator:
                     'node_exposure_sum': None,
                     'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
                 }
-            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
+
+        def _collect_env_state() -> dict:
+            def _to_numpy(t: torch.Tensor) -> np.ndarray:
+                return t.detach().to('cpu').numpy().astype(np.float32, copy=False)
+
+            state: dict[str, object] = {}
             try:
-                if len(environment.returns_history) > 0:
-                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
-                else:
-                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+                state.update(
+                    sum_returns=_to_numpy(environment.sum_returns),
+                    count_returns=_to_numpy(environment.count_returns),
+                    total_profit_agg=_to_numpy(environment.total_profit_agg),
+                    total_loss_agg=_to_numpy(environment.total_loss_agg),
+                    count_wins=_to_numpy(environment.count_wins),
+                    trade_total_count=_to_numpy(environment.trade_total_count),
+                    trade_win_count=_to_numpy(environment.trade_win_count),
+                )
             except Exception:
-                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            return objectives, ret_stack, stats
-        elif return_returns:
-            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
+                pass
+
             try:
-                if len(environment.returns_history) > 0:
-                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
-                else:
-                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
+                state['max_drawdown'] = _to_numpy(environment.max_drawdown)
             except Exception:
-                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            return objectives, ret_stack
-        elif return_node_stats:
+                pass
             try:
-                stats = {
-                    'node_attempt_count': environment.node_attempt_count,
-                    'node_apply_count': environment.node_apply_count,
-                    'node_noop_count': environment.node_noop_count,
-                    'node_stall_count': getattr(environment, 'node_stall_count', None),
-                    'node_win_count': environment.node_win_count,
-                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
-                    'node_exposure_sum': environment.node_exposure_sum,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
+                state['compound_value'] = _to_numpy(environment.compound_value)
             except Exception:
-                stats = {
-                    'node_attempt_count': None,
-                    'node_apply_count': None,
-                    'node_noop_count': None,
-                    'node_stall_count': None,
-                    'node_win_count': None,
-                    'node_realized_pnl_sum': None,
-                    'node_exposure_sum': None,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
-            return objectives, stats
-        else:
+                pass
+
+            # Meta configuration captured for downstream metric recomputation
+            try:
+                state['risk_free_rate'] = float(getattr(environment, 'risk_free_rate', 0.0))
+            except Exception:
+                state['risk_free_rate'] = 0.0
+            try:
+                state['lookback_period'] = int(getattr(environment, 'lookback_period', 252))
+            except Exception:
+                state['lookback_period'] = 252
+            try:
+                state['mar'] = float(getattr(environment, 'mar', 0.0))
+            except Exception:
+                state['mar'] = 0.0
+
+            # Benchmark returns (if provided)
+            bench_returns: list[np.ndarray] = []
+            try:
+                for tensor in getattr(environment, 'bench_returns_history', []) or []:
+                    bench_returns.append(tensor.detach().to('cpu').numpy().astype(np.float32, copy=False))
+            except Exception:
+                bench_returns = []
+            state['bench_returns'] = bench_returns
+
+            # Total steps processed this run (used for turnover)
+            try:
+                state['total_steps'] = int(max(0, len(environment.returns_history)))
+            except Exception:
+                state['total_steps'] = 0
+
+            return state
+
+        payload: list[object] = [objectives]
+        if return_returns:
+            payload.append(_collect_returns())
+        if return_node_stats:
+            payload.append(_collect_node_stats())
+        if return_env_state:
+            payload.append(_collect_env_state())
+
+        if len(payload) == 1:
             return objectives
+        if len(payload) == 2:
+            return payload[0], payload[1]
+        if len(payload) == 3:
+            return payload[0], payload[1], payload[2]
+        return payload[0], payload[1], payload[2], payload[3]
 
 
 def fitness_fn(
