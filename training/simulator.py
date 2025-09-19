@@ -10,10 +10,72 @@ from training.trading_env import TradingEnvironment
 from training.predictor import build_adjacency_list_cuda, predict_population_cuda
 from models.model import GATreePop
 from models.constants import (
-    COL_NODE_TYPE, COL_DEPTH, NODE_TYPE_UNUSED,
+    COL_NODE_TYPE,
+    COL_PARENT_IDX,
+    COL_DEPTH,
+    COL_PARAM_1,
+    NODE_TYPE_UNUSED,
+    NODE_TYPE_ROOT_BRANCH,
+    ROOT_BRANCH_LONG,
+    ROOT_BRANCH_HOLD,
+    ROOT_BRANCH_SHORT,
 )
 
 torch.set_grad_enabled(False)
+
+
+def _compute_root_branch_balance_penalty(population: GATreePop) -> torch.Tensor:
+    """Return per-tree penalties (0~1) for imbalance across root branches."""
+
+    pt = population.population_tensor
+    if pt.numel() == 0:
+        return torch.zeros((0,), dtype=torch.float32, device=pt.device)
+
+    node_types = pt[:, :, COL_NODE_TYPE]
+    parent_idx = pt[:, :, COL_PARENT_IDX].to(torch.long)
+    depths = pt[:, :, COL_DEPTH].to(torch.long)
+
+    used_mask = node_types != float(NODE_TYPE_UNUSED)
+    non_root_mask = used_mask & (parent_idx >= 0)
+
+    B, N = parent_idx.shape
+    branch_ids = torch.full((B, N), -1, dtype=torch.long, device=pt.device)
+
+    root_mask = (node_types == float(NODE_TYPE_ROOT_BRANCH)) & (parent_idx == -1)
+    if root_mask.any():
+        branch_ids[root_mask] = pt[:, :, COL_PARAM_1].to(torch.long)[root_mask]
+
+    max_depth = int(depths.max().item()) if depths.numel() > 0 else 0
+    parent_idx_safe = torch.where(parent_idx >= 0, parent_idx, torch.zeros_like(parent_idx))
+
+    for depth_val in range(1, max_depth + 1):
+        depth_mask = used_mask & (depths == depth_val)
+        if not depth_mask.any():
+            continue
+        parent_branch = branch_ids.gather(1, parent_idx_safe.clamp_max(N - 1))
+        parent_branch = torch.where(parent_idx >= 0, parent_branch, torch.full_like(parent_branch, -1))
+        branch_ids[depth_mask] = parent_branch[depth_mask]
+
+    total_nodes = non_root_mask.sum(dim=1)
+    total_nodes_clamped = torch.clamp(total_nodes, min=1)
+    total_nodes_float = total_nodes_clamped.to(torch.float32)
+
+    counts = []
+    for branch_type in (ROOT_BRANCH_LONG, ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT):
+        branch_mask = non_root_mask & (branch_ids == branch_type)
+        counts.append(branch_mask.sum(dim=1).to(torch.float32))
+    counts = torch.stack(counts, dim=1) if counts else torch.zeros((B, 0), dtype=torch.float32, device=pt.device)
+
+    ratios = torch.where(
+        total_nodes_float.unsqueeze(1) > 0,
+        counts / total_nodes_float.unsqueeze(1),
+        torch.zeros_like(counts),
+    )
+
+    dev = torch.abs(ratios - (1.0 / 3.0))
+    penalty = dev.sum(dim=1) / (4.0 / 3.0)
+    penalty = torch.where(total_nodes == 0, torch.ones_like(penalty), penalty)
+    return penalty.clamp_(0.0, 1.0).to(torch.float32)
 
 
 class FitnessSimulator:
@@ -32,7 +94,16 @@ class FitnessSimulator:
         device: str,
         evaluation_config: dict,
         return_returns: bool = False,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, dict] | tuple[np.ndarray, np.ndarray, dict]:
+        return_env_state: bool = False,
+        return_node_stats: bool = False,
+    ) -> (
+        np.ndarray
+        | tuple[np.ndarray, np.ndarray]
+        | tuple[np.ndarray, dict]
+        | tuple[np.ndarray, np.ndarray, dict]
+        | tuple[np.ndarray, np.ndarray, dict, dict]
+        | tuple[np.ndarray, dict, dict]
+    ):
         env_config = evaluation_config['simulation_env']
 
         # Pull the requested objective set (could be IS/OOS config); may include
@@ -54,10 +125,15 @@ class FitnessSimulator:
         SUPPORTED_ENV_OBJECTIVES = {
             'mean_return', 'max_drawdown', 'sharpe_ratio', 'psr', 't_stat', 'win_rate',
             'profit_factor', 'compound_value', 'trade_win_rate', 'volatility',
-            'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio'
+            'calmar_ratio', 'sortino_ratio', 'omega_ratio', 'information_ratio', 'turnover'
         }
         # Simulator-side complexity metrics
-        SUPPORTED_COMPLEXITY_OBJECTIVES = {'comp_size_norm', 'comp_depth_norm', 'complexity'}
+        SUPPORTED_COMPLEXITY_OBJECTIVES = {
+            'comp_size_norm',
+            'comp_depth_norm',
+            'complexity',
+            'root_balance_penalty',
+        }
 
         req_names = list(requested_cfg.get('objectives', []))
         req_minimize = list(requested_cfg.get('minimize', []))
@@ -118,7 +194,6 @@ class FitnessSimulator:
         features = torch.empty((F,), dtype=torch.float32, device=device)
 
         # LUT: env.pos_list (0: HOLD, 1: SHORT, 2: LONG) -> ROOT_BRANCH_*
-        from models.constants import ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG
         lut = torch.tensor([ROOT_BRANCH_HOLD, ROOT_BRANCH_SHORT, ROOT_BRANCH_LONG], dtype=torch.int32, device=device)
 
         # Monotonic step id for kernel visited generation marking
@@ -183,6 +258,14 @@ class FitnessSimulator:
         B = population.pop_size
         if env_objectives is None:
             env_objectives = np.zeros((B, 0), dtype=np.float32)
+
+        need_size = 'comp_size_norm' in req_names or 'complexity' in req_names
+        need_depth = 'comp_depth_norm' in req_names or 'complexity' in req_names
+        need_root_balance = 'root_balance_penalty' in req_names
+        comp_cols: dict[str, np.ndarray] = {}
+        comp_size_np = None
+        comp_depth_np = None
+
         # Derive invalid mask from env outputs
         if env_objectives.size > 0:
             invalid_mask = np.any(
@@ -191,13 +274,13 @@ class FitnessSimulator:
         else:
             invalid_mask = np.zeros((B,), dtype=bool)
 
-        # Complexity components computation as needed
-        need_size = 'comp_size_norm' in req_names or 'complexity' in req_names
-        need_depth = 'comp_depth_norm' in req_names or 'complexity' in req_names
-        comp_cols: dict[str, np.ndarray] = {}
-        comp_size_np = None
-        comp_depth_np = None
+        if need_root_balance:
+            balance_penalty = _compute_root_branch_balance_penalty(population)
+            balance_penalty_np = balance_penalty.detach().to('cpu').numpy().astype(np.float32)
+            balance_penalty_np[invalid_mask] = 1e9
+            comp_cols['root_balance_penalty'] = balance_penalty_np
 
+        # Complexity components computation as needed
         if need_size or need_depth:
             pt = population.population_tensor
             used = (pt[:, :, COL_NODE_TYPE] != float(NODE_TYPE_UNUSED))
@@ -260,76 +343,117 @@ class FitnessSimulator:
         objectives = np.stack(columns, axis=1) if columns else np.zeros((B, 0), dtype=np.float32)
 
         # Optionally return node-level CUDA attribution stats for pruning
-        return_node_stats = bool(evaluation_config.get('return_node_stats', False)) if isinstance(evaluation_config, dict) else False
-
-        if return_returns and return_node_stats:
-            try:
-                stats = {
-                    'node_attempt_count': environment.node_attempt_count,
-                    'node_apply_count': environment.node_apply_count,
-                    'node_noop_count': environment.node_noop_count,
-                    'node_stall_count': getattr(environment, 'node_stall_count', None),
-                    'node_win_count': environment.node_win_count,
-                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
-                    'node_exposure_sum': environment.node_exposure_sum,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
-            except Exception:
-                stats = {
-                    'node_attempt_count': None,
-                    'node_apply_count': None,
-                    'node_noop_count': None,
-                    'node_stall_count': None,
-                    'node_win_count': None,
-                    'node_realized_pnl_sum': None,
-                    'node_exposure_sum': None,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
-            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
-            try:
-                if len(environment.returns_history) > 0:
-                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
-                else:
-                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            except Exception:
-                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            return objectives, ret_stack, stats
-        elif return_returns:
-            # Stack step-level returns: list[Tensor[Timestep x B]] -> [T, B]
-            try:
-                if len(environment.returns_history) > 0:
-                    ret_stack = torch.stack(environment.returns_history).cpu().numpy()
-                else:
-                    ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            except Exception:
-                ret_stack = np.zeros((0, population.pop_size), dtype=np.float32)
-            return objectives, ret_stack
-        elif return_node_stats:
-            try:
-                stats = {
-                    'node_attempt_count': environment.node_attempt_count,
-                    'node_apply_count': environment.node_apply_count,
-                    'node_noop_count': environment.node_noop_count,
-                    'node_stall_count': getattr(environment, 'node_stall_count', None),
-                    'node_win_count': environment.node_win_count,
-                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
-                    'node_exposure_sum': environment.node_exposure_sum,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
-            except Exception:
-                stats = {
-                    'node_attempt_count': None,
-                    'node_apply_count': None,
-                    'node_noop_count': None,
-                    'node_stall_count': None,
-                    'node_win_count': None,
-                    'node_realized_pnl_sum': None,
-                    'node_exposure_sum': None,
-                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
-                }
-            return objectives, stats
+        if isinstance(evaluation_config, dict):
+            config_wants_node_stats = bool(evaluation_config.get('return_node_stats', False))
         else:
+            config_wants_node_stats = False
+        return_node_stats = bool(return_node_stats) or config_wants_node_stats
+
+        def _collect_returns() -> np.ndarray:
+            try:
+                if len(environment.returns_history) > 0:
+                    return torch.stack(environment.returns_history).cpu().numpy()
+            except Exception:
+                pass
+            return np.zeros((0, population.pop_size), dtype=np.float32)
+
+        def _collect_node_stats() -> dict:
+            try:
+                return {
+                    'node_attempt_count': environment.node_attempt_count,
+                    'node_apply_count': environment.node_apply_count,
+                    'node_noop_count': environment.node_noop_count,
+                    'node_stall_count': getattr(environment, 'node_stall_count', None),
+                    'node_win_count': environment.node_win_count,
+                    'node_realized_pnl_sum': environment.node_realized_pnl_sum,
+                    'node_exposure_sum': environment.node_exposure_sum,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+            except Exception:
+                return {
+                    'node_attempt_count': None,
+                    'node_apply_count': None,
+                    'node_noop_count': None,
+                    'node_stall_count': None,
+                    'node_win_count': None,
+                    'node_realized_pnl_sum': None,
+                    'node_exposure_sum': None,
+                    'total_steps': int(max(0, stop_data_cnt - start_data_cnt - 1)),
+                }
+
+        def _collect_env_state() -> dict:
+            def _to_numpy(t: torch.Tensor) -> np.ndarray:
+                return t.detach().to('cpu').numpy().astype(np.float32, copy=False)
+
+            state: dict[str, object] = {}
+            try:
+                state.update(
+                    sum_returns=_to_numpy(environment.sum_returns),
+                    count_returns=_to_numpy(environment.count_returns),
+                    total_profit_agg=_to_numpy(environment.total_profit_agg),
+                    total_loss_agg=_to_numpy(environment.total_loss_agg),
+                    count_wins=_to_numpy(environment.count_wins),
+                    trade_total_count=_to_numpy(environment.trade_total_count),
+                    trade_win_count=_to_numpy(environment.trade_win_count),
+                )
+            except Exception:
+                pass
+
+            try:
+                state['max_drawdown'] = _to_numpy(environment.max_drawdown)
+            except Exception:
+                pass
+            try:
+                state['compound_value'] = _to_numpy(environment.compound_value)
+            except Exception:
+                pass
+
+            # Meta configuration captured for downstream metric recomputation
+            try:
+                state['risk_free_rate'] = float(getattr(environment, 'risk_free_rate', 0.0))
+            except Exception:
+                state['risk_free_rate'] = 0.0
+            try:
+                state['lookback_period'] = int(getattr(environment, 'lookback_period', 252))
+            except Exception:
+                state['lookback_period'] = 252
+            try:
+                state['mar'] = float(getattr(environment, 'mar', 0.0))
+            except Exception:
+                state['mar'] = 0.0
+
+            # Benchmark returns (if provided)
+            bench_returns: list[np.ndarray] = []
+            try:
+                for tensor in getattr(environment, 'bench_returns_history', []) or []:
+                    bench_returns.append(tensor.detach().to('cpu').numpy().astype(np.float32, copy=False))
+            except Exception:
+                bench_returns = []
+            state['bench_returns'] = bench_returns
+
+            # Total steps processed this run (used for turnover)
+            try:
+                state['total_steps'] = int(max(0, len(environment.returns_history)))
+            except Exception:
+                state['total_steps'] = 0
+
+            return state
+
+        payload: list[object] = [objectives]
+        if return_returns:
+            payload.append(_collect_returns())
+        if return_node_stats:
+            payload.append(_collect_node_stats())
+        if return_env_state:
+            payload.append(_collect_env_state())
+
+        if len(payload) == 1:
             return objectives
+        if len(payload) == 2:
+            return payload[0], payload[1]
+        if len(payload) == 3:
+            return payload[0], payload[1], payload[2]
+        return payload[0], payload[1], payload[2], payload[3]
 
 
 def fitness_fn(

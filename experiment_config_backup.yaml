@@ -1,0 +1,724 @@
+# /experiment_config.yaml
+# ==================================
+# GA Trading Bot Experiment Config
+# ==================================
+# 이 파일은 전체 실험의 하이퍼파라미터와 설정을 중앙에서 관리합니다.
+
+# 1. 환경 및 경로 설정
+environment:
+  device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
+  seed: 42
+  output_dir: "results/exp_default" # 결과 파일이 저장될 디렉터리
+  data_dir: "/root/workspace/GA_tree/dataset"
+
+# 1.0. Training Resumption 설정
+resumption:
+  auto_resume: true              # 시작 시 자동으로 체크포인트 감지 및 재개
+  checkpoint_frequency: 1         # N 세대마다 체크포인트 저장 (1 = 매 세대)
+  cleanup_old_checkpoints: true   # 오래된 체크포인트 자동 정리
+  keep_last_n_generations: 5     # 보관할 최근 세대 수 (정리 시)
+  strict_validation: true         # 엄격한 설정 및 데이터 호환성 검증
+
+# 1.1. Weights & Biases 설정
+wandb:
+  enabled: false          # wandb 로깅 사용 여부 (테스트용으로 비활성화)
+  project: "GA_tree"      # 프로젝트명
+  entity: null            # 팀/엔티티 (없으면 null)
+  group: "WFO"            # 그룹 태그
+  job_type: "train"
+  tags: ["ga", "tree", "wfo"]
+  mode: "online"         # "online" | "offline" | "disabled"
+  dir: "results/exp_default"  # 기본 로그 디렉토리 (없으면 output_dir 사용)
+  log_tables_topk: 200    # 윈도우별 테이블 로우 제한
+  analysis_max_features: 10  # 분석 플롯 Top-M 피처
+  log_quantile_bins: 10   # 응답곡선 분할수
+  log_artifacts: true     # 산출물 업로드 여부
+  # === Generation-level logging options ===
+  gen_log: true           # 세대별 로깅 활성화
+  gen_log_interval: 1     # N 세대마다 로깅
+  gen_log_tables_topk: 0  # 세대별 테이블 로깅 비활성(0). 필요시 Top-K 지정
+  monitoring:
+    enabled: false        # 모니터링 전용 지표(PSR, t-stat 등) 세대 로깅 (옵션)
+    metrics: ["psr", "t_stat", "profit_per_trade", "avg_holding_period", "max_win_streak", "max_loss_streak"]
+
+# 2. 데이터 설정
+data:
+  symbol: "BTCUSDT"
+  interval: "5m"
+  days_to_fetch: 365
+  train_ratio: 0.8 # 학습 데이터 비율
+  # 생성된 데이터가 저장될 경로
+  merged_csv_path: "BTCUSDT_5m_30d.csv"
+  # --- 최종 전처리 완료된 데이터 및 모델 설정 경로 ---
+  final_features_path: "final_test_features.csv"
+  model_config_path: "model_test_config.yaml"
+  # --------------------------------------------------------
+  # 피처 생성에 사용할 타임프레임 및 설정 파일 경로
+  feature_engineering:
+    # target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    target_timeframes: ['5m']
+    config_yaml_path: "data/feature_config.yaml"
+
+# 3. GA 핵심 파라미터
+ga_core:
+  population:
+    size: 1000            # population size
+    max_nodes: 128         # maximum number of nodes per individual
+    max_depth: 7           # maximum tree depth
+    max_children: 10       # maximum number of children per node
+  evolution_loop:
+    # generations: 3           # 더 많은 세대로 테스트
+    generations: 20           # 더 많은 세대로 테스트
+    parent_pool_size: 600     # 교배 풀(Mating Pool) 크기
+    elite_size: 30           # 다음 세대로 보존될 엘리트 개체 수
+    best_chromosome_pool_size: 50 # 최종까지 보관할 누적 베스트 개체 수
+    warming_steps: 0         # 엘리트 누적 시작 전 초기 세대 수
+    # --- Early stopping configuration ---
+    early_stopping:
+      enabled: false          # true로 설정 시 세대 루프가 조기 종료됩니다.
+      metric: "mean_return"   # generation_summary 통계에서 모니터링할 지표 이름
+      stat: "mean"            # 사용할 통계 (mean, median, max, min 등)
+      minimize: null          # null이면 summary의 minimize 플래그를 따름
+      patience: 5             # 개선이 없을 때 허용할 최대 세대 수
+      min_delta: 0.0          # 개선으로 간주할 최소 변화량
+      warmup_generations: 0   # 모니터링을 시작하기 전 건너뛸 세대 수
+
+# 4. GA 연산자 상세 설정
+operators:
+  selection:
+    type: "PPTSSelection" # 다중 목표 PPTS 선택자 (유일한 옵션)
+    tournament_k_size: 5
+    chunk_size: 8192
+
+  crossover:
+    # ChainCrossover에 전달될 가중치 (Subtree, Node, RootBranch 순서)
+    weights: [0.4, 0.4, 0.2]
+    # weights: [0.6, 0.4]
+    # 각 교차 연산자별 세부 설정
+    subtree_crossover:
+      mode: 'context' # 'free' 또는 'context'
+    node_crossover:
+      mode: 'context' # 'free' 또는 'context'
+
+  mutation:
+    # ChainMutation에 전달될 각 변이의 확률
+    probabilities:
+      add_node: 0.2
+      delete_node: 0.2
+      add_subtree: 0.1
+      delete_subtree: 0.1
+      reinitialize_node: 0.1
+      node_param: 0.3
+    # 개별 변이 연산자의 세부 파라미터
+    node_param_mutation:
+      noise_ratio: 0.1
+      leverage_change: 5
+    add_node_mutation:
+      max_add_nodes: 12
+    delete_node_mutation:
+      max_delete_nodes: 5
+    add_subtree_mutation:
+      node_count_range: [4, 10]
+
+# 5. 학습 전략 및 Walk-Forward Optimization 설정
+training_strategy:
+  mode: "cpcv"              # "wfo" | "cpcv"
+  max_hold_period_bars: 1440  # CPCV purge/embargo fallback (기본: 5일@5m)
+
+# === CPCV (Combinatorial Purged Cross-Validation) 설정 ===
+cpcv:
+  folds: 10
+  test_folds: 2
+  shuffle_seed: 42
+  purge_bars: null          # null이면 training_strategy.max_hold_period_bars 사용
+  embargo_bars: null        # null이면 training_strategy.max_hold_period_bars 사용
+  min_trades_per_split: 16
+  max_combinations: null
+  parallel_chunks: 4
+  reuse_population: true
+  evaluation_cache_dir: "results/cpcv_cache"
+
+# 5. Walk-Forward Optimization 설정
+walk_forward:
+  # WFO 활성화 여부 (false시 기존 단일 분할 방식 사용)
+  enabled: true
+  # 윈도우 크기 설정 (테스트용으로 작게 조정)
+  train_bars: 1000           # (구) 테스트용 임시 값
+  oos_bars: 250              # (구) 테스트용 임시 값
+  step_bars: 125             # (구) 테스트용 임시 값
+  # === 실제 학습용 윈도우 크기 ===
+  # 기준: 총 데이터 길이 563,594 (5m 바), 1일=288바
+  # - 인샘플(학습): 2년 ≈ 210,240 바 (2*365*288)
+  # - 아웃샘플(OOS): 3개월 ≈ 25,920 바 (90*288)
+  # - 스텝: 3개월(분기) 롤링 = 25,920 바
+  # train_bars: 210240        # 실제 학습 단위 (2년)
+  # oos_bars: 103680           # 실제 검증 단위 (1년)
+  # step_bars: 103680          # 1년 단위 롤링
+  # 윈도우 생성 방식
+  scheme: "sliding"         # "sliding" (고정 크기) 또는 "expanding" (확장)
+  # 데이터 품질 및 누수 방지
+  # warmup_bars: 50           # (구) 테스트용 임시 값
+  warmup_bars: 8640         # 실제 워밍업 (1개월, 30*288)
+  embargo_bars: 0           # IS 끝과 OOS 시작 사이의 누수 방지 갭 (선택적)
+  # 윈도우별 품질 제어
+  min_trades_per_window: 48 # 윈도우별 최소 거래 수 (유효성 검증)
+  # 집단 관리 설정
+  # reset_population_each_window: false  # 각 윈도우에서 집단 재설정 여부 (false시 엘리트 계승)
+  reset_population_each_window: true  # 각 윈도우에서 집단 재설정 여부 (false시 엘리트 계승)
+  adjacency_cache: false    # 인접성 캐시 사용 여부 (기본적으로 윈도우마다 재구축)
+
+# 6. 평가 및 시뮬레이션 설정
+evaluation:
+  simulation_env:
+    taker_fee_rate: 0.0004
+    maintenance_margin_rate: 0.005
+    # === Slippage Configuration ===
+    slippage:
+      mode: 'relative_volatility'  # 'fixed' or 'relative_volatility'
+      # Fixed mode parameters (backward compatibility)
+      fixed_rate: 0.0005
+      # Relative volatility mode parameters
+      base_rate: 0.0001           # Minimum slippage in calm markets (0.01%)
+      atr_ma_window: 50           # Lookback period for ATR moving average (match config MA)
+      min_slippage: 0.00005       # Floor cap (0.005%)
+      max_slippage: 0.002         # Ceiling cap (0.2%)
+      # ATR column configuration (optional - auto-detect if not specified)
+      atr_column: ATR_7_5m            # e.g., 'ATR_7_5m' or 'ATR_14' - auto-detect if null
+      atr_ma_column: ATR_7_MA_14_5m         # e.g., 'ATR_7_MA_50_5m' - auto-detect if null  
+      # Auto-detection patterns (used when columns are null)
+      atr_pattern: 'ATR_[0-9]+.*'   # Regex pattern to match ATR columns
+      atr_ma_pattern: 'ATR_[0-9]+.*_MA_[0-9]+' # Regex pattern to match ATR-MA columns
+    # Leverage bounds
+    max_leverage: 100
+    # Mark price / equity options
+    use_real_mark_price: false
+    equity_mtm_basis: "mark_proxy"  # "mark_price" | "mark_proxy"
+    # Liquidation clearance fee (insurance): approx 0.3%~0.5% depending on tier
+    liq_clearance_fee_rate: 0.003
+    # Minimums for entries and leverage
+    min_entry_ratio: 0.05
+    max_entry_ratio: 0.5
+    min_leverage: 2
+    min_additional_enter_ratio: 0.05
+    max_additional_entries: 5
+    # --- Action de-duplication (robust) ---
+    enable_action_dedup: true            # 동일 예측 반복 시 스킵 활성화
+    dedup_exclude_types: [4, 5]          # CLOSE_PARTIAL(4), ADD_POSITION(5)는 반복 허용
+    dedup_compare_cols: 3                # 비교할 파라미터 컬럼 수 (type + 2 params)
+    dedup_atol: 1.0e-6                   # 절대 허용 오차
+    dedup_rtol: 1.0e-4                   # 상대 허용 오차
+    dedup_require_applied: true          # 직전 스텝에서 실제 적용된 경우에만 스킵
+  
+  # === WFO 미사용시 기본 목표 설정 (호환성) ===
+  objectives:
+    objectives: ["mean_return", "max_drawdown", "psr", "win_rate", "root_balance_penalty"]
+    minimize: [false, true, false, false, true]
+    # root_balance_penalty keeps the three root branches structurally balanced (lower is better)
+    risk_free_rate: 0.0
+    volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) for PSR calculation (optional tuning)
+    psr_sr_benchmark: 0.5
+    # Advanced metrics params (optional)
+    mar: 0.0                   # Minimum Acceptable Return for Omega Ratio
+    benchmark_mode: "close_to_next_open"  # Benchmark for Information Ratio
+    
+  # === WFO 사용시 목표 설정 ===
+  # 인샘플 목표 (윈도우 내 진화 압력용 - 빠른 평가)
+  is_objectives:
+    # Use PSR instead of raw Sharpe during evolution
+    # objectives: ["mean_return", "max_drawdown", "psr", "complexity"]
+    # minimize: [false, true, false, true]
+    objectives: ["mean_return", "max_drawdown", "psr", "root_balance_penalty"]
+    minimize: [false, true, false, true]
+    normalization: "minmax"
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.5
+    
+  # Simulator-side complexity composition
+  complexity:
+    mode: "weighted"     # "weighted" | "max" | "geomean"
+    size_weight: 0.5     # used when mode == weighted
+    depth_weight: 0.5    # used when mode == weighted
+    
+  # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
+  oos_objectives:
+    # 자세한 검증을 위해 OOS는 확장된 지표 세트를 사용
+    objectives: [
+      "mean_return",
+      "max_drawdown",
+      "sharpe_ratio",
+      "psr",
+      "win_rate",
+      "profit_factor",
+      "calmar_ratio",
+      "sortino_ratio",
+      "volatility",
+      "omega_ratio",
+      "information_ratio",
+      "compound_value",
+      "trade_win_rate",
+      "turnover"
+    ]
+    minimize: [
+      false,  # mean_return (maximize)
+      true,   # max_drawdown (minimize)
+      false,  # sharpe_ratio (maximize)
+      false,  # psr (maximize)
+      false,  # win_rate (maximize)
+      false,  # profit_factor (maximize)
+      false,  # calmar_ratio (maximize)
+      false,  # sortino_ratio (maximize)
+      true,   # volatility (minimize)
+      false,  # omega_ratio (maximize)
+      false,  # information_ratio (maximize)
+      false,  # compound_value (maximize)
+      false,  # trade_win_rate (maximize)
+      true    # turnover (minimize)
+    ]
+    normalization: "minmax"
+    risk_free_rate: 0.0
+    volatility_lookback: 30
+    # PSR benchmark Sharpe (SR*) used in PSR computation
+    psr_sr_benchmark: 0.5
+    # Advanced metrics params (optional)
+    mar: 0.0
+    benchmark_mode: "close_to_next_open"
+    
+  # 집계된 OOS 목표 (최종 모델 선택용)
+  oos_aggregate:
+    # 확장된 OOS 지표 순서에 맞춰 안전하게 집계 (표준편차 제거로 라벨 불일치 방지)
+    objectives: ["oos_mean_return", "oos_max_drawdown", "oos_psr", "oos_consistency"]
+    minimize: [false, true, false, false]
+    methods: ["mean", "max", "mean", "hit_rate"]
+    # Include Deflated Sharpe Ratio (DSR) in final selection
+    include_dsr: true
+    dsr_method: "mean"          # mean | median | min | max | pXX
+    dsr_minimize: false          # DSR is a maximize metric
+    dsr_sr_benchmark: 0.5        # Optional SR* for DSR
+    # 일관성(hit_rate) 임계값
+    thresholds:
+      min_return: 0.0       # 최소 수익률 임계값
+      max_dd: 0.3           # 최대 드로다운 임계값
+    # 선택적 가중치 및 정규화
+    weights: null           # null시 파레토 프론트 사용
+    normalization: "minmax"
+
+  # === CUDA Pruning Configuration ===
+  pruning:
+    enabled: true
+    # usage thresholds
+    k_min: 1
+    tau_use: 0.0
+    tau_ineff: 1.1
+    # performance thresholds
+    k_perf_min: 9999999
+    tau_wr: 0.0
+    # harmful thresholds
+    k_harm: 9999999
+    delta_harm: 0.001
+    # per-branch minimum actions to keep
+    m_min: 1
+    # score weights
+    w_use: 0.2
+    w_ineff: 0.2
+    w_pnl: 0.5
+    w_wr: 0.1
+    
+  fitness_function:
+    # 최소 거래 수 등 유틸 파라미터 (일부 로직에서 활용)
+    minimum_trades: 5
+
+# === CPCV 전용 다중 목적 지표 설정 ===
+fitness_objectives:
+  cpcv_objectives:
+    names: [
+      "median_oos_return",
+      "median_oos_sharpe",
+      "iqr_oos_sharpe",
+      "cvar95_oos_return",
+      "oos_turnover",
+      "tree_complexity",
+      "median_oos_psr",
+      "median_oos_profit_factor",
+      "iqr_oos_drawdown",
+      "is_mean_return",
+      "is_max_drawdown",
+      "is_psr",
+      "is_root_balance_penalty"
+    ]
+    minimize: [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+    normalization: "minmax"
+
+# Robustness Filter 설정 (CPCV post-selection)
+robustness_filter:
+  pbo:
+    enabled: true
+    min_splits: 12
+    cscv_k: 2
+    threshold: 0.2
+  dsr:
+    enabled: true
+    sr_benchmark: 0.0
+    min_value: 0.0
+  spa:
+    enabled: true
+    bootstrap_samples: 5000
+    studentized: true
+    alpha: 0.05
+  block_bootstrap:
+    enabled: true
+    method: "stationary"
+    block_length: 50
+    samples: 5000
+  mintrl:
+    enabled: true
+    confidence: 0.95
+
+# 7. 피처 분류 및 모델 입력 설정 (수정됨)
+# feature_classification:
+#   # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
+#   # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
+#   feature_num:
+#     # Price action (reduced)
+#     close_change_pct: [-10, 10]
+#     body_to_range_ratio: [0, 1]
+#     # Momentum (canonical)
+#     RSI: [0, 100]
+#     ROC: [-50, 50]
+#     # Trend (canonical)
+#     MACD_Hist: [-50, 50]
+#     ADX: [0, 100]
+#     # Volatility (canonical)
+#     NATR: [0, 5]
+#     BB_Width: [0, 1]
+#     # Volume/flow (canonical)
+#     CMF: [-1, 1]
+#     # Hilbert (single numeric)
+#     HT_DCPERIOD: [0, 100]
+#     # Composite (single representative)
+#     RSI_ADX_Ratio: [-10, 10]
+
+#   # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
+#   # 여기에 포함된 피처들은 서로 비교 대상이 됨
+#   feature_comparison:
+#     - Close
+#     - High
+#     - Low
+#     - SMA
+#     - EMA
+#     - BB_Mid
+#     - Ichimoku_Kijun
+#     - SAR
+#     - Pivot_Point
+#     - Support1_Pivot
+#     - Resistance1_Pivot
+
+#   # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
+#   feature_bool:
+#     - InvertedHammers
+#     - Hammers
+#     - Dojis
+#     - MorningStars
+#     - ShootingStars
+#     - '3BlackCrows'
+#     - '3WhiteSoldiers'
+#     - BullishEngulfing
+#     - BearishEngulfing
+#     - HT_TRENDMODE
+#     # Composite / volume-context confirmations
+#     - Volume_Spike
+#     - Consecutive_Bullish
+#     - Consecutive_Bearish
+#     - Bullish_Confirmation
+#     - Bearish_Confirmation
+
+# 7. 피처 분류 및 모델 입력 설정 (수정됨)
+feature_classification:
+  # 6-1. 피처 vs 숫자 비교 (Feature vs Number)에 사용할 피처 목록
+  # key: 피처 이름의 접두사, value: [최소값, 최대값] 범위
+  feature_num:
+    close_change_pct: [-10, 10]
+    body_size: [0, 100]
+    upper_wick_size: [0, 200]  # % of close
+    lower_wick_size: [0, 200]  # % of close
+    total_range: [0, 200]      # % of close
+    body_to_range_ratio: [0, 1]
+    RSI: [0, 100]
+    '%K': [0, 100]
+    '%D': [0, 100]
+    Williams_R: [-100, 0]
+    CCI: [-250, 250]
+    STOCHRSI_K: [0, 100]
+    STOCHRSI_D: [0, 100]
+    PPO: [-50, 50]
+    ROC: [-50, 50]
+    ULTOSC: [0, 100]
+    MOM: [-100, 100]
+    MACD: [-50, 50]
+    MACD_Signal: [-50, 50]
+    MACD_Hist: [-20, 20]
+    ADX: [0, 100]
+    DI_plus: [0, 100]
+    DI_minus: [0, 100]
+    BB_Width: [0, 1]
+    ATR: [0, 200]       # % of close
+    NATR: [0, 5]
+    OBV: [-50, 50]
+    CMF: [-1, 1]
+    ADOSC: [-50, 50]
+    # AD는 제거 (요청 반영)
+    HT_DCPERIOD: [0, 100]
+    HT_SINE: [-1, 1]
+    HT_LEADSINE: [-1, 1]
+    # --- [추가] 새로운 복합 숫자형 피처 분류 규칙 ---
+    RSI_ADX_Ratio: [-10, 10]
+    MACD_ATR_Ratio: [-50, 50]
+    RSI_Ratio: [0, 5]
+    BB_Width_Ratio: [0, 5]
+    Ichimoku_Chikou_Ratio: [0, 5]
+    BB_Geom_AreaNorm: [0, 50]
+    BB_Geom_UpperSlopeDeg: [-90, 90]
+    BB_Geom_LowerSlopeDeg: [-90, 90]
+    BB_Geom_MidSlopeDeg: [-90, 90]
+    BB_Geom_SlopeDiffDeg: [-180, 180]
+    BB_Geom_WidthVol: [0, 5]
+    BB_Geom_WidthVelocity: [-10, 10]
+    BB_Geom_ClosePos: [0, 1]
+    BB_Geom_UpperTouchRate: [0, 1]
+    BB_Geom_LowerTouchRate: [0, 1]
+    Ichimoku_Geom_CloudAreaNorm: [0, 50]
+    Ichimoku_Geom_SenkouA_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_SenkouB_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_Senkou_SlopeDiffDeg: [-180, 180]
+    Ichimoku_Geom_CloudThicknessVol: [0, 5]
+    Ichimoku_Geom_CloudVelocity: [-10, 10]
+    Ichimoku_Geom_ClosePos: [-3, 3]
+    Ichimoku_Geom_Tenkan_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_Kijun_SlopeDeg: [-90, 90]
+    Ichimoku_Geom_TenkanAboveRate: [0, 1]
+    Ichimoku_Geom_Chikou_SlopeDeg: [-90, 90]
+    RSI_ROC: [-100, 100]
+    ATR_ROC: [-100, 100]
+    MACD_Hist_ROC: [-100, 100]
+    CCI_ROC: [-100, 100]
+    Volume_Log: [0, 25]
+    Volume_ChangePct: [-100, 400]
+    Volume_PerTrade: [0, 1000000]
+    QuoteVolume_PerTrade: [0, 1000000]
+    Volume_QuoteRatio: [0, 100]
+    TakerBuyBase_Ratio: [0, 1]
+    TakerBuyBase_Imbalance: [-1, 1]
+    TakerBuyQuote_Ratio: [0, 1]
+    TakerBuyQuote_Imbalance: [-1, 1]
+    Volume_14_ToMean: [0, 6]
+    Volume_14_ToMedian: [0, 6]
+    Volume_14_Z: [-3, 6]
+    Volume_14_SlopeDeg: [-90, 90]
+    Volume_14_PctRank: [0, 1]
+    Volume_14_ToEma: [0, 6]
+    Volume_14_StdRatio: [0, 2]
+    Volume_30_ToMean: [0, 6]
+    Volume_30_ToMedian: [0, 6]
+    Volume_30_Z: [-3, 5]
+    Volume_30_SlopeDeg: [-90, 90]
+    Volume_30_PctRank: [0, 1]
+    Volume_30_ToEma: [0, 5]
+    Volume_30_StdRatio: [0, 2]
+    Volume_60_ToMean: [0, 6]
+    Volume_60_ToMedian: [0, 6]
+    Volume_60_Z: [-3, 5]
+    Volume_60_SlopeDeg: [-90, 90]
+    Volume_60_PctRank: [0, 1]
+    Volume_60_ToEma: [0, 5]
+    Volume_60_StdRatio: [0, 2]
+    Volume_120_ToMean: [0, 6]
+    Volume_120_ToMedian: [0, 6]
+    Volume_120_Z: [-3, 5]
+    Volume_120_SlopeDeg: [-90, 90]
+    Volume_120_PctRank: [0, 1]
+    Volume_120_ToEma: [0, 5]
+    Volume_120_StdRatio: [0, 2]
+    VolumeGeom_14_SlopeDeg: [-90, 90]
+    VolumeGeom_14_Area: [0, 5]
+    VolumeGeom_14_Runup: [0, 3]
+    VolumeGeom_14_Drawdown: [0, 3]
+    VolumeGeom_14_Symmetry: [0, 2]
+    VolumeGeom_30_SlopeDeg: [-90, 90]
+    VolumeGeom_30_Area: [0, 5]
+    VolumeGeom_30_Runup: [0, 3]
+    VolumeGeom_30_Drawdown: [0, 3]
+    VolumeGeom_30_Symmetry: [0, 2]
+    VolumeGeom_60_SlopeDeg: [-90, 90]
+    VolumeGeom_60_Area: [0, 5]
+    VolumeGeom_60_Runup: [0, 3]
+    VolumeGeom_60_Drawdown: [0, 3]
+    VolumeGeom_60_Symmetry: [0, 2]
+    VolumeGeom_120_SlopeDeg: [-90, 90]
+    VolumeGeom_120_Area: [0, 5]
+    VolumeGeom_120_Runup: [0, 3]
+    VolumeGeom_120_Drawdown: [0, 3]
+    VolumeGeom_120_Symmetry: [0, 2]
+    # Close geometry summaries (price trajectory)
+    CloseGeom_7_SlopeDeg: [-90, 90]
+    CloseGeom_7_Area: [0, 5]
+    CloseGeom_7_Runup: [0, 3]
+    CloseGeom_7_Drawdown: [0, 3]
+    CloseGeom_7_Symmetry: [0, 2]
+    CloseGeom_10_SlopeDeg: [-90, 90]
+    CloseGeom_10_Area: [0, 5]
+    CloseGeom_10_Runup: [0, 3]
+    CloseGeom_10_Drawdown: [0, 3]
+    CloseGeom_10_Symmetry: [0, 2]
+    CloseGeom_12_SlopeDeg: [-90, 90]
+    CloseGeom_12_Area: [0, 5]
+    CloseGeom_12_Runup: [0, 3]
+    CloseGeom_12_Drawdown: [0, 3]
+    CloseGeom_12_Symmetry: [0, 2]
+    CloseGeom_14_SlopeDeg: [-90, 90]
+    CloseGeom_14_Area: [0, 5]
+    CloseGeom_14_Runup: [0, 3]
+    CloseGeom_14_Drawdown: [0, 3]
+    CloseGeom_14_Symmetry: [0, 2]
+    CloseGeom_20_SlopeDeg: [-90, 90]
+    CloseGeom_20_Area: [0, 5]
+    CloseGeom_20_Runup: [0, 3]
+    CloseGeom_20_Drawdown: [0, 3]
+    CloseGeom_20_Symmetry: [0, 2]
+    CloseGeom_24_SlopeDeg: [-90, 90]
+    CloseGeom_24_Area: [0, 5]
+    CloseGeom_24_Runup: [0, 3]
+    CloseGeom_24_Drawdown: [0, 3]
+    CloseGeom_24_Symmetry: [0, 2]
+    CloseGeom_30_SlopeDeg: [-90, 90]
+    CloseGeom_30_Area: [0, 5]
+    CloseGeom_30_Runup: [0, 3]
+    CloseGeom_30_Drawdown: [0, 3]
+    CloseGeom_30_Symmetry: [0, 2]
+    CloseGeom_40_SlopeDeg: [-90, 90]
+    CloseGeom_40_Area: [0, 5]
+    CloseGeom_40_Runup: [0, 3]
+    CloseGeom_40_Drawdown: [0, 3]
+    CloseGeom_40_Symmetry: [0, 2]
+    CloseGeom_42_SlopeDeg: [-90, 90]
+    CloseGeom_42_Area: [0, 5]
+    CloseGeom_42_Runup: [0, 3]
+    CloseGeom_42_Drawdown: [0, 3]
+    CloseGeom_42_Symmetry: [0, 2]
+    CloseGeom_48_SlopeDeg: [-90, 90]
+    CloseGeom_48_Area: [0, 5]
+    CloseGeom_48_Runup: [0, 3]
+    CloseGeom_48_Drawdown: [0, 3]
+    CloseGeom_48_Symmetry: [0, 2]
+    CloseGeom_96_SlopeDeg: [-90, 90]
+    CloseGeom_96_Area: [0, 5]
+    CloseGeom_96_Runup: [0, 3]
+    CloseGeom_96_Drawdown: [0, 3]
+    CloseGeom_96_Symmetry: [0, 2]
+    # ----------------------------------------------
+
+  # 6-2. 피처 vs 피처 비교 (Feature vs Feature)에 사용할 피처 목록
+  # 여기에 포함된 피처들은 서로 비교 대상이 됨
+  feature_comparison:
+    - Open
+    - High
+    - Low
+    - Close
+    - SMA
+    - EMA
+    - VWMA
+    - DEMA
+    - TEMA
+    - TRIMA
+    - BB_Upper
+    - BB_Mid
+    - BB_Lower
+    - Volume_PerTrade
+    - QuoteVolume_PerTrade
+    - Volume_14_ToMean
+    - Volume_30_ToMean
+    - Volume_60_ToMean
+    - Volume_14_ToMedian
+    - Volume_30_ToMedian
+    - Volume_60_ToMedian
+    - Volume_14_ToEma
+    - Volume_30_ToEma
+    - Volume_60_ToEma
+    - Volume_120_ToMean
+    - Volume_120_ToMedian
+    - Volume_120_ToEma
+    - TakerBuyBase_Ratio
+    - TakerBuyQuote_Ratio
+    - Ichimoku_Tenkan
+    - Ichimoku_Kijun
+    - Ichimoku_SenkouA
+    - Ichimoku_SenkouB
+    # Ichimoku_Chikou_Ratio는 피처간 비교에서 숫자형 비교로 이동 (요청 반영)
+    - SAR
+    - Support_MA
+    - Resistance_MA
+    - Pivot_Point
+    - Support1_Pivot
+    - Support2_Pivot
+    - Resistance1_Pivot
+    - Resistance2_Pivot
+
+  # 6-3. 피처 vs 불리언 비교 (Feature vs Boolean)에 사용할 피처 목록
+  feature_bool:
+    - InvertedHammers
+    - Hammers
+    - HangingMen
+    - DarkCloudCovers
+    - Dojis
+    - DragonflyDojis
+    - GravestoneDojis
+    - MorningStars
+    - MorningStarDojis
+    - PiercingPatterns
+    - ShootingStars
+    - '3BlackCrows'
+    - '3WhiteSoldiers'
+    - '3StarsInSouth'
+    - BullishHarami
+    - BearishHarami
+    - BullishEngulfing
+    - BearishEngulfing
+    - BullishDojiStar
+    - BearishDojiStar
+    - BullishTasukiGap
+    - BearishTasukiGap
+    - BullishXSideGap3Methods
+    - BearishXSideGap3Methods
+    - BullishSpinningTop
+    - BearishSpinningTop
+    - BullishRise3Methods
+    - BearishFall3Methods
+    - HT_TRENDMODE
+    # --- [추가] 새로운 복합 불리언 피처 분류 규칙 ---
+    - Volume_Spike
+    - Volume_14_SpikeFlag
+    - Volume_14_DryFlag
+    - Volume_30_SpikeFlag
+    - Volume_30_DryFlag
+    - Volume_60_SpikeFlag
+    - Volume_60_DryFlag
+    - Volume_120_SpikeFlag
+    - Volume_120_DryFlag
+    - Consecutive_Bullish
+    - Consecutive_Bearish
+    - Bullish_Confirmation
+    - Bearish_Confirmation
+    # ---------------------------------------------

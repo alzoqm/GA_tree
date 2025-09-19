@@ -210,9 +210,9 @@ def _compute_close_shape_features(
         'PeakPos': float(np.argmax(norm_series) / max(length - 1, 1)),
         'TroughPos': float(np.argmin(norm_series) / max(length - 1, 1)),
         'Symmetry': float(symmetry),
-        'ShapeVol': float(np.std(norm_series)),
-        'ShapeVelStd': float(np.std(diff) if diff.size > 0 else 0.0),
-        'ShapeAccelStd': float(np.std(accel) if accel.size > 0 else 0.0),
+        'ShapeVol': float(np.std(norm_series, dtype=np.float64)),
+        'ShapeVelStd': float(np.std(diff, dtype=np.float64) if diff.size > 0 else 0.0),
+        'ShapeAccelStd': float(np.std(accel, dtype=np.float64) if accel.size > 0 else 0.0),
         'Curvature': float(np.mean(np.abs(accel)) if accel.size > 0 else 0.0),
         'SwingRate': float(swing_changes),
     }

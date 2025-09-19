@@ -89,7 +89,7 @@ Modify `experiment_config.yaml` to define all aspects of your experiment. This i
 
 -   **`environment`**: Set the CUDA device, random seed, and output directories.
 -   **`data`**: Specify the trading symbol (e.g., `BTCUSDT`), interval, and feature engineering settings.
--   **`ga_core`**: Define the GA parameters like population size, number of generations, and elite size.
+-   **`ga_core`**: Define the GA parameters like population size, number of generations, and elite size. Optional `evolution_loop.early_stopping` settings let you stop the per-window generation loop once a chosen metric stops improving.
 -   **`operators`**: Configure the probabilities and behaviors of crossover and mutation operators.
 -   **`walk_forward`**: Enable and configure the WFO parameters, including window sizes and step sizes.
 -   **`evaluation`**: Set up the simulation environment (fees, slippage) and define the multi-objective fitness functions for in-sample (IS), out-of-sample (OOS), and final aggregation.

@@ -117,6 +117,10 @@ class CheckpointManager:
     def get_window_checkpoint_dir(self, window_idx: int) -> Path:
         """Get the checkpoint directory for a specific window."""
         return self.checkpoint_dir / f"wf_window_{window_idx}"
+
+    def get_cpcv_checkpoint_dir(self) -> Path:
+        """Get the checkpoint directory for CPCV generation checkpoints."""
+        return self.checkpoint_dir / "cpcv_generations"
     
     def save_window_checkpoint(self, 
                              window_idx: int,
@@ -183,12 +187,72 @@ class CheckpointManager:
                 torch.save(cpu_stats, window_dir / f"best_node_stats_gen_{generation}.pth")
             except Exception as e:
                 logging.warning(f"Failed to save best_node_stats: {e}")
+
+    def save_cpcv_checkpoint(
+        self,
+        generation: int,
+        population_state: Dict,
+        best_chromosomes: Optional[torch.Tensor] = None,
+        best_objectives: Optional[torch.Tensor] = None,
+        best_node_stats: Optional[Dict[str, torch.Tensor]] = None,
+        evolution_state: Optional[Dict] = None,
+        **extra_state,
+    ) -> None:
+        """Save checkpoint for CPCV training generation."""
+        cpcv_dir = self.get_cpcv_checkpoint_dir()
+        cpcv_dir.mkdir(parents=True, exist_ok=True)
+
+        json_safe_population_state: Dict[str, object] = {}
+        tensor_files: Dict[str, str] = {}
+
+        for key, value in population_state.items():
+            if isinstance(value, torch.Tensor):
+                tensor_file = cpcv_dir / f"population_{key}_gen_{generation}.pth"
+                torch.save(value, tensor_file)
+                tensor_files[key] = tensor_file.name
+                json_safe_population_state[key] = f"__TENSOR_FILE__{tensor_file.name}"
+            else:
+                json_safe_population_state[key] = value
+
+        gen_checkpoint = {
+            "generation": generation,
+            "timestamp": datetime.utcnow().isoformat(),
+            "population_state": json_safe_population_state,
+            "evolution_state": evolution_state or {},
+            "tensor_files": tensor_files,
+            **extra_state,
+        }
+
+        gen_file = cpcv_dir / f"generation_{generation}.json"
+        try:
+            with open(gen_file, 'w') as f:
+                json.dump(gen_checkpoint, f, indent=2)
+        except Exception as e:
+            logging.error(f"Failed to save CPCV generation checkpoint: {e}")
+
+        if best_chromosomes is not None:
+            torch.save(best_chromosomes, cpcv_dir / f"best_chromosomes_gen_{generation}.pth")
+
+        if best_objectives is not None:
+            torch.save(best_objectives, cpcv_dir / f"best_objectives_gen_{generation}.pth")
+
+        if best_node_stats is not None:
+            try:
+                cpu_stats = {}
+                for k, v in best_node_stats.items():
+                    if isinstance(v, torch.Tensor):
+                        cpu_stats[k] = v.detach().cpu()
+                    else:
+                        cpu_stats[k] = v
+                torch.save(cpu_stats, cpcv_dir / f"best_node_stats_gen_{generation}.pth")
+            except Exception as e:
+                logging.warning(f"Failed to save CPCV best_node_stats: {e}")
     
     def load_window_checkpoint(self, window_idx: int, generation: int) -> Optional[Dict[str, Any]]:
         """Load checkpoint for a specific window and generation."""
         window_dir = self.get_window_checkpoint_dir(window_idx)
         gen_file = window_dir / f"generation_{generation}.json"
-        
+
         if not gen_file.exists():
             return None
             
@@ -222,13 +286,54 @@ class CheckpointManager:
             best_node_stats_file = window_dir / f"best_node_stats_gen_{generation}.pth"
             if best_node_stats_file.exists():
                 checkpoint_data["best_node_stats"] = torch.load(best_node_stats_file, weights_only=False)
-            
+
             return checkpoint_data
             
         except Exception as e:
             logging.error(f"Failed to load window checkpoint: {e}")
             return None
-    
+
+    def load_cpcv_checkpoint(self, generation: int) -> Optional[Dict[str, Any]]:
+        """Load CPCV generation checkpoint."""
+        cpcv_dir = self.get_cpcv_checkpoint_dir()
+        gen_file = cpcv_dir / f"generation_{generation}.json"
+        if not gen_file.exists():
+            return None
+
+        try:
+            with open(gen_file, 'r') as f:
+                checkpoint_data = json.load(f)
+
+            population_state = checkpoint_data.get("population_state", {})
+            tensor_files = checkpoint_data.get("tensor_files", {})
+
+            for key, value in population_state.items():
+                if isinstance(value, str) and value.startswith("__TENSOR_FILE__"):
+                    tensor_filename = value.replace("__TENSOR_FILE__", "")
+                    tensor_path = cpcv_dir / tensor_filename
+                    if tensor_path.exists():
+                        population_state[key] = torch.load(tensor_path, weights_only=False)
+                    else:
+                        logging.warning(f"Tensor file not found: {tensor_path}")
+
+            best_chromosomes_file = cpcv_dir / f"best_chromosomes_gen_{generation}.pth"
+            if best_chromosomes_file.exists():
+                checkpoint_data["best_chromosomes"] = torch.load(best_chromosomes_file, weights_only=False)
+
+            best_objectives_file = cpcv_dir / f"best_objectives_gen_{generation}.pth"
+            if best_objectives_file.exists():
+                checkpoint_data["best_objectives"] = torch.load(best_objectives_file, weights_only=False)
+
+            best_node_stats_file = cpcv_dir / f"best_node_stats_gen_{generation}.pth"
+            if best_node_stats_file.exists():
+                checkpoint_data["best_node_stats"] = torch.load(best_node_stats_file, weights_only=False)
+
+            return checkpoint_data
+
+        except Exception as e:
+            logging.error(f"Failed to load CPCV checkpoint: {e}")
+            return None
+
     def find_latest_checkpoint(self) -> Optional[Tuple[int, int]]:
         """Find the latest completed checkpoint (window_idx, generation)."""
         main_checkpoint = self.load_main_checkpoint()
@@ -255,6 +360,22 @@ class CheckpointManager:
             return current_window, max_generation
         
         return None
+
+    def find_latest_cpcv_generation(self) -> Optional[int]:
+        """Find the latest CPCV generation checkpoint."""
+        cpcv_dir = self.get_cpcv_checkpoint_dir()
+        if not cpcv_dir.exists():
+            return None
+
+        max_generation = -1
+        for gen_file in cpcv_dir.glob("generation_*.json"):
+            try:
+                gen_num = int(gen_file.stem.split('_')[1])
+                max_generation = max(max_generation, gen_num)
+            except (ValueError, IndexError):
+                continue
+
+        return max_generation if max_generation >= 0 else None
     
     def get_completed_windows(self) -> List[int]:
         """Get list of completed window indices."""
@@ -293,10 +414,29 @@ class CheckpointManager:
                         
                 except Exception as e:
                     logging.warning(f"Failed to cleanup checkpoint {gen_file}: {e}")
+
+        # Cleanup CPCV checkpoints
+        cpcv_dir = self.get_cpcv_checkpoint_dir()
+        if cpcv_dir.exists():
+            gen_files = list(cpcv_dir.glob("generation_*.json"))
+            if len(gen_files) > keep_last_n_generations:
+                gen_files.sort(key=lambda x: int(x.stem.split('_')[1]))
+                for gen_file in gen_files[:-keep_last_n_generations]:
+                    try:
+                        gen_num = gen_file.stem.split('_')[1]
+                        gen_file.unlink()
+                        for tensor_file in cpcv_dir.glob(f"*_gen_{gen_num}.pth"):
+                            tensor_file.unlink()
+                    except Exception as e:
+                        logging.warning(f"Failed to cleanup CPCV checkpoint {gen_file}: {e}")
     
     def is_resumable(self) -> bool:
         """Check if there's a valid checkpoint to resume from."""
-        return self.find_latest_checkpoint() is not None
+        if self.find_latest_checkpoint() is not None:
+            return True
+        if self.find_latest_cpcv_generation() is not None:
+            return True
+        return False
     
     def clear_checkpoints(self):
         """Clear all checkpoints - use with caution!"""

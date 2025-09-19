@@ -6,7 +6,7 @@ import pandas as pd
 import logging
 from typing import List, Tuple, Optional, Dict, Any
 
-from .multi_objective_fitness import MultiObjectiveFitnessEvaluator
+from .multi_objective_fitness import MultiObjectiveFitnessEvaluator, OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX
 from analysis.stat_tests import window_level_dsr
 from utils.checkpoint_manager import CheckpointManager
 from .pruner import PopulationPruner
@@ -31,7 +31,11 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config
                 aggregated.append(1e9 if base_minimize[i] else -1e9)
                 continue
 
-            valid_values = obj_values[valid_mask]
+            valid_values = np.clip(
+                obj_values[valid_mask].astype(np.float64, copy=False),
+                OBJECTIVE_CLAMP_MIN,
+                OBJECTIVE_CLAMP_MAX,
+            )
 
             if method == 'mean':
                 result = np.mean(valid_values)
@@ -42,7 +46,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray, aggregate_config
             elif method == 'max':
                 result = np.max(valid_values)
             elif method == 'std':
-                result = np.std(valid_values)
+                result = np.std(valid_values, dtype=np.float64)
             elif method.startswith('p'):
                 percentile = float(method[1:])
                 result = np.percentile(valid_values, percentile)
@@ -445,6 +449,7 @@ class WalkForwardOptimizer:
             population = evolution_engine.population
             window_start_gen = 0
             resume_archive = None
+            resume_early_stopping_state = None
 
             if checkpoint_manager is not None and latest_generation_checkpoint is not None:
                 latest_window, latest_generation = latest_generation_checkpoint
@@ -456,6 +461,7 @@ class WalkForwardOptimizer:
                         window_idx=window_idx,
                         generation=latest_generation,
                         config=ga_cfg,
+                        mode='wfo',
                     )
                     if restored is not None:
                         restored_population, restored_best_chromosomes, restored_best_objectives, evolution_state = restored
@@ -472,6 +478,7 @@ class WalkForwardOptimizer:
                         resume_best_node_stats = None
                         if isinstance(evolution_state, dict):
                             resume_best_node_stats = evolution_state.get('best_node_stats')
+                            resume_early_stopping_state = evolution_state.get('early_stopping_state')
                             if 'generation_stats' in evolution_state and hasattr(evolution_engine, 'generation_stats'):
                                 evolution_engine.generation_stats = evolution_state['generation_stats']
 
@@ -516,6 +523,8 @@ class WalkForwardOptimizer:
                 window_idx=window_idx,
                 best_archive=resume_archive,
                 start_gen=window_start_gen,
+                early_stopping_config=ga_cfg['evolution_loop'].get('early_stopping'),
+                early_stopping_state=resume_early_stopping_state,
             )
 
             if window_best_chromosomes is None or len(window_best_chromosomes) == 0:

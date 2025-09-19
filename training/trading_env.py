@@ -1445,8 +1445,12 @@ class TradingEnvironment:
     def get_final_metrics(self, minimum_date=40):
         """원본 메트릭 계산 완전 보존"""
         count_returns_f = self.count_returns.float()
-        mean_returns = torch.where(count_returns_f > 0, self.sum_returns / count_returns_f, torch.full_like(self.sum_returns, -1e9))
-        
+        mean_returns = torch.where(
+            count_returns_f > 0,
+            self.sum_returns / count_returns_f,
+            torch.full_like(self.sum_returns, -1e9),
+        )
+
         # Profit Factor 지표 왜곡 방지
         profit_factors = torch.full_like(self.total_profit_agg, 100.0)
         has_loss_mask = self.total_loss_agg > 0
@@ -1454,18 +1458,54 @@ class TradingEnvironment:
             calculated_pf = self.total_profit_agg[has_loss_mask] / (self.total_loss_agg[has_loss_mask] + 1e-9)
             profit_factors[has_loss_mask] = torch.clamp(calculated_pf, max=100.0)
 
-        win_rates = torch.where(count_returns_f > 0, self.count_wins.float() / count_returns_f, torch.full_like(count_returns_f, -1e9))
+        win_rates = torch.where(
+            count_returns_f > 0,
+            self.count_wins.float() / count_returns_f,
+            torch.full_like(count_returns_f, -1e9),
+        )
         # Trade-based win rate (per open->final close)
         trade_counts_f = self.trade_total_count.float()
-        trade_win_rates = torch.where(trade_counts_f > 0, self.trade_win_count.float() / trade_counts_f, torch.full_like(trade_counts_f, -1e9))
+        trade_win_rates = torch.where(
+            trade_counts_f > 0,
+            self.trade_win_count.float() / trade_counts_f,
+            torch.full_like(trade_counts_f, -1e9),
+        )
+
         invalid_mask = self.count_returns < minimum_date
         mean_returns[invalid_mask] = -1e9
         profit_factors[invalid_mask] = -1e9
         win_rates[invalid_mask] = -1e9
         self.max_drawdown[invalid_mask] = 1.0
         self.compound_value[invalid_mask] = -1e9
-        # Append trade-based win rate as an extra column for reporting
-        metrics = torch.stack([mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value, trade_win_rates], dim=1)
+        trade_win_rates[invalid_mask] = -1e9
+
+        valid_mask = ~invalid_mask
+        if valid_mask.any():
+            win_rates = torch.where(valid_mask, torch.clamp(win_rates, 0.0, 1.0), win_rates)
+            trade_win_rates = torch.where(valid_mask, torch.clamp(trade_win_rates, 0.0, 1.0), trade_win_rates)
+            self.max_drawdown = torch.where(valid_mask, torch.clamp(self.max_drawdown, 0.0, 1.0), self.max_drawdown)
+            self.compound_value = torch.where(valid_mask, torch.clamp(self.compound_value, min=0.0), self.compound_value)
+
+        metrics = torch.stack(
+            [mean_returns, profit_factors, win_rates, self.max_drawdown, self.compound_value, trade_win_rates],
+            dim=1,
+        )
+
+        finite_mask = torch.isfinite(metrics)
+        upper_bounds = metrics.new_tensor([1e6, 1e6, 1.0, 1.0, 1e6, 1.0])
+        lower_bounds = metrics.new_tensor([-1e6, 0.0, 0.0, 0.0, 0.0, 0.0])
+        exceeds_upper = metrics > upper_bounds
+        below_lower = metrics < lower_bounds
+        invalid_numeric_rows = torch.any(~finite_mask | exceeds_upper | below_lower, dim=1)
+
+        if invalid_numeric_rows.any():
+            metrics[invalid_numeric_rows, 0] = -1e9
+            metrics[invalid_numeric_rows, 1] = -1e9
+            metrics[invalid_numeric_rows, 2] = -1e9
+            metrics[invalid_numeric_rows, 3] = 1.0
+            metrics[invalid_numeric_rows, 4] = -1e9
+            metrics[invalid_numeric_rows, 5] = -1e9
+
         return metrics.cpu().numpy()
 
     # === 다중 목표 최적화 추가 메서드들 ===
@@ -1669,6 +1709,8 @@ class TradingEnvironment:
         max_drawdown = torch.tensor(base_metrics[:, 3], device=self.device)
         compound_value = torch.tensor(base_metrics[:, 4], device=self.device)
         trade_win_rates = torch.tensor(base_metrics[:, 5], device=self.device)
+        total_steps = max(1, len(self.returns_history))
+        turnover = self.trade_total_count.to(torch.float32) / float(total_steps)
         
         # Calculate additional advanced metrics if we have return history
         if len(self.returns_history) >= 2:
@@ -1703,6 +1745,7 @@ class TradingEnvironment:
             'profit_factor': profit_factors,
             'compound_value': compound_value,
             'trade_win_rate': trade_win_rates,
+            'turnover': turnover,
             'volatility': volatilities,
             'calmar_ratio': calmar_ratios,
             'sortino_ratio': sortino_ratios,

@@ -4,9 +4,15 @@ import numpy as np
 import torch
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
+
+from fitness.cpcv_objectives import CPCVObjectiveAggregator
 # Note: Now using unified trading_env which includes all multi-objective functionality
 # from .trading_env import TradingEnvironment, fitness_fn
 
+
+# Guardrails for objective statistics – prevents runaway values from skewing normalization
+OBJECTIVE_CLAMP_MIN = -1e6
+OBJECTIVE_CLAMP_MAX = 1e6
 
 # --- Module-level CUDA crowding distance helper ---
 def _crowding_distance_cuda(front_obj: torch.Tensor) -> torch.Tensor:
@@ -92,6 +98,32 @@ class MultiObjectiveFitnessEvaluator:
         Returns:
             objectives: [population_size, num_objectives] array of objective values
         """
+        mode = evaluation_config.get('mode') if isinstance(evaluation_config, dict) else None
+
+        if mode == 'cpcv':
+            scheduler = evaluation_config.get('cpcv_scheduler', None)
+            if scheduler is None:
+                raise ValueError("CPCV mode requires 'cpcv_scheduler' in evaluation_config")
+
+            is_objectives = evaluation_config.get('is_objectives', evaluation_config.get('objectives', {}))
+            oos_objectives = evaluation_config.get('oos_objectives', evaluation_config.get('objectives', {}))
+            aggregator = CPCVObjectiveAggregator(
+                scheduler=scheduler,
+                evaluation_config=evaluation_config,
+                cpcv_objectives={'names': self.objective_names, 'minimize': self.minimize_objectives},
+                is_objectives=is_objectives,
+                oos_objectives=oos_objectives,
+                device=device,
+                min_trades_per_split=int(evaluation_config.get('min_trades_per_split', 32)),
+            )
+            result = aggregator.evaluate(
+                population=population,
+                data=data,
+                all_feature_names=all_feature_names,
+            )
+            self.history.append({'mode': 'cpcv', 'summary': result.summary, 'combos': result.combo_ids})
+            return result.objectives
+
         # Use the simulator's wrapper to avoid legacy dependency on trading_env.fitness_fn
         from training.simulator import fitness_fn
         return fitness_fn(
@@ -128,19 +160,23 @@ class MultiObjectiveFitnessEvaluator:
                 # No valid values - keep as is
                 continue
             
-            valid_values = obj_values[valid_mask]
+            obj_values_f64 = obj_values.astype(np.float64, copy=False)
+            valid_values = np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
             
             if self.normalization == 'minmax':
                 min_val, max_val = np.min(valid_values), np.max(valid_values)
                 if min_val != max_val:
-                    normalized[valid_mask, i] = (obj_values[valid_mask] - min_val) / (max_val - min_val)
+                    normalized_vals = (np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX) - min_val) / (max_val - min_val)
+                    normalized[valid_mask, i] = normalized_vals
                 else:
                     normalized[valid_mask, i] = 0.5
             
             elif self.normalization == 'zscore':
-                mean_val, std_val = np.mean(valid_values), np.std(valid_values)
+                mean_val = np.mean(valid_values)
+                std_val = np.std(valid_values, dtype=np.float64)
                 if std_val > 1e-8:
-                    normalized[valid_mask, i] = (obj_values[valid_mask] - mean_val) / std_val
+                    normalized_vals = (np.clip(obj_values_f64[valid_mask], OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX) - mean_val) / std_val
+                    normalized[valid_mask, i] = normalized_vals
                 else:
                     normalized[valid_mask, i] = 0.0
             
@@ -148,7 +184,7 @@ class MultiObjectiveFitnessEvaluator:
             if valid_mask.any():
                 self.objective_stats[self.objective_names[i]] = {
                     'mean': np.mean(valid_values),
-                    'std': np.std(valid_values),
+                    'std': np.std(valid_values, dtype=np.float64),
                     'min': np.min(valid_values),
                     'max': np.max(valid_values)
                 }
@@ -511,12 +547,12 @@ class MultiObjectiveFitnessEvaluator:
             if np.any(valid_mask):
                 # Convert to natural display form: maximize metrics were negated upstream
                 if self.minimize_objectives[i]:
-                    valid_values = obj_values[valid_mask]
+                    valid_values = np.clip(obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
                 else:
-                    valid_values = -obj_values[valid_mask]
+                    valid_values = np.clip(-obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
                 summary['statistics'][obj_name] = {
                     'mean': float(np.mean(valid_values)),
-                    'std': float(np.std(valid_values)),
+                    'std': float(np.std(valid_values, dtype=np.float64)),
                     'min': float(np.min(valid_values)),
                     'max': float(np.max(valid_values)),
                     'median': float(np.median(valid_values)),
@@ -813,7 +849,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray,
                 aggregated.append(1e9 if base_minimize[i] else -1e9)
                 continue
                 
-            valid_values = obj_values[valid_mask]
+            valid_values = np.clip(obj_values[valid_mask].astype(np.float64, copy=False), OBJECTIVE_CLAMP_MIN, OBJECTIVE_CLAMP_MAX)
             
             if method == 'mean':
                 result = np.mean(valid_values)
@@ -824,7 +860,7 @@ def aggregate_oos_objectives(objectives_per_window: np.ndarray,
             elif method == 'max':
                 result = np.max(valid_values)
             elif method == 'std':
-                result = np.std(valid_values)
+                result = np.std(valid_values, dtype=np.float64)
             elif method.startswith('p'):
                 # Percentile (e.g., 'p95', 'p05')
                 percentile = float(method[1:])
