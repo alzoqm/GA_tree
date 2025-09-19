@@ -355,6 +355,11 @@ class GenerationRunner:
                 )
                 break
 
+            # 결과 확인을 위해
+            logging.info(f"[CPCV Fitness Check] Objectives tensor shape: {train_objectives.shape}")
+            if train_objectives.shape[0] > 5:
+                logging.info(f"[CPCV Fitness Check] Top 5 objective rows (minimization space):\n{train_objectives[:5]}")
+
             evolution.evolve(train_objectives_tensor)
             # 디바이스 전환 시 뷰 무효화를 방지하기 위해 안전한 API 사용
             population.move_to(self.device)
