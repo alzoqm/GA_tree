@@ -131,6 +131,7 @@ class GenerationRunner:
     ) -> None:
         checkpoint_dir = os.path.join(self.output_dir, 'checkpoints')
         os.makedirs(checkpoint_dir, exist_ok=True)
+        eval_mode = str(self.evaluation_config.get('mode', '') if isinstance(self.evaluation_config, dict) else '').lower()
         return _save_generation_checkpoint(
             checkpoint_dir=checkpoint_dir,
             gen_idx=gen_idx,
@@ -144,6 +145,7 @@ class GenerationRunner:
             checkpoint_manager=self.checkpoint_manager,
             window_idx=window_idx,
             early_stopping_state=early_stopping_state,
+            evaluation_mode=eval_mode,
         )
 
     def _update_early_stopping(self, generation: int, generation_summary: Dict[str, Any]) -> bool:
@@ -198,11 +200,12 @@ class GenerationRunner:
     @staticmethod
     def load_generation_checkpoint(
         checkpoint_manager: CheckpointManager,
-        window_idx: int,
+        window_idx: Optional[int],
         generation: int,
         config: Dict[str, Any],
+        mode: str = 'wfo',
     ) -> Optional[Tuple[GATreePop, Optional[torch.Tensor], Optional[np.ndarray], Dict]]:
-        return load_generation_checkpoint(checkpoint_manager, window_idx, generation, config)
+        return load_generation_checkpoint(checkpoint_manager, window_idx, generation, config, mode=mode)
 
     # ----- public API -----
     def train(
@@ -621,6 +624,7 @@ def _save_generation_checkpoint(
     checkpoint_manager: Optional[CheckpointManager] = None,
     window_idx: Optional[int] = None,
     early_stopping_state: Optional[Dict[str, Any]] = None,
+    evaluation_mode: str = '',
 ) -> None:
     """Save generation checkpoint with enhanced resumption support."""
     # Legacy checkpoint format for compatibility
@@ -639,9 +643,8 @@ def _save_generation_checkpoint(
     torch.save(checkpoint_data, checkpoint_path)
     
     # Enhanced checkpoint using CheckpointManager
-    if checkpoint_manager is not None and window_idx is not None:
+    if checkpoint_manager is not None:
         try:
-            # Prepare population state for serialization
             population_state = {
                 "population_tensor": population.population_tensor.cpu(),
                 "pop_size": population.pop_size,
@@ -654,8 +657,7 @@ def _save_generation_checkpoint(
                 "feature_bool": population.feature_bool,
                 "all_features": population.all_features,
             }
-            
-            # Prepare evolution state
+
             evolution_state = {
                 "generation_stats": evolution.get_generation_statistics() if hasattr(evolution, 'get_generation_statistics') else {},
                 "parent_size": getattr(evolution, 'parent_size', None),
@@ -663,31 +665,68 @@ def _save_generation_checkpoint(
                 "early_stopping_state": early_stopping_state,
             }
 
-            checkpoint_manager.save_window_checkpoint(
-                window_idx=window_idx,
-                generation=gen_idx,
-                population_state=population_state,
-                best_chromosomes=best_chromosomes.cpu() if best_chromosomes is not None else None,
-                best_objectives=best_objectives,
-                best_node_stats={k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in best_node_stats.items()} if isinstance(best_node_stats, dict) else None,
-                evolution_state=evolution_state,
-                generation_stats=generation_summary,
-                objectives_config=objectives_config,
-                early_stopping_state=early_stopping_state,
+            node_stats_payload = (
+                {k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in best_node_stats.items()} if isinstance(best_node_stats, dict)
+                else None
             )
+
+            mode_lower = str(evaluation_mode).lower()
+            if mode_lower == 'cpcv':
+                checkpoint_manager.save_cpcv_checkpoint(
+                    generation=gen_idx,
+                    population_state=population_state,
+                    best_chromosomes=best_chromosomes.cpu() if best_chromosomes is not None else None,
+                    best_objectives=best_objectives,
+                    best_node_stats=node_stats_payload,
+                    evolution_state=evolution_state,
+                    generation_stats=generation_summary,
+                    objectives_config=objectives_config,
+                    early_stopping_state=early_stopping_state,
+                )
+                try:
+                    checkpoint_manager.save_main_checkpoint(
+                        current_window=0,
+                        total_windows=0,
+                        completed_generations=gen_idx + 1,
+                        training_mode='cpcv',
+                        cpcv_state={'last_generation': gen_idx},
+                    )
+                except Exception as exc:
+                    logging.warning(f"Failed to update CPCV main checkpoint metadata: {exc}")
+            elif window_idx is not None:
+                checkpoint_manager.save_window_checkpoint(
+                    window_idx=window_idx,
+                    generation=gen_idx,
+                    population_state=population_state,
+                    best_chromosomes=best_chromosomes.cpu() if best_chromosomes is not None else None,
+                    best_objectives=best_objectives,
+                    best_node_stats=node_stats_payload,
+                    evolution_state=evolution_state,
+                    generation_stats=generation_summary,
+                    objectives_config=objectives_config,
+                    early_stopping_state=early_stopping_state,
+                )
         except Exception as e:
             logging.warning(f"Failed to save enhanced checkpoint: {e}")
 
 
 def load_generation_checkpoint(
     checkpoint_manager: CheckpointManager,
-    window_idx: int,
+    window_idx: Optional[int],
     generation: int,
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    mode: str = 'wfo',
 ) -> Optional[Tuple[GATreePop, Optional[torch.Tensor], Optional[np.ndarray], Dict]]:
     """Load generation checkpoint for resumption."""
     try:
-        checkpoint_data = checkpoint_manager.load_window_checkpoint(window_idx, generation)
+        mode_lower = str(mode).lower()
+        if mode_lower == 'cpcv':
+            checkpoint_data = checkpoint_manager.load_cpcv_checkpoint(generation)
+        else:
+            if window_idx is None:
+                logging.error("Window index is required for non-CPCV checkpoint loading")
+                return None
+            checkpoint_data = checkpoint_manager.load_window_checkpoint(window_idx, generation)
         if checkpoint_data is None:
             return None
         

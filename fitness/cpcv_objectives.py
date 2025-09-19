@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ class CPCVAggregationResult:
     raw_oos_metrics: Optional[np.ndarray] = None  # Minimization-orientated [combos, pop, metrics]
     raw_train_metrics: Optional[np.ndarray] = None
     raw_returns: Optional[List[np.ndarray]] = None
+    node_stats: Optional[Dict[str, Union[int, torch.Tensor]]] = None
 
 
 class CPCVObjectiveAggregator:
@@ -62,6 +63,9 @@ class CPCVObjectiveAggregator:
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._frame_cache: Dict[int, Dict[str, List[pd.DataFrame]]] = {}
+        pruning_cfg = self.evaluation_config.get('pruning', {}) if isinstance(self.evaluation_config, dict) else {}
+        collect_flag = bool(self.evaluation_config.get('collect_node_stats', False)) if isinstance(self.evaluation_config, dict) else False
+        self.want_node_stats = bool(collect_flag and pruning_cfg.get('enabled', False))
 
     def evaluate(
         self,
@@ -78,6 +82,7 @@ class CPCVObjectiveAggregator:
         oos_metrics_min: List[np.ndarray] = []
         oos_returns: List[np.ndarray] = []
         combo_ids: List[int] = []
+        node_stats_global: Optional[Dict[str, torch.Tensor]] = None
 
         chunk_iter = self.scheduler.iter_split_batches(
             batch_size=self.parallel_chunks,
@@ -106,11 +111,14 @@ class CPCVObjectiveAggregator:
                     all_feature_names=all_feature_names,
                     min_trades=self.min_trades_per_split,
                     collect_returns=False,
+                    collect_node_stats=self.want_node_stats,
                 )
                 if train_result is None:
                     continue
-                train_nat, _, _, _ = train_result
+                train_nat, _, _, _, train_node_stats = train_result
                 train_metrics_nat.append(train_nat)
+                if self.want_node_stats:
+                    node_stats_global = _merge_node_stats(node_stats_global, train_node_stats)
 
                 test_result = self._evaluate_segment_group(
                     simulator=simulator,
@@ -121,14 +129,17 @@ class CPCVObjectiveAggregator:
                     all_feature_names=all_feature_names,
                     min_trades=self.min_trades_per_split,
                     collect_returns=True,
+                    collect_node_stats=self.want_node_stats,
                 )
                 if test_result is None:
                     continue
 
-                oos_nat, oos_min, combined_returns, _ = test_result
+                oos_nat, oos_min, combined_returns, _, test_node_stats = test_result
                 oos_metrics_nat.append(oos_nat)
                 oos_metrics_min.append(oos_min)
                 oos_returns.append(combined_returns)
+                if self.want_node_stats:
+                    node_stats_global = _merge_node_stats(node_stats_global, test_node_stats)
                 combo_ids.append(split.combo_id)
 
             if not self.reuse_population:
@@ -150,6 +161,7 @@ class CPCVObjectiveAggregator:
         raw_train = train_stack if train_stack.size else None
         raw_oos = oos_stack_min if oos_stack_min.size else None
         raw_returns = returns_stack if returns_stack else None
+        finalized_node_stats = _finalize_node_stats(node_stats_global) if self.want_node_stats else None
 
         return CPCVAggregationResult(
             objectives=objective_matrix,
@@ -158,6 +170,7 @@ class CPCVObjectiveAggregator:
             raw_oos_metrics=raw_oos,
             raw_train_metrics=raw_train,
             raw_returns=raw_returns,
+            node_stats=finalized_node_stats,
         )
 
     def _get_split_segments(
@@ -206,7 +219,8 @@ class CPCVObjectiveAggregator:
         all_feature_names: Sequence[str],
         min_trades: int,
         collect_returns: bool,
-    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, object]]]:
+        collect_node_stats: bool,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, object], Optional[Dict[str, torch.Tensor]]]]:
         if not segments:
             return None
 
@@ -214,6 +228,7 @@ class CPCVObjectiveAggregator:
         aggregated = _init_env_accumulator(pop_size)
         returns_segments: List[np.ndarray] = []
         bench_segments: List[np.ndarray] = []
+        node_stats_accum: Optional[Dict[str, torch.Tensor]] = None
 
         for segment in segments:
             if len(segment) < 2:
@@ -228,13 +243,21 @@ class CPCVObjectiveAggregator:
                 device=self.device,
                 evaluation_config=eval_cfg,
                 return_returns=True,
+                return_node_stats=collect_node_stats,
                 return_env_state=True,
             )
 
-            if not isinstance(sim_result, tuple) or len(sim_result) < 3:
+            if not isinstance(sim_result, tuple):
                 continue
-
-            _, returns, env_state = sim_result
+            if collect_node_stats:
+                if len(sim_result) < 4:
+                    continue
+                _, returns, node_stats, env_state = sim_result
+                node_stats_accum = _merge_node_stats(node_stats_accum, node_stats)
+            else:
+                if len(sim_result) < 3:
+                    continue
+                _, returns, env_state = sim_result
             if not isinstance(env_state, dict):
                 continue
 
@@ -272,6 +295,7 @@ class CPCVObjectiveAggregator:
             minimization_metrics.astype(np.float32, copy=False),
             returns_payload.astype(np.float32, copy=False),
             aggregated,
+            node_stats_accum,
         )
 
     def _aggregate_metrics(
@@ -458,6 +482,65 @@ def _stack_benchmark_returns(bench_returns: Sequence[np.ndarray], pop_size: int)
     if not stacked:
         return np.zeros((0, pop_size), dtype=np.float32)
     return np.vstack(stacked).astype(np.float32, copy=False)
+
+
+def _ensure_cpu_tensor(value) -> Optional[torch.Tensor]:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+    elif isinstance(value, np.ndarray):
+        tensor = torch.from_numpy(value)
+    else:
+        return None
+    if tensor.is_floating_point():
+        return tensor.to(torch.float32)
+    return tensor.to(torch.int32)
+
+
+def _merge_node_stats(
+    accumulator: Optional[Dict[str, torch.Tensor]],
+    new_stats: Optional[Dict[str, object]],
+) -> Optional[Dict[str, torch.Tensor]]:
+    if new_stats is None:
+        return accumulator
+
+    if accumulator is None:
+        accumulator = {}
+
+    for key, value in new_stats.items():
+        if value is None:
+            continue
+        if key == 'total_steps':
+            tensor = torch.tensor(int(value), dtype=torch.int32)
+        else:
+            tensor = _ensure_cpu_tensor(value)
+        if tensor is None:
+            continue
+
+        if key in accumulator:
+            accumulator[key] = accumulator[key] + tensor
+        else:
+            accumulator[key] = tensor.clone()
+
+    return accumulator
+
+
+def _finalize_node_stats(stats: Optional[Dict[str, torch.Tensor]]) -> Optional[Dict[str, Union[int, torch.Tensor]]]:
+    if stats is None:
+        return None
+    finalized: Dict[str, Union[int, torch.Tensor]] = {}
+    for key, value in stats.items():
+        if value is None:
+            continue
+        if key == 'total_steps':
+            if isinstance(value, torch.Tensor):
+                finalized[key] = int(value.detach().cpu().item())
+            else:
+                finalized[key] = int(value)
+        else:
+            finalized[key] = value.detach().cpu()
+    return finalized
 
 
 def _combine_returns(returns_list: Sequence[np.ndarray], pop_size: int) -> np.ndarray:

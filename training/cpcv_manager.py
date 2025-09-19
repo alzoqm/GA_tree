@@ -11,9 +11,10 @@ import torch
 
 from models.model import GATreePop
 from training.cpcv import CPCVScheduler
-from training.runner import generation_training
+from training.runner import generation_training, GenerationRunner
 from fitness.cpcv_objectives import CPCVObjectiveAggregator, CPCVAggregationResult
 from analysis.robustness import run_robustness_checks, RobustnessReport
+from training.pruner import PopulationPruner
 
 
 class CPCVManager:
@@ -105,6 +106,50 @@ class CPCVManager:
             raise ValueError("CPCV objectives configuration is empty")
         eval_cfg = self._build_eval_config(scheduler, cpcv_objectives)
 
+        start_generation = 0
+        resume_archive = None
+        resume_early_stopping_state = None
+
+        if checkpoint_manager is not None:
+            latest_generation = checkpoint_manager.find_latest_cpcv_generation()
+            if latest_generation is not None and latest_generation >= 0:
+                restored = GenerationRunner.load_generation_checkpoint(
+                    checkpoint_manager=checkpoint_manager,
+                    window_idx=None,
+                    generation=latest_generation,
+                    config=ga_cfg,
+                    mode='cpcv',
+                )
+                if restored is not None:
+                    restored_population, restored_best_chromosomes, restored_best_objectives, evolution_state = restored
+                    try:
+                        restored_population.move_to(env_cfg['device'])
+                    except Exception:
+                        restored_population.population_tensor = restored_population.population_tensor.to(env_cfg['device'])
+                    restored_population.initialized = True
+                    restored_population.set_next_idx()
+                    evolution_engine.population = restored_population
+
+                    resume_best_node_stats = None
+                    if isinstance(evolution_state, dict):
+                        resume_best_node_stats = evolution_state.get('best_node_stats')
+                        resume_early_stopping_state = evolution_state.get('early_stopping_state')
+                        if 'generation_stats' in evolution_state and hasattr(evolution_engine, 'generation_stats'):
+                            evolution_engine.generation_stats = evolution_state['generation_stats']
+
+                    if restored_best_chromosomes is not None:
+                        restored_best_chromosomes = restored_best_chromosomes.to(env_cfg['device'])
+                    if isinstance(restored_best_objectives, torch.Tensor):
+                        restored_best_objectives = restored_best_objectives.cpu().numpy()
+
+                    if restored_best_chromosomes is not None and restored_best_objectives is not None:
+                        resume_archive = (restored_best_chromosomes, restored_best_objectives, resume_best_node_stats)
+
+                    start_generation = min(latest_generation + 1, ga_cfg['evolution_loop']['generations'])
+                    logging.info(
+                        "Resuming CPCV training from generation %s", start_generation
+                    )
+
         best_chromosomes, best_objectives, best_node_stats = generation_training(
             data_1m=final_df,
             evolution=evolution_engine,
@@ -122,6 +167,9 @@ class CPCVManager:
             checkpoint_manager=checkpoint_manager,
             objectives_config=cpcv_objectives,
             early_stopping_config=ga_cfg['evolution_loop'].get('early_stopping'),
+            best_archive=resume_archive,
+            start_gen=start_generation,
+            early_stopping_state=resume_early_stopping_state,
         )
 
         if best_chromosomes is None or len(best_chromosomes) == 0:
@@ -141,9 +189,16 @@ class CPCVManager:
         best_population.set_next_idx()
         best_population.move_to(env_cfg['device'])
 
+        aggregation_eval_cfg = dict(eval_cfg)
+        pruning_cfg = aggregation_eval_cfg.get('pruning', {}) if isinstance(aggregation_eval_cfg, dict) else {}
+        if isinstance(pruning_cfg, dict) and pruning_cfg.get('enabled', False):
+            aggregation_eval_cfg['collect_node_stats'] = True
+        else:
+            aggregation_eval_cfg['collect_node_stats'] = False
+
         aggregator = CPCVObjectiveAggregator(
             scheduler=scheduler,
-            evaluation_config=eval_cfg,
+            evaluation_config=aggregation_eval_cfg,
             cpcv_objectives=cpcv_objectives,
             is_objectives=eval_cfg.get('is_objectives', {}),
             oos_objectives=eval_cfg.get('oos_objectives', {}),
@@ -158,6 +213,26 @@ class CPCVManager:
             data=final_df,
             all_feature_names=model_config.get('all_features', []),
         )
+
+        best_chromosomes = best_population.population_tensor.detach().clone()
+        pruner = PopulationPruner(pruning_cfg)
+        if pruner.is_enabled():
+            stats_for_prune = result.node_stats
+            if isinstance(stats_for_prune, dict) and stats_for_prune:
+                try:
+                    pruner.prune_in_place(best_population, stats_for_prune)
+                    best_population.set_next_idx()
+                    best_population.initialized = True
+                    best_chromosomes = best_population.population_tensor.detach().clone()
+                    result = aggregator.evaluate(
+                        population=best_population,
+                        data=final_df,
+                        all_feature_names=model_config.get('all_features', []),
+                    )
+                except Exception as exc:
+                    logging.warning("CPCV pruning failed: %s", exc)
+            else:
+                logging.warning("Pruning enabled but CPCV node statistics were unavailable; skipping pruning.")
 
         self.last_summary = result.summary
         self.last_combo_ids = result.combo_ids

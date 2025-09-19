@@ -461,6 +461,7 @@ class WalkForwardOptimizer:
                         window_idx=window_idx,
                         generation=latest_generation,
                         config=ga_cfg,
+                        mode='wfo',
                     )
                     if restored is not None:
                         restored_population, restored_best_chromosomes, restored_best_objectives, evolution_state = restored
