@@ -246,7 +246,7 @@ class CPCVObjectiveAggregator:
                 return_node_stats=collect_node_stats,
                 return_env_state=True,
             )
-
+            print('complete simulate')
             if not isinstance(sim_result, tuple):
                 continue
             if collect_node_stats:
@@ -261,9 +261,12 @@ class CPCVObjectiveAggregator:
             if not isinstance(env_state, dict):
                 continue
 
+            print('complete merge node stat')    
             _accumulate_env_state(aggregated, env_state)
             returns_segments.append(returns.astype(np.float32, copy=False))
+            print('complete _accumulate_env_state')
             bench_arr = _stack_benchmark_returns(env_state.get('bench_returns', []), pop_size)
+            print('complete _stack_benchmark_returns')
             if bench_arr.size:
                 bench_segments.append(bench_arr)
 

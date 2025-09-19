@@ -95,6 +95,7 @@ class FitnessSimulator:
         evaluation_config: dict,
         return_returns: bool = False,
         return_env_state: bool = False,
+        return_node_stats: bool = False,
     ) -> (
         np.ndarray
         | tuple[np.ndarray, np.ndarray]
@@ -342,7 +343,11 @@ class FitnessSimulator:
         objectives = np.stack(columns, axis=1) if columns else np.zeros((B, 0), dtype=np.float32)
 
         # Optionally return node-level CUDA attribution stats for pruning
-        return_node_stats = bool(evaluation_config.get('return_node_stats', False)) if isinstance(evaluation_config, dict) else False
+        if isinstance(evaluation_config, dict):
+            config_wants_node_stats = bool(evaluation_config.get('return_node_stats', False))
+        else:
+            config_wants_node_stats = False
+        return_node_stats = bool(return_node_stats) or config_wants_node_stats
 
         def _collect_returns() -> np.ndarray:
             try:
