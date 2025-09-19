@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from scipy.special import erf
 import pandas as pd
 import torch
 
@@ -16,6 +17,7 @@ from models.constants import COL_DEPTH, COL_NODE_TYPE, NODE_TYPE_UNUSED
 from models.model import GATreePop
 from training.cpcv import CPCVScheduler, CPCVSplit
 from training.simulator import FitnessSimulator
+from tqdm import tqdm
 
 
 @dataclass
@@ -230,7 +232,8 @@ class CPCVObjectiveAggregator:
         bench_segments: List[np.ndarray] = []
         node_stats_accum: Optional[Dict[str, torch.Tensor]] = None
 
-        for segment in segments:
+        
+        for segment in tqdm(segments, desc="Evaluating segments", leave=True, position=0):
             if len(segment) < 2:
                 continue
 
@@ -246,7 +249,6 @@ class CPCVObjectiveAggregator:
                 return_node_stats=collect_node_stats,
                 return_env_state=True,
             )
-            print('complete simulate')
             if not isinstance(sim_result, tuple):
                 continue
             if collect_node_stats:
@@ -261,12 +263,9 @@ class CPCVObjectiveAggregator:
             if not isinstance(env_state, dict):
                 continue
 
-            print('complete merge node stat')    
             _accumulate_env_state(aggregated, env_state)
             returns_segments.append(returns.astype(np.float32, copy=False))
-            print('complete _accumulate_env_state')
             bench_arr = _stack_benchmark_returns(env_state.get('bench_returns', []), pop_size)
-            print('complete _stack_benchmark_returns')
             if bench_arr.size:
                 bench_segments.append(bench_arr)
 
@@ -478,13 +477,24 @@ def _stack_benchmark_returns(bench_returns: Sequence[np.ndarray], pop_size: int)
         if arr is None:
             continue
         arr_np = np.asarray(arr, dtype=np.float32)
-        if arr_np.ndim == 1:
-            stacked.append(np.tile(arr_np.reshape(-1, 1), (1, pop_size)))
-        elif arr_np.ndim == 2:
-            stacked.append(arr_np)
+        if arr_np.size == 0:
+            continue
+
+        flat = arr_np.reshape(-1)
+        if flat.size == 1:
+            row = np.full((1, pop_size), float(flat[0]), dtype=np.float32)
+            stacked.append(row)
+            continue
+
+        if flat.size % pop_size != 0:
+            # Skip inconsistent benchmark payloads to avoid invalid reshapes.
+            continue
+
+        reshaped = flat.reshape(-1, pop_size)
+        stacked.append(reshaped)
     if not stacked:
         return np.zeros((0, pop_size), dtype=np.float32)
-    return np.vstack(stacked).astype(np.float32, copy=False)
+    return np.concatenate(stacked, axis=0).astype(np.float32, copy=False)
 
 
 def _ensure_cpu_tensor(value) -> Optional[torch.Tensor]:
@@ -729,7 +739,7 @@ def _compute_psr_numpy(excess_returns: np.ndarray, sr_benchmark: float) -> np.nd
     n = excess_returns.shape[0]
     mask = (denom > 0) & safe_mask
     z[mask] = (sr_hat[mask] - sr_benchmark) * np.sqrt(max(n - 1, 1)) / denom[mask]
-    psr = 0.5 * (1.0 + np.erf(z / np.sqrt(2.0)))
+    psr = 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
     psr[~safe_mask] = 0.0
     return np.clip(psr, 0.0, 1.0)
 
