@@ -501,20 +501,15 @@ def _compute_cvar95(returns_stack: List[np.ndarray]) -> np.ndarray:
     combined = np.concatenate(reshaped, axis=0)
     pop_size = combined.shape[1]
     cvar = np.zeros((pop_size,), dtype=np.float32)
-    alpha = 0.95
-    tail_prob = 1.0 - alpha
     for col in range(pop_size):
         series = combined[:, col]
         if series.size == 0:
-            cvar[col] = 0.0
             continue
-        k = max(1, int(math.ceil(tail_prob * series.size)))
-        tail = np.partition(series, k - 1)[:k]
-        losses = np.minimum(tail, 0.0)
+        losses = series[series < 0.0]
         if losses.size == 0:
-            cvar[col] = 0.0
             continue
-        cvar[col] = -float(np.mean(losses))
+        # Treat negative returns as losses and report their mean magnitude.
+        cvar[col] = float(np.mean(-losses))
     return cvar
 
 
