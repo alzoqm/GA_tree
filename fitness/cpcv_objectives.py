@@ -12,11 +12,12 @@ import numpy as np
 from scipy.special import erf
 import pandas as pd
 import torch
+import math
 
 from models.constants import COL_DEPTH, COL_NODE_TYPE, NODE_TYPE_UNUSED
 from models.model import GATreePop
 from training.cpcv import CPCVScheduler, CPCVSplit
-from training.simulator import FitnessSimulator
+from training.simulator import FitnessSimulator, _compute_root_branch_balance_penalty
 from tqdm import tqdm
 
 
@@ -90,10 +91,15 @@ class CPCVObjectiveAggregator:
             batch_size=self.parallel_chunks,
             require_valid=True,
         )
+        # tqdm으로 루프 감싸기 (아래 6줄이 추가/수정된 부분입니다)
+        num_combinations = len(self.scheduler._combos)
+        num_chunks = math.ceil(num_combinations / self.parallel_chunks)
+        
+        pbar_combos = tqdm(chunk_iter, total=num_chunks, desc="  CPCV Combinations", leave=False, position=1)
 
-        for batch in chunk_iter:
+        for batch in pbar_combos:
             simulator = base_simulator if base_simulator is not None else simulator_factory()
-            for split in batch:
+            for split in tqdm(batch, leave=False, desc="    CPCV Splits"):
                 if split.train_indices.size < self.min_trades_per_split or split.test_indices.size < self.min_trades_per_split:
                     continue
 
@@ -233,7 +239,7 @@ class CPCVObjectiveAggregator:
         node_stats_accum: Optional[Dict[str, torch.Tensor]] = None
 
         
-        for segment in tqdm(segments, desc="Evaluating segments", leave=True, position=0):
+        for segment in segments:
             if len(segment) < 2:
                 continue
 
@@ -280,6 +286,7 @@ class CPCVObjectiveAggregator:
             bench_returns=combined_bench,
             state=aggregated,
             objective_cfg=objective_cfg,
+            population=population,
         )
 
         natural_metrics = _apply_trade_filters(
@@ -579,6 +586,7 @@ def _compute_objective_values(
     bench_returns: np.ndarray,
     state: Dict[str, object],
     objective_cfg: dict,
+    population: Optional[GATreePop],
 ) -> np.ndarray:
     pop_size = returns.shape[1]
     objective_names = list(objective_cfg.get('objectives', []))
@@ -680,7 +688,13 @@ def _compute_objective_values(
     annualized_return = np.zeros(pop_size, dtype=np.float64)
     if returns.shape[0] > 0:
         total_return = compound_value
-        annualized_return = np.power(1.0 + total_return, lookback / max(returns.shape[0], 1)) - 1.0
+        periods = max(returns.shape[0], 1)
+        base = 1.0 + total_return
+        annualized_return = np.full(pop_size, -1.0, dtype=np.float64)
+        valid_mask = base > 0.0
+        if np.any(valid_mask):
+            exponent = float(lookback) / float(periods)
+            annualized_return[valid_mask] = np.power(base[valid_mask], exponent) - 1.0
     calmar = np.zeros(pop_size, dtype=np.float64)
     calmar_mask = max_drawdown > 1e-8
     calmar[calmar_mask] = annualized_return[calmar_mask] / max_drawdown[calmar_mask]
@@ -702,6 +716,13 @@ def _compute_objective_values(
         'omega_ratio': omega,
         'information_ratio': information_ratio,
     }
+
+    if 'root_balance_penalty' in objective_names:
+        if population is None:
+            raise ValueError("Objective 'root_balance_penalty' requires population context.")
+        penalty_tensor = _compute_root_branch_balance_penalty(population)
+        penalty = penalty_tensor.detach().to('cpu').numpy().astype(np.float64, copy=False)
+        metric_map['root_balance_penalty'] = penalty
 
     for idx, name in enumerate(objective_names):
         metric = metric_map.get(name)

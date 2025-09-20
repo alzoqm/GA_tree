@@ -636,7 +636,7 @@ class TradingEnvironment:
         if self.atr_column_config and self.atr_ma_column_config:
             if (self.atr_column_config in available_columns and 
                 self.atr_ma_column_config in available_columns):
-                print(f"Using user-specified ATR columns: {self.atr_column_config}, {self.atr_ma_column_config}")
+                # print(f"Using user-specified ATR columns: {self.atr_column_config}, {self.atr_ma_column_config}")
                 return self.atr_column_config, self.atr_ma_column_config
             else:
                 print(f"Warning: User-specified columns not found. Falling back to auto-detection.")
