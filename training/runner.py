@@ -540,8 +540,13 @@ def _log_generation(
     wandb_config: Optional[Dict] = None,
 ) -> None:
     """Log generation statistics (console + optional wandb)."""
+    arr = np.asarray(train_objectives, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    invalid = np.isin(arr, [-1e9, 1e9]) | ~np.isfinite(arr)
+    valid_rows = ~np.any(invalid, axis=1)
+    print(f"  Valid individuals: {int(np.sum(valid_rows))}")
     generation_summary = evaluator.get_objective_summary(train_objectives)
-    print(f"  Valid individuals: {generation_summary['statistics'].get('mean_return', {}).get('valid_count', 0)}")
     for obj_name, stats in generation_summary['statistics'].items():
         if stats['valid_count'] and stats['mean'] is not None:
             direction = "↓" if stats['minimize'] else "↑"

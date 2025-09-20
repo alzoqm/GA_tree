@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.special import erf
@@ -30,6 +30,74 @@ class CPCVAggregationResult:
     raw_train_metrics: Optional[np.ndarray] = None
     raw_returns: Optional[List[np.ndarray]] = None
     node_stats: Optional[Dict[str, Union[int, torch.Tensor]]] = None
+
+
+_INVALID_SENTINEL = 1e9
+
+
+def _nanmean_axis(arr: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Standalone nanmean implementation that avoids RuntimeWarnings."""
+
+    sums = np.nansum(arr, axis=axis)
+    counts = np.sum(~np.isnan(arr), axis=axis)
+    mean = np.full_like(sums, np.nan, dtype=np.float64)
+    valid = counts > 0
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mean[valid] = sums[valid] / counts[valid]
+    return mean
+
+
+def _reduce_with_nan(values: np.ndarray, reducer: Callable[[np.ndarray, int], np.ndarray], minimize: bool) -> np.ndarray:
+    """Apply a reduction across combinations while ignoring sentinel markers."""
+
+    if values.size == 0 or values.shape[0] == 0:
+        fallback = _INVALID_SENTINEL if minimize else -_INVALID_SENTINEL
+        length = values.shape[1] if values.ndim >= 2 else 0
+        return np.full((length,), fallback, dtype=np.float32)
+
+    cleaned = values.astype(np.float64, copy=True)
+    invalid = ~np.isfinite(cleaned) | (np.abs(cleaned) >= _INVALID_SENTINEL)
+    cleaned[invalid] = np.nan
+
+    with np.errstate(all='ignore'):
+        reduced = reducer(cleaned, axis=0)
+
+    reduced = np.asarray(reduced, dtype=np.float64)
+    all_invalid = np.all(np.isnan(cleaned), axis=0)
+    fallback = _INVALID_SENTINEL if minimize else -_INVALID_SENTINEL
+
+    reduced[all_invalid] = fallback
+    reduced[np.isnan(reduced)] = fallback
+    reduced[np.isposinf(reduced)] = fallback
+    reduced[np.isneginf(reduced)] = fallback
+
+    return reduced.astype(np.float32, copy=False)
+
+
+def _compute_iqr_with_nan(values: np.ndarray) -> np.ndarray:
+    """Compute IQR across combinations, treating sentinel values as missing."""
+
+    if values.size == 0 or values.shape[0] == 0:
+        length = values.shape[1] if values.ndim >= 2 else 0
+        return np.full((length,), _INVALID_SENTINEL, dtype=np.float32)
+
+    cleaned = values.astype(np.float64, copy=True)
+    invalid = ~np.isfinite(cleaned) | (np.abs(cleaned) >= _INVALID_SENTINEL)
+    cleaned[invalid] = np.nan
+
+    with np.errstate(all='ignore'):
+        q3 = np.nanpercentile(cleaned, 75, axis=0)
+        q1 = np.nanpercentile(cleaned, 25, axis=0)
+
+    iqr = np.asarray(q3 - q1, dtype=np.float64)
+    all_invalid = np.all(np.isnan(cleaned), axis=0)
+
+    iqr[all_invalid] = _INVALID_SENTINEL
+    iqr[np.isnan(iqr)] = _INVALID_SENTINEL
+    iqr[np.isposinf(iqr)] = _INVALID_SENTINEL
+    iqr[np.isneginf(iqr)] = _INVALID_SENTINEL
+
+    return iqr.astype(np.float32, copy=False)
 
 
 class CPCVObjectiveAggregator:
@@ -321,27 +389,44 @@ class CPCVObjectiveAggregator:
 
         if 'mean_return' in name_to_idx:
             idx = name_to_idx['mean_return']
-            result['median_oos_return'] = np.median(oos_stack[:, :, idx], axis=0)
+            result['median_oos_return'] = _reduce_with_nan(
+                oos_stack[:, :, idx],
+                lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                minimize=False,
+            )
         if 'sharpe_ratio' in name_to_idx:
             idx = name_to_idx['sharpe_ratio']
-            result['median_oos_sharpe'] = np.median(oos_stack[:, :, idx], axis=0)
-            q3 = np.percentile(oos_stack[:, :, idx], 75, axis=0)
-            q1 = np.percentile(oos_stack[:, :, idx], 25, axis=0)
-            result['iqr_oos_sharpe'] = q3 - q1
+            shard = oos_stack[:, :, idx]
+            result['median_oos_sharpe'] = _reduce_with_nan(
+                shard,
+                lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                minimize=False,
+            )
+            result['iqr_oos_sharpe'] = _compute_iqr_with_nan(shard)
         if 'max_drawdown' in name_to_idx:
             idx = name_to_idx['max_drawdown']
-            q3 = np.percentile(oos_stack[:, :, idx], 75, axis=0)
-            q1 = np.percentile(oos_stack[:, :, idx], 25, axis=0)
-            result['iqr_oos_drawdown'] = q3 - q1
+            result['iqr_oos_drawdown'] = _compute_iqr_with_nan(oos_stack[:, :, idx])
         if 'psr' in name_to_idx:
             idx = name_to_idx['psr']
-            result['median_oos_psr'] = np.median(oos_stack[:, :, idx], axis=0)
+            result['median_oos_psr'] = _reduce_with_nan(
+                oos_stack[:, :, idx],
+                lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                minimize=False,
+            )
         if 'profit_factor' in name_to_idx:
             idx = name_to_idx['profit_factor']
-            result['median_oos_profit_factor'] = np.median(oos_stack[:, :, idx], axis=0)
+            result['median_oos_profit_factor'] = _reduce_with_nan(
+                oos_stack[:, :, idx],
+                lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                minimize=False,
+            )
         if 'turnover' in name_to_idx:
             idx = name_to_idx['turnover']
-            result['oos_turnover'] = np.mean(oos_stack[:, :, idx], axis=0)
+            result['oos_turnover'] = _reduce_with_nan(
+                oos_stack[:, :, idx],
+                lambda arr, axis=0: _nanmean_axis(arr, axis=axis),
+                minimize=True,
+            )
 
         result['cvar95_oos_return'] = _compute_cvar95(returns_stack)
 
@@ -354,16 +439,32 @@ class CPCVObjectiveAggregator:
         if train_stack.size > 0:
             if 'mean_return' in train_name_to_idx:
                 idx = train_name_to_idx['mean_return']
-                result['is_mean_return'] = np.median(train_stack[:, :, idx], axis=0)
+                result['is_mean_return'] = _reduce_with_nan(
+                    train_stack[:, :, idx],
+                    lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                    minimize=False,
+                )
             if 'max_drawdown' in train_name_to_idx:
                 idx = train_name_to_idx['max_drawdown']
-                result['is_max_drawdown'] = np.median(train_stack[:, :, idx], axis=0)
+                result['is_max_drawdown'] = _reduce_with_nan(
+                    train_stack[:, :, idx],
+                    lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                    minimize=True,
+                )
             if 'psr' in train_name_to_idx:
                 idx = train_name_to_idx['psr']
-                result['is_psr'] = np.median(train_stack[:, :, idx], axis=0)
+                result['is_psr'] = _reduce_with_nan(
+                    train_stack[:, :, idx],
+                    lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                    minimize=False,
+                )
             if 'root_balance_penalty' in train_name_to_idx:
                 idx = train_name_to_idx['root_balance_penalty']
-                result['is_root_balance_penalty'] = np.median(train_stack[:, :, idx], axis=0)
+                result['is_root_balance_penalty'] = _reduce_with_nan(
+                    train_stack[:, :, idx],
+                    lambda arr, axis=0: np.nanmedian(arr, axis=axis),
+                    minimize=True,
+                )
 
         return result
 
