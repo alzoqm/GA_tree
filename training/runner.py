@@ -270,6 +270,9 @@ class GenerationRunner:
         for gen_idx in tqdm(range(start_gen, gen_loop), desc="Generations"):
             print(f'Generation {gen_idx}:')
 
+            if isinstance(self.evaluation_config, dict):
+                self.evaluation_config['current_generation'] = gen_idx
+
             # Build adjacency once to catch early structural errors
             adj_offsets, adj_indices = build_adjacency_list_cuda(population, strict_overflow=False)
             if adj_offsets is None:

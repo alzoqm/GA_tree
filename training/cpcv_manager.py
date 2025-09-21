@@ -195,6 +195,7 @@ class CPCVManager:
             aggregation_eval_cfg['collect_node_stats'] = True
         else:
             aggregation_eval_cfg['collect_node_stats'] = False
+        aggregation_eval_cfg['current_generation'] = 'aggregation'
 
         aggregator = CPCVObjectiveAggregator(
             scheduler=scheduler,
