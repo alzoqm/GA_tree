@@ -112,9 +112,15 @@ class GenerationSimulationCache:
 
     @staticmethod
     def _count_adjacent(indices: Sequence[int], start: int, step: int) -> int:
-        if not indices:
-            return 0
-        index_set = set(int(i) for i in indices)
+        if isinstance(indices, np.ndarray):
+            if indices.size == 0:
+                return 0
+            index_set = set(int(i) for i in indices.ravel().tolist())
+        else:
+            seq = list(indices)
+            if len(seq) == 0:
+                return 0
+            index_set = set(int(i) for i in seq)
         count = 0
         cursor = start
         while cursor in index_set:
