@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-import math
+import logging
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -12,11 +13,11 @@ import numpy as np
 from scipy.special import erf
 import pandas as pd
 import torch
-import math
 
 from models.constants import COL_DEPTH, COL_NODE_TYPE, NODE_TYPE_UNUSED
 from models.model import GATreePop
 from training.cpcv import CPCVScheduler, CPCVSplit
+from training.generation_cache import GenerationSimulationCache
 from training.simulator import FitnessSimulator, _compute_root_branch_balance_penalty
 from tqdm import tqdm
 
@@ -33,6 +34,43 @@ class CPCVAggregationResult:
 
 
 _INVALID_SENTINEL = 1e9
+
+
+def _hash_population_snapshot(population: GATreePop) -> str:
+    tensor = population.population_tensor
+    if tensor.is_cuda:
+        tensor = tensor.detach().cpu()
+    else:
+        tensor = tensor.detach()
+    hasher = hashlib.blake2b(digest_size=20)
+    hasher.update(str(population.pop_size).encode('utf-8'))
+    hasher.update(str(population.max_nodes).encode('utf-8'))
+    hasher.update(str(population.max_depth).encode('utf-8'))
+    if tensor.numel() == 0:
+        hasher.update(b'empty')
+        return hasher.hexdigest()
+    tensor_cpu = tensor.to(dtype=torch.float32, device='cpu')
+    hasher.update(tensor_cpu.numpy().tobytes())
+    return hasher.hexdigest()
+
+
+def _hash_feature_signature(features: Sequence[str]) -> str:
+    hasher = hashlib.blake2b(digest_size=20)
+    hasher.update(str(len(features)).encode('utf-8'))
+    for name in features:
+        hasher.update(str(name).encode('utf-8'))
+    return hasher.hexdigest()
+
+
+def _resolve_generation_tag(evaluation_config: dict) -> Optional[str]:
+    if not isinstance(evaluation_config, dict):
+        return None
+    for key in ('generation_idx', 'generation', 'current_generation', 'gen_idx', 'current_gen'):
+        value = evaluation_config.get(key)
+        if value is None:
+            continue
+        return str(value)
+    return None
 
 
 def _nanmean_axis(arr: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -130,7 +168,10 @@ class CPCVObjectiveAggregator:
         chunks = parallel_chunks if parallel_chunks is not None else default_chunks
         self.parallel_chunks = max(1, int(chunks))
         self.reuse_population = bool(reuse_population)
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        resolved_cache_dir: Optional[str] = cache_dir
+        if resolved_cache_dir is None and isinstance(self.evaluation_config, dict):
+            resolved_cache_dir = self.evaluation_config.get('evaluation_cache_dir')
+        self.cache_dir = Path(resolved_cache_dir) if resolved_cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._frame_cache: Dict[int, Dict[str, List[pd.DataFrame]]] = {}
@@ -145,8 +186,127 @@ class CPCVObjectiveAggregator:
         all_feature_names: Sequence[str],
     ) -> CPCVAggregationResult:
         pop_size = population.pop_size
-        simulator_factory = FitnessSimulator
-        base_simulator = simulator_factory() if self.reuse_population else None
+        if pop_size <= 0:
+            empty = np.zeros((0, len(self.objective_names)), dtype=np.float32)
+            return CPCVAggregationResult(empty, summary={}, combo_ids=[])
+
+        population_hash = _hash_population_snapshot(population)
+        feature_hash = _hash_feature_signature(all_feature_names)
+        generation_tag = _resolve_generation_tag(self.evaluation_config)
+
+        cache = GenerationSimulationCache(
+            population_hash=population_hash,
+            feature_hash=feature_hash,
+            generation_id=generation_tag,
+            cache_dir=self.cache_dir,
+        )
+
+        plans = cache.prepare(self.scheduler, min_bars=self.min_trades_per_split)
+        if not plans:
+            empty = np.full((pop_size, len(self.objective_names)), 1e9, dtype=np.float32)
+            return CPCVAggregationResult(empty, summary={}, combo_ids=[])
+
+        train_eval_cfg = _build_eval_cfg(self.evaluation_config, self.is_objectives)
+        oos_eval_cfg = _build_eval_cfg(self.evaluation_config, self.oos_objectives)
+
+        simulator = FitnessSimulator()
+        feature_list = list(all_feature_names)
+
+        segment_records = list(cache.unique_segments)
+        total_segment_requests = sum(len(plan.train_segments) + len(plan.test_segments) for plan in plans)
+        segments_simulated = 0
+        if segment_records:
+            pbar_segments = tqdm(
+                segment_records,
+                total=len(segment_records),
+                desc="  CPCV Segments",
+                leave=False,
+                position=1,
+            )
+        else:
+            pbar_segments = []
+
+        for record in pbar_segments:
+            descriptor = record.descriptor
+            if record.loaded:
+                continue
+            if record.file_path is not None and record.file_path.exists():
+                continue
+            segment_df = data.iloc[descriptor.start:descriptor.stop].copy()
+            if len(segment_df) < 2:
+                logging.debug(
+                    "Skipping segment %s (%s) due to insufficient length (%s bars).",
+                    descriptor.key.digest(),
+                    descriptor.kind,
+                    len(segment_df),
+                )
+                continue
+
+            eval_cfg = train_eval_cfg if descriptor.kind == 'train' else oos_eval_cfg
+            try:
+                sim_result = simulator.simulate(
+                    population=population,
+                    data=segment_df,
+                    all_feature_names=feature_list,
+                    start_data_cnt=0,
+                    stop_data_cnt=len(segment_df),
+                    device=self.device,
+                    evaluation_config=eval_cfg,
+                    return_returns=True,
+                    return_env_state=True,
+                    return_node_stats=self.want_node_stats,
+                )
+            except Exception as exc:
+                logging.warning(
+                    "Failed to simulate segment %s (%s-%s): %s",
+                    descriptor.key.digest(),
+                    descriptor.start,
+                    descriptor.stop,
+                    exc,
+                )
+                continue
+
+            if not isinstance(sim_result, tuple):
+                logging.warning(
+                    "Unexpected simulator payload for segment %s; got %s",
+                    descriptor.key.digest(),
+                    type(sim_result).__name__,
+                )
+                continue
+
+            if self.want_node_stats:
+                if len(sim_result) < 4:
+                    logging.warning(
+                        "Simulator payload missing node stats for segment %s",
+                        descriptor.key.digest(),
+                    )
+                    continue
+                _, returns_arr, node_stats, env_state = sim_result
+            else:
+                if len(sim_result) < 3:
+                    logging.warning(
+                        "Simulator payload missing env_state for segment %s",
+                        descriptor.key.digest(),
+                    )
+                    continue
+                _, returns_arr, env_state = sim_result
+                node_stats = None
+
+            if not isinstance(env_state, dict):
+                logging.warning(
+                    "Segment %s produced invalid env_state type %s",
+                    descriptor.key.digest(),
+                    type(env_state).__name__,
+                )
+                continue
+
+            segments_simulated += 1
+            cache.register_payload(
+                descriptor.key,
+                np.asarray(returns_arr, dtype=np.float32),
+                env_state,
+                node_stats,
+            )
 
         train_metrics_nat: List[np.ndarray] = []
         oos_metrics_nat: List[np.ndarray] = []
@@ -155,37 +315,32 @@ class CPCVObjectiveAggregator:
         combo_ids: List[int] = []
         node_stats_global: Optional[Dict[str, torch.Tensor]] = None
 
-        chunk_iter = self.scheduler.iter_split_batches(
-            batch_size=self.parallel_chunks,
-            require_valid=True,
-        )
-        # tqdm으로 루프 감싸기 (아래 6줄이 추가/수정된 부분입니다)
-        num_combinations = len(self.scheduler._combos)
-        num_chunks = math.ceil(num_combinations / self.parallel_chunks)
-        
-        pbar_combos = tqdm(chunk_iter, total=num_chunks, desc="  CPCV Combinations", leave=False, position=1)
+        if plans:
+            pbar_combos = tqdm(
+                plans,
+                total=len(plans),
+                desc="  CPCV Combinations",
+                leave=False,
+                position=2,
+            )
+        else:
+            pbar_combos = []
 
-        for batch in pbar_combos:
-            simulator = base_simulator if base_simulator is not None else simulator_factory()
-            for split in tqdm(batch, leave=False, desc="    CPCV Splits"):
-                if split.train_indices.size < self.min_trades_per_split or split.test_indices.size < self.min_trades_per_split:
-                    continue
+        for plan in pbar_combos:
+            train_payloads: List[Tuple[np.ndarray, Dict[str, object], Optional[Dict[str, object]]]] = []
+            test_payloads: List[Tuple[np.ndarray, Dict[str, object], Optional[Dict[str, object]]]] = []
+            try:
+                for descriptor in plan.train_segments:
+                    payload = cache.get_payload(descriptor.key)
+                    train_payloads.append(payload)
+                for descriptor in plan.test_segments:
+                    payload = cache.get_payload(descriptor.key)
+                    test_payloads.append(payload)
 
-                segments = self._get_split_segments(split, data)
-                if not segments['test']:
-                    continue
-
-                train_eval_cfg = _build_eval_cfg(self.evaluation_config, self.is_objectives)
-                oos_eval_cfg = _build_eval_cfg(self.evaluation_config, self.oos_objectives)
-
-                train_result = self._evaluate_segment_group(
-                    simulator=simulator,
+                train_result = self._evaluate_cached_segment_group(
                     population=population,
-                    segments=segments['train'],
-                    eval_cfg=train_eval_cfg,
+                    payloads=train_payloads,
                     objective_cfg=self.is_objectives,
-                    all_feature_names=all_feature_names,
-                    min_trades=self.min_trades_per_split,
                     collect_returns=False,
                     collect_node_stats=self.want_node_stats,
                 )
@@ -196,14 +351,10 @@ class CPCVObjectiveAggregator:
                 if self.want_node_stats:
                     node_stats_global = _merge_node_stats(node_stats_global, train_node_stats)
 
-                test_result = self._evaluate_segment_group(
-                    simulator=simulator,
+                test_result = self._evaluate_cached_segment_group(
                     population=population,
-                    segments=segments['test'],
-                    eval_cfg=oos_eval_cfg,
+                    payloads=test_payloads,
                     objective_cfg=self.oos_objectives,
-                    all_feature_names=all_feature_names,
-                    min_trades=self.min_trades_per_split,
                     collect_returns=True,
                     collect_node_stats=self.want_node_stats,
                 )
@@ -216,11 +367,19 @@ class CPCVObjectiveAggregator:
                 oos_returns.append(combined_returns)
                 if self.want_node_stats:
                     node_stats_global = _merge_node_stats(node_stats_global, test_node_stats)
-                combo_ids.append(split.combo_id)
-
-            if not self.reuse_population:
-                del simulator
-                base_simulator = None
+                combo_ids.append(plan.combo_id)
+            except Exception as exc:
+                logging.debug(
+                    "Skipping combination %s due to cache failure: %s",
+                    plan.combo_id,
+                    exc,
+                )
+                continue
+            finally:
+                for descriptor in plan.train_segments:
+                    cache.release(descriptor.key)
+                for descriptor in plan.test_segments:
+                    cache.release(descriptor.key)
 
         if not oos_metrics_nat:
             empty = np.full((pop_size, len(self.objective_names)), 1e9, dtype=np.float32)
@@ -228,7 +387,11 @@ class CPCVObjectiveAggregator:
 
         oos_stack = np.stack(oos_metrics_nat, axis=0)
         oos_stack_min = np.stack(oos_metrics_min, axis=0)
-        train_stack = np.stack(train_metrics_nat, axis=0) if train_metrics_nat else np.zeros((0, pop_size, 0), dtype=np.float32)
+        train_stack = (
+            np.stack(train_metrics_nat, axis=0)
+            if train_metrics_nat
+            else np.zeros((0, pop_size, 0), dtype=np.float32)
+        )
         returns_stack = oos_returns
 
         summary = self._aggregate_metrics(oos_stack, train_stack, returns_stack, population)
@@ -238,6 +401,22 @@ class CPCVObjectiveAggregator:
         raw_oos = oos_stack_min if oos_stack_min.size else None
         raw_returns = returns_stack if returns_stack else None
         finalized_node_stats = _finalize_node_stats(node_stats_global) if self.want_node_stats else None
+
+        unique_segments = len(segment_records)
+        if total_segment_requests > 0:
+            simulated_pct = (segments_simulated / float(total_segment_requests)) * 100.0
+            savings_pct = max(0.0, 100.0 - simulated_pct)
+            generation_label = generation_tag or 'n/a'
+            logging.info(
+                "CPCV cache [gen=%s]: simulated %d/%d segments (saved %.1f%%; unique %d)",
+                generation_label,
+                segments_simulated,
+                total_segment_requests,
+                savings_pct,
+                unique_segments,
+            )
+        else:
+            logging.info("CPCV cache: no eligible segments found for evaluation")
 
         return CPCVAggregationResult(
             objectives=objective_matrix,
@@ -284,6 +463,23 @@ class CPCVObjectiveAggregator:
             'train': [segment.copy(deep=False) for segment in train_segments],
             'test': [segment.copy(deep=False) for segment in test_segments],
         }
+
+    def _evaluate_cached_segment_group(
+        self,
+        population: GATreePop,
+        payloads: List[Tuple[np.ndarray, Dict[str, object], Optional[Dict[str, object]]]],
+        objective_cfg: dict,
+        collect_returns: bool,
+        collect_node_stats: bool,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, object], Optional[Dict[str, torch.Tensor]]]]:
+        return _finalize_segment_payloads(
+            payloads,
+            population=population,
+            objective_cfg=objective_cfg,
+            min_trades=self.min_trades_per_split,
+            collect_returns=collect_returns,
+            collect_node_stats=collect_node_stats,
+        )
 
     def _evaluate_segment_group(
         self,
@@ -664,6 +860,79 @@ def _combine_returns(returns_list: Sequence[np.ndarray], pop_size: int) -> np.nd
     if not valid:
         return np.zeros((0, pop_size), dtype=np.float32)
     return np.concatenate(valid, axis=0)
+
+
+def _finalize_segment_payloads(
+    payloads: Sequence[Tuple[np.ndarray, Dict[str, object], Optional[Dict[str, object]]]],
+    *,
+    population: GATreePop,
+    objective_cfg: dict,
+    min_trades: int,
+    collect_returns: bool,
+    collect_node_stats: bool,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, object], Optional[Dict[str, torch.Tensor]]]]:
+    if not payloads:
+        return None
+
+    pop_size = population.pop_size
+    aggregated = _init_env_accumulator(pop_size)
+    returns_segments: List[np.ndarray] = []
+    bench_segments: List[np.ndarray] = []
+    node_stats_accum: Optional[Dict[str, torch.Tensor]] = None
+
+    for returns, env_state, node_stats in payloads:
+        if not isinstance(env_state, dict):
+            continue
+
+        _accumulate_env_state(aggregated, env_state)
+
+        bench_arr = _stack_benchmark_returns(env_state.get('bench_returns', []), pop_size)
+        if bench_arr.size:
+            bench_segments.append(bench_arr)
+
+        returns_np = np.asarray(returns, dtype=np.float32)
+        if returns_np.ndim == 1:
+            if returns_np.size == pop_size:
+                returns_np = returns_np.reshape(1, pop_size)
+            else:
+                returns_np = returns_np.reshape(-1, pop_size)
+        if returns_np.size:
+            returns_segments.append(returns_np)
+
+        if collect_node_stats:
+            node_stats_accum = _merge_node_stats(node_stats_accum, node_stats)
+
+    combined_returns = _combine_returns(returns_segments, pop_size)
+    if combined_returns.size == 0:
+        return None
+
+    combined_bench = _combine_returns(bench_segments, pop_size)
+
+    natural_metrics = _compute_objective_values(
+        returns=combined_returns,
+        bench_returns=combined_bench,
+        state=aggregated,
+        objective_cfg=objective_cfg,
+        population=population,
+    )
+
+    natural_metrics = _apply_trade_filters(
+        natural_metrics,
+        aggregated['trade_total_count'],
+        min_trades,
+        objective_cfg,
+    )
+
+    minimization_metrics = _to_minimization_space(natural_metrics, objective_cfg)
+    returns_payload = combined_returns if collect_returns else np.zeros((0, pop_size), dtype=np.float32)
+
+    return (
+        natural_metrics.astype(np.float32, copy=False),
+        minimization_metrics.astype(np.float32, copy=False),
+        returns_payload.astype(np.float32, copy=False),
+        aggregated,
+        node_stats_accum,
+    )
 
 
 def _to_minimization_space(values: np.ndarray, objectives: dict) -> np.ndarray:
