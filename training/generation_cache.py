@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import shutil
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +111,34 @@ class GenerationSimulationCache:
             self.segment_dir.mkdir(parents=True, exist_ok=True)
             self.manifest_path = self.base_dir / "manifest.json"
             self._manifest = self._load_manifest()
+            self._cleanup_stale_generations()
+
+    def _cleanup_stale_generations(self) -> None:
+        """Remove cache directories older than the previous generation."""
+        if self.cache_dir is None:
+            return
+        try:
+            current_idx = int(self.generation_id)
+        except (TypeError, ValueError):
+            return
+        keep_cutoff = current_idx - 1
+        prefix = 'generation_'
+        for entry in self.cache_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if not name.startswith(prefix):
+                continue
+            suffix = name[len(prefix):]
+            try:
+                gen_idx = int(suffix)
+            except ValueError:
+                continue
+            if gen_idx < keep_cutoff:
+                try:
+                    shutil.rmtree(entry)
+                except Exception as exc:
+                    logging.warning("Failed to remove stale CPCV cache directory %s: %s", entry, exc)
 
     @staticmethod
     def _count_adjacent(indices: Sequence[int], start: int, step: int) -> int:

@@ -73,6 +73,8 @@ class CPCVManager:
         eval_cfg['min_trades_per_split'] = int(self.cpcv_cfg.get('min_trades_per_split', 32))
         eval_cfg['robustness_filter'] = self.robustness_cfg
         eval_cfg['cpcv_objectives'] = cpcv_objectives
+        if 'evaluation_cache_dir' not in eval_cfg and self.cpcv_cfg.get('evaluation_cache_dir'):
+            eval_cfg['evaluation_cache_dir'] = self.cpcv_cfg.get('evaluation_cache_dir')
         return eval_cfg
 
     def run(

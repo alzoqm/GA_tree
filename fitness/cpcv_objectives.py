@@ -168,7 +168,10 @@ class CPCVObjectiveAggregator:
         chunks = parallel_chunks if parallel_chunks is not None else default_chunks
         self.parallel_chunks = max(1, int(chunks))
         self.reuse_population = bool(reuse_population)
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        resolved_cache_dir: Optional[str] = cache_dir
+        if resolved_cache_dir is None and isinstance(self.evaluation_config, dict):
+            resolved_cache_dir = self.evaluation_config.get('evaluation_cache_dir')
+        self.cache_dir = Path(resolved_cache_dir) if resolved_cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._frame_cache: Dict[int, Dict[str, List[pd.DataFrame]]] = {}
