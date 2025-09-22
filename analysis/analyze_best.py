@@ -41,7 +41,12 @@ def ensure_dir(p: str):
 
 def main():
     ap = argparse.ArgumentParser(description='Analyze best GA_tree models')
-    ap.add_argument('-c', '--config', default='experiment_config.yaml', help='Path to experiment config')
+    ap.add_argument(
+        '-c',
+        '--config',
+        default='Config/experiment_config.yaml',
+        help='Path to the experiment configuration YAML file',
+    )
     ap.add_argument('--outdir', default=None, help='Override results output dir')
     ap.add_argument('--topk', type=int, default=None, help='Limit number of individuals to analyze')
     ap.add_argument('--quantiles', type=int, default=10, help='Quantile bins for response curves')

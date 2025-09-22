@@ -487,7 +487,7 @@ if __name__ == '__main__':
         f.write(yaml_content)
 
     # [신규] 테스트를 위한 가상의 classification_config 딕셔너리 생성
-    # 실제 실행 시에는 main.py에서 experiment_config.yaml로부터 로드됩니다.
+    # 실제 실행 시에는 main.py에서 Config/experiment_config.yaml로부터 로드됩니다.
     mock_classification_config = {
         'feature_num': {
             'close_change_pct': (-10, 10),

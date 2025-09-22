@@ -30,7 +30,7 @@ GA Tree 학습/평가를 위한 데이터 수집과 피처 엔지니어링 유�
   - `run_feature_generation_from_yaml(df, timestamp_col, target_timeframes, yaml_config_path, classification_config)`:
     - 타임프레임별 피처 정의를 YAML에서 읽어 위의 생성기 호출 후, `(final_dataframe, model_config)`을 반환(모델 초기화에 바로 사용 가능).
 
-- `feature_config.yaml`: 예시 YAML 구성. 각 타임프레임(`5m`, `15m`, `1h`, `4h`, `1d` 등) 키 아래에 호출할 피처 함수명과 파라미터를 명시. 함수명은 `ta_lib_feature_generator.py`의 함수와 매핑됩니다.
+- `Config/feature_config.yaml`: 예시 YAML 구성. 각 타임프레임(`5m`, `15m`, `1h`, `4h`, `1d` 등) 키 아래에 호출할 피처 함수명과 파라미터를 명시. 함수명은 `ta_lib_feature_generator.py`의 함수와 매핑됩니다.
 
 ## 참고 사항
 
@@ -80,11 +80,11 @@ import yaml
 from data.merge_dataset import run_feature_generation_from_yaml
 
 # 예시 입력 데이터프레임: merged (위에서 생성)
-yaml_config_path = 'data/feature_config.yaml'
+yaml_config_path = 'Config/feature_config.yaml'
 
-# experiment_config.yaml 등에서 불러온 분류 템플릿(dict)
+# Config/experiment_config.yaml 등에서 불러온 분류 템플릿(dict)
 # 실제 키 구조는 프로젝트 설정에 맞게 조정하세요.
-with open('experiment_config.yaml', 'r', encoding='utf-8') as f:
+with open('Config/experiment_config.yaml', 'r', encoding='utf-8') as f:
     exp_cfg = yaml.safe_load(f)
 classification_config = exp_cfg.get('model', {}).get('classification', {
     'feature_num': {}, 'feature_comparison': [], 'feature_bool': []

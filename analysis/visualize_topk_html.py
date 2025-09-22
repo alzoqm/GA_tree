@@ -42,7 +42,7 @@ Assumptions and fallbacks:
 
 Usage:
   python tools/visualize_topk_html.py --k 10 \
-      --exp-config experiment_config.yaml \
+      --exp-config Config/experiment_config.yaml \
       --output-dir results/exp_default
 
 This writes:
@@ -267,7 +267,12 @@ def write_index_html(
 def main():
     ap = argparse.ArgumentParser(description="Visualize Top‑K models from the latest generation as HTML")
     ap.add_argument("--k", type=int, default=10, help="Number of top models to render")
-    ap.add_argument("--exp-config", type=str, default="experiment_config.yaml", help="Path to experiment_config.yaml")
+    ap.add_argument(
+        "--exp-config",
+        type=str,
+        default="Config/experiment_config.yaml",
+        help="Path to the experiment configuration YAML file",
+    )
     ap.add_argument("--output-dir", type=str, default='/root/workspace/GA_tree/results', help="Override output_dir; defaults to config.environment.output_dir")
     ap.add_argument("--window", type=int, default=0, help="Window index to inspect (default: 0)")
     args = ap.parse_args()
