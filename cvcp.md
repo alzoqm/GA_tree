@@ -9,7 +9,7 @@
 ## 2. High-Level Architecture
 ```
 ┌──────────────────────────────┐
-│  Config/experiment_config.yaml      │
+│  experiment_config.yaml      │
 │  training_strategy.mode = X  │
 └─────────────┬────────────────┘
               │
@@ -44,7 +44,7 @@ Lockbox OOT validation & ranking
 `StrategyOrchestrator` is a thin wrapper invoked from `main.py`. It reads `training_strategy.mode` and delegates to the existing WFO pipeline or the new CPCV pipeline. No code is removed; WFO remains untouched.
 
 ## 3. Configuration Additions
-Append to `Config/experiment_config.yaml` (names chosen to avoid collisions):
+Append to `experiment_config.yaml` (names chosen to avoid collisions):
 ```yaml
 training_strategy:
   mode: "cpcv"          # "wfo" (default, backward compatible) | "cpcv"
