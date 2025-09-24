@@ -1,3 +1,4 @@
+# /selection/selector.py
 """Representative feature selection and collinearity checks (Stage 1)."""
 
 from __future__ import annotations

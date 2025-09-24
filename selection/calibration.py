@@ -1,3 +1,4 @@
+# /selection/calibration.py
 """Range calibration and boolean handling."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# /selection/calibration.py
 """Stage 1 screening utilities (rank tests + FDR)."""
 
 from __future__ import annotations
@@ -5,10 +6,11 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from math import erf, sqrt
-from typing import Dict, Iterable, List, Mapping, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from numpy.random import Generator, default_rng
 
 from .splits import CrossFitSplit
 
@@ -17,6 +19,7 @@ from .splits import CrossFitSplit
 class ScreeningDetail:
     fold_id: str
     feature: str
+    method: str
     effect: float
     pvalue: float
 
@@ -27,6 +30,7 @@ class ScreeningResult:
     effects: Dict[str, float]
     details: List[ScreeningDetail]
     passing_features: List[str]
+    methods: List[str]
 
 
 def _spearman_corr(x: np.ndarray, y: np.ndarray) -> float:
@@ -66,6 +70,171 @@ def _cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
             i += 1
             j += 1
     return float((greater - lesser) / (nx * ny))
+
+
+def _rbf_kernel(values: np.ndarray, bandwidth: float | str | None) -> np.ndarray:
+    vector = np.asarray(values, dtype=float).reshape(-1, 1)
+    if vector.size == 0:
+        return np.empty((0, 0), dtype=float)
+    diffs = vector - vector.T
+    sq_dists = diffs * diffs
+    if bandwidth is None or bandwidth == "median":
+        # Median heuristic on squared distances excluding zeros
+        flattened = sq_dists[np.triu_indices_from(sq_dists, k=1)]
+        positive = flattened[flattened > 0]
+        if positive.size:
+            sigma_sq = float(np.median(positive))
+        else:
+            sigma_sq = float(np.var(vector))
+        if not np.isfinite(sigma_sq) or sigma_sq <= 1e-12:
+            sigma_sq = 1.0
+    else:
+        sigma_sq = float(bandwidth)
+        if sigma_sq <= 1e-12:
+            sigma_sq = 1.0
+    gamma = 1.0 / (2.0 * sigma_sq)
+    return np.exp(-gamma * sq_dists)
+
+
+def _center_kernel(kernel: np.ndarray) -> np.ndarray:
+    if kernel.size == 0:
+        return kernel
+    n = kernel.shape[0]
+    ones = np.ones((n, 1), dtype=float)
+    H = np.eye(n) - ones @ ones.T / n
+    return H @ kernel @ H
+
+
+def _hsic_statistic(x: np.ndarray, y: np.ndarray, cfg: Mapping[str, object]) -> float:
+    if x.size == 0 or y.size == 0:
+        return 0.0
+    x_kernel = _rbf_kernel(x, cfg.get("bandwidth", "median"))
+    y_bandwidth = cfg.get("target_bandwidth")
+    if y_bandwidth is None:
+        y_bandwidth = cfg.get("bandwidth", "median")
+    y_kernel = _rbf_kernel(y, y_bandwidth)
+    Kc = _center_kernel(x_kernel)
+    Lc = _center_kernel(y_kernel)
+    n = float(x.size)
+    if n <= 1:
+        return 0.0
+    value = np.sum(Kc * Lc) / ((n - 1.0) ** 2)
+    return float(max(value, 0.0))
+
+
+def _block_permutation_indices(
+    length: int,
+    block_size: int,
+    rng: Generator,
+    *,
+    method: str,
+) -> np.ndarray:
+    if length <= 1:
+        return np.arange(length)
+    block_size = max(1, min(int(block_size), length))
+    method = method.lower()
+    if method not in {"block", "wild", "permutation"}:
+        method = "block"
+    if method == "permutation" or block_size == 1 or block_size >= length:
+        return rng.permutation(length)
+    # Build contiguous blocks then permute block order
+    blocks = [
+        np.arange(start, min(start + block_size, length))
+        for start in range(0, length, block_size)
+    ]
+    order = rng.permutation(len(blocks))
+    permuted_indices = np.concatenate([blocks[idx] for idx in order])
+    if permuted_indices.size < length:
+        remainder = np.setdiff1d(np.arange(length), permuted_indices, assume_unique=True)
+        permuted_indices = np.concatenate([permuted_indices, remainder])
+    return permuted_indices[:length]
+
+
+def _hsic_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: Mapping[str, object],
+    rng: Generator,
+) -> Tuple[float, float]:
+    if x.size < 8 or y.size < 8:
+        return 0.0, 1.0
+    if np.std(x) <= 1e-12 or np.std(y) <= 1e-12:
+        return 0.0, 1.0
+    statistic = _hsic_statistic(x, y, cfg)
+    bootstrap_cfg = cfg.get("bootstrap", {}) if isinstance(cfg, Mapping) else {}
+    samples = int(bootstrap_cfg.get("samples", 64))
+    if samples <= 0:
+        return statistic, 1.0
+    block_size = int(bootstrap_cfg.get("block_size", max(8, x.size // 8 or 1)))
+    method = str(bootstrap_cfg.get("method", "block")).lower()
+    null_stats = np.empty(samples, dtype=float)
+    for idx in range(samples):
+        resample_rng = default_rng(rng.integers(2**32))
+        permuted_idx = _block_permutation_indices(x.size, block_size, resample_rng, method=method)
+        permuted_y = y[permuted_idx]
+        null_stats[idx] = _hsic_statistic(x, permuted_y, cfg)
+    exceed = float(np.sum(null_stats >= statistic))
+    pvalue = (exceed + 1.0) / (samples + 1.0)
+    return statistic, float(max(0.0, min(1.0, pvalue)))
+
+
+def _distance_matrix(values: np.ndarray) -> np.ndarray:
+    vector = np.asarray(values, dtype=float).reshape(-1, 1)
+    return np.abs(vector - vector.T)
+
+
+def _center_distance_matrix(matrix: np.ndarray) -> np.ndarray:
+    if matrix.size == 0:
+        return matrix
+    row_mean = matrix.mean(axis=1, keepdims=True)
+    col_mean = matrix.mean(axis=0, keepdims=True)
+    total_mean = matrix.mean()
+    return matrix - row_mean - col_mean + total_mean
+
+
+def _distance_correlation_statistic(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size == 0 or y.size == 0:
+        return 0.0
+    A = _center_distance_matrix(_distance_matrix(x))
+    B = _center_distance_matrix(_distance_matrix(y))
+    n = float(x.size)
+    if n <= 0:
+        return 0.0
+    cov = np.sum(A * B) / (n * n)
+    var_x = np.sum(A * A) / (n * n)
+    var_y = np.sum(B * B) / (n * n)
+    if var_x <= 1e-12 or var_y <= 1e-12:
+        return 0.0
+    stat = cov / np.sqrt(var_x * var_y)
+    return float(max(0.0, min(1.0, stat)))
+
+
+def _distance_correlation_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: Mapping[str, object],
+    rng: Generator,
+) -> Tuple[float, float]:
+    if x.size < 8 or y.size < 8:
+        return 0.0, 1.0
+    if np.std(x) <= 1e-12 or np.std(y) <= 1e-12:
+        return 0.0, 1.0
+    statistic = _distance_correlation_statistic(x, y)
+    perm_cfg = cfg.get("permutation", {}) if isinstance(cfg, Mapping) else {}
+    samples = int(cfg.get("permutations", perm_cfg.get("samples", 64)))
+    if samples <= 0:
+        return statistic, 1.0
+    block_size = int(cfg.get("block_size", perm_cfg.get("block_size", max(8, x.size // 8 or 1))))
+    method = str(cfg.get("method", perm_cfg.get("method", "block"))).lower()
+    null_stats = np.empty(samples, dtype=float)
+    for idx in range(samples):
+        resample_rng = default_rng(rng.integers(2**32))
+        permuted_idx = _block_permutation_indices(x.size, block_size, resample_rng, method=method)
+        permuted_y = y[permuted_idx]
+        null_stats[idx] = _distance_correlation_statistic(x, permuted_y)
+    exceed = float(np.sum(null_stats >= statistic))
+    pvalue = (exceed + 1.0) / (samples + 1.0)
+    return statistic, float(max(0.0, min(1.0, pvalue)))
 
 
 def _combine_pvalues(pvalues: Sequence[float], method: str) -> float:
@@ -116,6 +285,45 @@ def _apply_fdr(pvalues: Mapping[str, float], alpha: float, method: str) -> List[
     raise ValueError(f"Unsupported FDR method: {method}")
 
 
+def _evaluate_screening_methods(
+    x: np.ndarray,
+    y: np.ndarray,
+    methods: Mapping[str, Mapping[str, object] | object],
+    rng: Generator,
+) -> Dict[str, Tuple[float, float]]:
+    results: Dict[str, Tuple[float, float]] = {}
+    sample_size = x.size
+    if sample_size == 0:
+        return results
+    for name, raw_spec in methods.items():
+        method_name = str(name).lower()
+        if isinstance(raw_spec, Mapping):
+            enabled = bool(raw_spec.get("enabled", True))
+            cfg = {k: v for k, v in raw_spec.items() if k != "enabled"}
+        else:
+            enabled = bool(raw_spec)
+            cfg = {}
+        if not enabled:
+            continue
+        method_rng = default_rng(rng.integers(2**32))
+        if method_name in {"spearman", "spearman_rho"}:
+            rho = _spearman_corr(x, y)
+            pval = _approx_spearman_pvalue(rho, sample_size)
+            effect = abs(rho)
+            if bool(cfg.get("cliffs_delta", True)):
+                effect = max(effect, abs(_cliffs_delta(x, y)))
+            results[method_name] = (float(effect), float(pval))
+        elif method_name.startswith("hsic"):
+            effect, pval = _hsic_test(x, y, cfg, method_rng)
+            results[method_name] = (float(effect), float(pval))
+        elif method_name in {"dcor", "dcor_t", "distance_correlation"}:
+            effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
+            results[method_name] = (float(effect), float(pval))
+        else:
+            continue
+    return results
+
+
 def screening_out_of_fold(
     df: pd.DataFrame,
     feature_columns: Sequence[str],
@@ -123,6 +331,9 @@ def screening_out_of_fold(
     cross_splits: Sequence[CrossFitSplit],
     combine_cfg: Mapping[str, str | float],
     min_bars: int,
+    *,
+    methods: Optional[Mapping[str, Mapping[str, object]]] = None,
+    random_state: Optional[int] = None,
 ) -> ScreeningResult:
     combine_method = str(combine_cfg.get("method", "simes")).lower()
     fdr_alpha = float(combine_cfg.get("alpha", 0.1))
@@ -131,6 +342,10 @@ def screening_out_of_fold(
     per_feature_effects: Dict[str, List[float]] = defaultdict(list)
     per_feature_pvals: Dict[str, List[float]] = defaultdict(list)
     details: List[ScreeningDetail] = []
+    executed_methods: set[str] = set()
+
+    method_spec = methods or {"spearman": {"enabled": True}}
+    rng = default_rng(random_state)
 
     for split in cross_splits:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
@@ -145,20 +360,22 @@ def screening_out_of_fold(
                     continue
                 x = series[mask]
                 y = target[mask]
-                rho = _spearman_corr(x, y)
-                cliff = _cliffs_delta(x, y)
-                pval = _approx_spearman_pvalue(rho, mask.sum())
-                effect = float(max(abs(rho), abs(cliff)))
-                per_feature_effects[feature].append(effect)
-                per_feature_pvals[feature].append(pval)
-                details.append(
-                    ScreeningDetail(
-                        fold_id=f"{split.outer.combo_id}_{fold_label}",
-                        feature=feature,
-                        effect=effect,
-                        pvalue=pval,
+                results = _evaluate_screening_methods(x, y, method_spec, rng)
+                if not results:
+                    continue
+                for method_name, (effect, pval) in results.items():
+                    per_feature_effects[feature].append(effect)
+                    per_feature_pvals[feature].append(pval)
+                    executed_methods.add(method_name)
+                    details.append(
+                        ScreeningDetail(
+                            fold_id=f"{split.outer.combo_id}_{fold_label}",
+                            feature=feature,
+                            method=method_name,
+                            effect=effect,
+                            pvalue=pval,
+                        )
                     )
-                )
 
     combined_pvalues: Dict[str, float] = {}
     effect_summary: Dict[str, float] = {}
@@ -166,7 +383,7 @@ def screening_out_of_fold(
         pvals = per_feature_pvals.get(feature, [])
         combined_pvalues[feature] = _combine_pvalues(pvals, method=combine_method)
         effects = per_feature_effects.get(feature, [])
-        effect_summary[feature] = float(np.mean(effects)) if effects else 0.0
+        effect_summary[feature] = float(max(effects)) if effects else 0.0
 
     selected = _apply_fdr(combined_pvalues, alpha=fdr_alpha, method=fdr_method)
     # Zero out features not passing FDR to ensure downstream contracts know.
@@ -175,4 +392,5 @@ def screening_out_of_fold(
         effects=effect_summary,
         details=details,
         passing_features=selected,
+        methods=sorted(executed_methods),
     )

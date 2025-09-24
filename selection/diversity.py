@@ -1,3 +1,4 @@
+# /selection/diversity.py
 """Diversity-aware selection utilities (Stage 2)."""
 
 from __future__ import annotations
@@ -120,6 +121,111 @@ def facility_location_diversity(
 
     return DiversitySelectionResult(
         method="facility_location",
+        selected=selected,
+        coverage=coverage_map,
+        discarded=discarded,
+    )
+
+
+def determinantal_point_process_diversity(
+    df: pd.DataFrame,
+    candidate_features: Sequence[str],
+    effect_scores: Mapping[str, float],
+    *,
+    top_k: Optional[int],
+    family_cap: Optional[int],
+    lambda_scale: float = 1.0,
+    jitter: float = 1e-6,
+) -> DiversitySelectionResult:
+    """Select a diverse subset using a k-DPP MAP approximation."""
+
+    matrix, features = _prepare_matrix(df, candidate_features)
+    if len(features) == 0 or matrix.shape[0] == 0:
+        return DiversitySelectionResult(
+            method="dpp",
+            selected=[],
+            coverage={},
+            discarded=list(candidate_features),
+        )
+
+    correlation = np.corrcoef(matrix, rowvar=False)
+    if np.isscalar(correlation):
+        similarity = np.array([[float(abs(correlation))]], dtype=float)
+    else:
+        similarity = np.nan_to_num(np.abs(correlation), nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(similarity, 1.0)
+
+    weights = np.array([abs(effect_scores.get(name, 0.0)) for name in features], dtype=float)
+    if np.all(weights <= 0.0):
+        weights = np.ones_like(weights)
+    else:
+        weights = weights / np.max(weights)
+
+    kernel = np.exp(-lambda_scale * (1.0 - similarity))
+    kernel = np.multiply(kernel, np.outer(weights, weights))
+    kernel += np.eye(len(features)) * jitter
+
+    limit = len(features) if top_k is None else max(1, min(int(top_k), len(features)))
+    family_counts: Dict[str, int] = defaultdict(int)
+    selected_indices: List[int] = []
+    candidates = list(range(len(features)))
+
+    def _log_det(indices: List[int]) -> float:
+        if not indices:
+            return 0.0
+        submatrix = kernel[np.ix_(indices, indices)]
+        sign, logdet = np.linalg.slogdet(submatrix)
+        if sign <= 0 or not np.isfinite(logdet):
+            return -np.inf
+        return float(logdet)
+
+    try:
+        while candidates and len(selected_indices) < limit:
+            best_idx = None
+            best_score = -np.inf
+            for idx in candidates:
+                if idx in selected_indices:
+                    continue
+                if family_cap is not None and family_counts[_family_key(features[idx])] >= family_cap:
+                    continue
+                score = _log_det(selected_indices + [idx])
+                if score > best_score + 1e-12:
+                    best_idx = idx
+                    best_score = score
+            if best_idx is None:
+                break
+            selected_indices.append(best_idx)
+            if family_cap is not None:
+                family_counts[_family_key(features[best_idx])] += 1
+            candidates = [i for i in candidates if i != best_idx]
+    except np.linalg.LinAlgError:
+        selected_indices = []
+
+    if not selected_indices:
+        fallback = facility_location_diversity(
+            df,
+            candidate_features,
+            effect_scores,
+            top_k=top_k,
+            family_cap=family_cap,
+        )
+        return DiversitySelectionResult(
+            method="dpp_fallback_facility_location",
+            selected=fallback.selected,
+            coverage=fallback.coverage,
+            discarded=fallback.discarded,
+        )
+
+    coverage_vector = np.zeros(len(features), dtype=float)
+    for idx in selected_indices:
+        coverage_vector = np.maximum(coverage_vector, similarity[:, idx])
+
+    selected = [features[idx] for idx in selected_indices]
+    coverage_map = {features[i]: float(coverage_vector[i]) for i in range(len(features))}
+    discarded = [name for name in features if name not in selected]
+
+    return DiversitySelectionResult(
+        method="dpp",
         selected=selected,
         coverage=coverage_map,
         discarded=discarded,

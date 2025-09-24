@@ -1,3 +1,4 @@
+# /training/generation_cache.py
 """Utilities for generation-level CPCV simulation caching."""
 
 from __future__ import annotations

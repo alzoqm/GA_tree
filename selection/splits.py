@@ -1,3 +1,4 @@
+# /selection/splits.py
 """Cross-fitting split helpers built on top of ``training.cpcv`` utilities."""
 
 from __future__ import annotations

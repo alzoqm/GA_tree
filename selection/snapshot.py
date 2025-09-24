@@ -1,3 +1,4 @@
+# /selection/snapshot.py
 """Snapshot helpers for reproducibility."""
 
 from __future__ import annotations

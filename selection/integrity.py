@@ -1,3 +1,4 @@
+# /selection/integrity.py
 """Integrity gates for feature screening."""
 
 from __future__ import annotations

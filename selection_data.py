@@ -1,3 +1,4 @@
+# /selection_data.py
 """CLI entrypoint for the feature selection pipeline (Stages 1 & 2)."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# /selection/init.py
 """Feature selection pipeline (Stages 1 & 2 implementation).
 
 This package follows the roadmap in ``selection_data_design.md`` by

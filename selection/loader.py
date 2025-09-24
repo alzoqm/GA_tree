@@ -1,3 +1,4 @@
+# /selection/loader.py
 """Config and data loading helpers for the selection pipeline."""
 
 from __future__ import annotations

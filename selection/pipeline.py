@@ -1,3 +1,4 @@
+# /selection/pipeline.py
 """Selection pipeline orchestrator implementing Stage 1 & Stage 2 of the design."""
 
 from __future__ import annotations
@@ -7,7 +8,7 @@ import json
 import os
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -27,7 +28,11 @@ from .selector import (
     greedy_representative_selection,
     stability_selection,
 )
-from .diversity import DiversitySelectionResult, facility_location_diversity
+from .diversity import (
+    DiversitySelectionResult,
+    determinantal_point_process_diversity,
+    facility_location_diversity,
+)
 from .snapshot import (
     append_selection_snapshot,
     build_snapshot_payload,
@@ -54,6 +59,8 @@ class StageOneConfig:
     quantiles: tuple[float, float] = (0.005, 0.995)
     mad_factor: Optional[float] = 1.4826
     whitelist: Sequence[str] = ()
+    screening_methods: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    random_state: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +92,8 @@ class DiversityConfig:
     method: str
     top_k: Optional[int]
     family_cap: Optional[int]
+    lambda_scale: float
+    jitter: float
 
 
 @dataclass
@@ -136,6 +145,22 @@ class SelectionPipeline:
         quantiles = tuple(cfg.get("stage4_calibration", {}).get("robust_quantiles", (0.005, 0.995)))
         mad_factor = cfg.get("stage4_calibration", {}).get("mad_margin", {}).get("factor", 1.4826)
         whitelist = tuple(cfg.get("feature_whitelist", []))
+        methods_cfg = screen_cfg.get("methods") or {"spearman": {"enabled": True}}
+        normalized_methods: Dict[str, Dict[str, object]] = {}
+        for raw_name, raw_spec in methods_cfg.items():
+            name = str(raw_name).lower()
+            if isinstance(raw_spec, Mapping):
+                spec_dict = dict(raw_spec)
+                enabled = bool(spec_dict.get("enabled", True))
+            else:
+                spec_dict = {}
+                enabled = bool(raw_spec)
+            spec_dict["enabled"] = enabled
+            if enabled:
+                normalized_methods[name] = spec_dict
+        if not normalized_methods:
+            normalized_methods = {"spearman": {"enabled": True}}
+        random_state = screen_cfg.get("random_state")
         return StageOneConfig(
             target_column=target_column,
             min_bars_per_split=min_bars,
@@ -152,6 +177,8 @@ class SelectionPipeline:
             quantiles=(float(quantiles[0]), float(quantiles[1])),
             mad_factor=float(mad_factor) if mad_factor is not None else None,
             whitelist=whitelist,
+            screening_methods=normalized_methods,
+            random_state=int(random_state) if random_state is not None else None,
         )
 
     @staticmethod
@@ -210,11 +237,15 @@ class SelectionPipeline:
             family_cap = family_cap_cfg
         if family_cap is not None:
             family_cap = int(family_cap)
+        lambda_scale = float(div_cfg.get("lambda", div_cfg.get("lambda_scale", 1.0)))
+        jitter = float(div_cfg.get("jitter", 1e-6))
         return DiversityConfig(
             enabled=enabled,
             method=method,
             top_k=top_k,
             family_cap=family_cap,
+            lambda_scale=lambda_scale,
+            jitter=jitter,
         )
 
     def _resolve_feature_columns(self, df: pd.DataFrame) -> List[str]:
@@ -272,6 +303,8 @@ class SelectionPipeline:
                 "fdr": self.stage1.fdr_method,
             },
             min_bars=self.stage1.min_bars_per_split,
+            methods=self.stage1.screening_methods,
+            random_state=self.stage1.random_state,
         )
 
         candidate_features = set(screening_result.passing_features) | set(self.stage1.whitelist)
@@ -307,11 +340,7 @@ class SelectionPipeline:
 
         diversity_diag: Optional[DiversityDiagnostics] = None
         diversity_candidates = stage2_candidates
-        if (
-            self.stage3.enabled
-            and self.stage3.method == "facility_location"
-            and diversity_candidates
-        ):
+        if self.stage3.enabled and diversity_candidates:
             diversity_diag, diversity_candidates = self._apply_diversity(
                 cleaned_df,
                 diversity_candidates,
@@ -422,6 +451,17 @@ class SelectionPipeline:
             "screening": {
                 "pvalues": artifacts.screening.pvalues,
                 "effects": artifacts.screening.effects,
+                "methods": artifacts.screening.methods,
+                "details": [
+                    {
+                        "fold_id": detail.fold_id,
+                        "feature": detail.feature,
+                        "method": detail.method,
+                        "effect": detail.effect,
+                        "pvalue": detail.pvalue,
+                    }
+                    for detail in artifacts.screening.details[:512]
+                ],
             },
             "selection": {
                 "vif": artifacts.selection.vif,
@@ -485,6 +525,11 @@ class SelectionPipeline:
                 "combine": self.stage1.combine_method,
                 "alpha": self.stage1.combine_alpha,
                 "fdr": self.stage1.fdr_method,
+                "tests": {
+                    name: dict(spec)
+                    for name, spec in self.stage1.screening_methods.items()
+                },
+                "executed": artifacts.screening.methods,
             },
             "selection": {
                 "corr_cap": self.stage1.corr_cap,
@@ -506,6 +551,8 @@ class SelectionPipeline:
                 "method": (artifacts.diversity.method if artifacts.diversity else "none"),
                 "top_k": self.stage3.top_k,
                 "family_cap": self.stage3.family_cap,
+                "lambda_scale": self.stage3.lambda_scale,
+                "jitter": self.stage3.jitter,
             },
             "calibration": {
                 "quantiles": list(self.stage1.quantiles),
@@ -667,6 +714,26 @@ class SelectionPipeline:
             top_k=top_k,
             family_cap=self.stage3.family_cap,
         )
+
+        if self.stage3.method == "dpp" and candidates:
+            result = determinantal_point_process_diversity(
+                df,
+                candidates,
+                effective_scores,
+                top_k=top_k,
+                family_cap=self.stage3.family_cap,
+                lambda_scale=self.stage3.lambda_scale,
+                jitter=self.stage3.jitter,
+            )
+            if not result.selected:
+                # fall back to facility location result computed earlier
+                result = facility_location_diversity(
+                    df,
+                    candidates,
+                    effective_scores,
+                    top_k=top_k,
+                    family_cap=self.stage3.family_cap,
+                )
 
         selected = result.selected or list(candidates)
         diag = DiversityDiagnostics(

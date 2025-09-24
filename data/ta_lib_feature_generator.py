@@ -1,3 +1,5 @@
+# /data/ta_lib_feature_generator.py
+
 """Compatibility wrapper for TA-Lib feature generation.
 
 The implementation has been split across the ``data.features`` subpackage.
