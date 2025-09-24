@@ -1,4 +1,4 @@
-# /experiment_config.yaml
+# /Config/experiment_config.yaml
 # ==================================
 # GA Trading Bot Experiment Config
 # ==================================
@@ -57,7 +57,7 @@ data:
   feature_engineering:
     # target_timeframes: ['5m', '30m', '1h', '4h', '1d']
     target_timeframes: ['5m']
-    config_yaml_path: "data/feature_config.yaml"
+    config_yaml_path: "Config/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
 ga_core:

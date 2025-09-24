@@ -645,7 +645,7 @@ class WalkForwardOptimizer:
         Initialize the WFO optimizer.
         
         Args:
-            wfo_config: WFO configuration from experiment_config.yaml
+            wfo_config: WFO configuration from Config/experiment_config.yaml
             evaluation_config: Evaluation configuration including IS/OOS objectives
         """
         self.wfo_config = wfo_config

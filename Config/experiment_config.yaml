@@ -1,4 +1,4 @@
-# /experiment_config.yaml
+# /Config/experiment_config.yaml
 # ==================================
 # GA Trading Bot Experiment Config
 # ==================================
@@ -51,7 +51,7 @@ data:
   model_config_path: "model_test_config.yaml"
   feature_engineering:
     target_timeframes: ['5m', '30m', '1h', '4h', '1d']
-    config_yaml_path: "data/feature_config.yaml"
+    config_yaml_path: "Config/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
 ga_core:
@@ -121,6 +121,45 @@ cpcv:
   parallel_chunks: 4
   reuse_population: true
   evaluation_cache_dir: "results/cpcv_cache"
+
+# 6. Feature Selection Pipeline (Stage 1 defaults)
+selection_pipeline:
+  enabled: false
+  dry_run: true
+  target_column: "target"
+  artifact_dir: "results/selection_artifacts"
+  min_bars_per_split: 256
+  integrity:
+    max_missing_ratio: 0.4
+    min_unique_fraction: 0.005
+    max_zero_fraction: 0.995
+    correlation_threshold: 0.999
+  stage1_screening:
+    combine: {method: simes, alpha: 0.1, fdr: by}
+  stage2_selection:
+    corr_cap: 0.9
+    max_features: 64
+    inner_ratio: 0.5
+    stability_selection:
+      enabled: false
+      subsamples: 48
+      sample_fraction: 0.6
+      cutoff: 0.6
+      max_features: 32
+      alpha_grid: [0.8, 0.4, 0.1]
+      random_state: null
+      max_iter: 200
+      tolerance: 0.0001
+  stage3_diversity:
+    enabled: false
+    method: facility_location
+    top_k: 32
+    family_cap: {max_per_family: 2}
+  stage4_calibration:
+    vif_threshold: 12.0
+    robust_quantiles: [0.01, 0.99]
+    mad_margin: {factor: 1.4826}
+  feature_whitelist: []
 
 # 5.1 Walk-Forward Optimization 설정 (데이터 길이에 맞게 재계산)
 walk_forward:

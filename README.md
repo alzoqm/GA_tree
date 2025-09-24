@@ -85,7 +85,7 @@ Running an experiment involves three main steps: configuring the experiment, pre
 
 ### Step 1: Configure the Experiment
 
-Modify `experiment_config.yaml` to define all aspects of your experiment. This is the central control file.
+Modify `Config/experiment_config.yaml` to define all aspects of your experiment. This is the central control file.
 
 -   **`environment`**: Set the CUDA device, random seed, and output directories.
 -   **`data`**: Specify the trading symbol (e.g., `BTCUSDT`), interval, and feature engineering settings.
@@ -127,7 +127,7 @@ The process will iterate through the WFO windows, performing training and evalua
 After a run is complete, you can analyze the best-evolved models to understand their structure and behavior.
 
 ```bash
-python analysis/analyze_best.py --config experiment_config.yaml```
+python analysis/analyze_best.py --config Config/experiment_config.yaml```
 
 This script generates several outputs in the `analysis/` sub-directory of your experiment's results folder, including:
 -   `feature_usage.png`: Bar chart of the most frequently used features.

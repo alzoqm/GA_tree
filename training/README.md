@@ -119,7 +119,7 @@ print(metrics.shape)  # (B, 6): mean, PF, winrate(event), maxDD, compound, winra
   - `enter_ratio`: 현재 투입 비율(없으면 -1.0). 전체 자본 대비 비율로 0~1 범위.
   - `additional_count`: 피라미딩(추가 진입) 횟수.
 
-- 최소 제약(기본값은 `experiment_config.yaml`의 `evaluation.simulation_env`로부터 주입):
+- 최소 제약(기본값은 `Config/experiment_config.yaml`의 `evaluation.simulation_env`로부터 주입):
   - `min_entry_ratio`: 0.05 (5%). 신규 진입 및 플립 시 최소 진입 비율로 적용.
   - `max_entry_ratio`: 1.0 (100%). 신규 진입 및 플립 시 최대 진입 비율 상한.
   - `min_leverage`: 2. 신규 진입 및 플립 시 레버리지 하한.

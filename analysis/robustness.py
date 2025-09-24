@@ -121,7 +121,7 @@ def run_robustness_checks(
     oos_metric_names : list[str]
         Names corresponding to the last axis in raw_oos_metrics.
     config : dict
-        Robustness configuration block from experiment_config.yaml.
+        Robustness configuration block from Config/experiment_config.yaml.
     minimize_flags : sequence of bool, optional
         Minimization flags aligned with ``raw_oos_metrics`` columns. Used to
         recover natural (maximize) orientation when metrics arrive in

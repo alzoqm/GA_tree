@@ -14,6 +14,9 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 
+DEFAULT_CONFIG_PATH = os.path.join("Config", "experiment_config.yaml")
+
+
 def _construct_python_tuple(loader, node):
     """Allow YAML !!python/tuple tags when using SafeLoader."""
     return tuple(loader.construct_sequence(node))
@@ -61,7 +64,7 @@ logging.basicConfig(
 )
 
 
-def load_config(path="experiment_config.yaml"):
+def load_config(path=DEFAULT_CONFIG_PATH):
     """YAML 설정 파일을 로드합니다."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -114,7 +117,7 @@ def parse_arguments():
     parser.add_argument(
         "--config", 
         type=str, 
-        default="experiment_config.yaml",
+        default=DEFAULT_CONFIG_PATH,
         help="Path to the experiment configuration file"
     )
     parser.add_argument(
@@ -407,7 +410,10 @@ def _main_impl():
         wfo_cfg = config.get('walk_forward', {'enabled': False})
         if not wfo_cfg.get('enabled', False):
             logging.error("Walk-Forward Optimization mode is required but disabled in config.")
-            logging.error("Please set walk_forward.enabled: true in experiment_config.yaml or switch training_strategy.mode to 'cpcv'.")
+            logging.error(
+                f"Please set walk_forward.enabled: true in {DEFAULT_CONFIG_PATH} or switch "
+                "training_strategy.mode to 'cpcv'."
+            )
             sys.exit(1)
 
         wfo_optimizer = _WFO(wfo_cfg, eval_cfg)

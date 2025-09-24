@@ -5,6 +5,9 @@ import yaml
 import pandas as pd
 import logging
 
+
+DEFAULT_CONFIG_PATH = os.path.join("Config", "experiment_config.yaml")
+
 # --- 프로젝트 모듈 임포트 ---
 from data.data_download import fetch_historical_data, fetch_funding_rate_history
 from data.funding_mark_proxy import fetch_perp_klines, estimate_funding_and_mark
@@ -22,7 +25,7 @@ logging.basicConfig(
 )
 
 
-def load_config(path="experiment_config.yaml"):
+def load_config(path=DEFAULT_CONFIG_PATH):
     """YAML 설정 파일을 로드합니다."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
