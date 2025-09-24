@@ -1,9 +1,8 @@
-"""Feature selection pipeline (Stage 1 implementation).
+"""Feature selection pipeline (Stages 1 & 2 implementation).
 
-This package implements the Stage 1 pipeline described in
-``selection_data_design.md``.  It focuses on integrity screening,
-rationalized rank-based screening, representative selection, and
-calibration with reproducible snapshotting.
+This package follows the roadmap in ``selection_data_design.md`` by
+implementing the integrity/screening/calibration flow from Stage 1 and
+the confidence-enhancing selection/diversity additions from Stage 2.
 """
 
 from .pipeline import SelectionPipeline, run_pipeline  # noqa: F401

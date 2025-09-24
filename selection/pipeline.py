@@ -1,4 +1,4 @@
-"""Selection pipeline orchestrator implementing Stage 1 of the design."""
+"""Selection pipeline orchestrator implementing Stage 1 & Stage 2 of the design."""
 
 from __future__ import annotations
 
@@ -6,11 +6,13 @@ import copy
 import json
 import os
 import subprocess
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 
 from .calibration import CalibrationResult, calibrate_ranges
@@ -19,9 +21,13 @@ from .loader import SelectionPaths
 from .screening import ScreeningResult, screening_out_of_fold
 from .selector import (
     SelectionDiagnostics,
+    StabilitySelectionConfig,
+    StabilitySelectionOutcome,
     enforce_vif_and_partial_r2,
     greedy_representative_selection,
+    stability_selection,
 )
+from .diversity import DiversitySelectionResult, facility_location_diversity
 from .snapshot import (
     append_selection_snapshot,
     build_snapshot_payload,
@@ -50,10 +56,51 @@ class StageOneConfig:
     whitelist: Sequence[str] = ()
 
 
+@dataclass(frozen=True)
+class StageTwoConfig:
+    enabled: bool
+    corr_cap: float
+    max_features: Optional[int]
+    inner_ratio: float
+    cutoff: float
+    stability: Optional[StabilitySelectionConfig]
+
+
+@dataclass
+class StageTwoDiagnostics:
+    method: str
+    frequencies: Dict[str, float]
+    holdout_effects: Dict[str, float]
+    selected_features: List[str]
+    discarded_low_freq: List[str]
+    models_evaluated: int
+    support_counts: Dict[str, int]
+    avg_magnitude: Dict[str, float]
+    cutoff: float
+
+
+@dataclass(frozen=True)
+class DiversityConfig:
+    enabled: bool
+    method: str
+    top_k: Optional[int]
+    family_cap: Optional[int]
+
+
+@dataclass
+class DiversityDiagnostics:
+    method: str
+    selected: List[str]
+    coverage: Dict[str, float]
+    discarded: List[str]
+
+
 @dataclass
 class PipelineArtifacts:
     integrity: IntegrityReport
     screening: ScreeningResult
+    stage2: Optional[StageTwoDiagnostics]
+    diversity: Optional[DiversityDiagnostics]
     selection: SelectionDiagnostics
     calibration: CalibrationResult
     selected_features: List[str]
@@ -76,6 +123,8 @@ class SelectionPipeline:
         self.paths = paths
         self.dry_run = dry_run or bool(selection_cfg.get("dry_run", False))
         self.stage1 = self._build_stage1_config(selection_cfg)
+        self.stage2 = self._build_stage2_config(selection_cfg)
+        self.stage3 = self._build_stage3_config(selection_cfg)
         self._latest_df_shape: Optional[tuple[int, int]] = None
 
     @staticmethod
@@ -105,6 +154,69 @@ class SelectionPipeline:
             whitelist=whitelist,
         )
 
+    @staticmethod
+    def _build_stage2_config(cfg: Mapping[str, object]) -> StageTwoConfig:
+        stage2_cfg = cfg.get("stage2_selection", {})
+        corr_cap = float(stage2_cfg.get("corr_cap", 0.9))
+        max_features = stage2_cfg.get("max_features")
+        inner_ratio = float(stage2_cfg.get("inner_ratio", 0.5))
+
+        stability_cfg = stage2_cfg.get("stability_selection", {})
+        stability_enabled = bool(stability_cfg.get("enabled", False))
+        stability_config: Optional[StabilitySelectionConfig] = None
+        if stability_enabled:
+            alpha_grid = stability_cfg.get("alpha_grid")
+            if alpha_grid is None:
+                alpha_tuple: Tuple[float, ...] = ()
+            else:
+                alpha_tuple = tuple(float(a) for a in alpha_grid)
+            stability_config = StabilitySelectionConfig(
+                subsamples=int(stability_cfg.get("subsamples", 64)),
+                sample_fraction=float(stability_cfg.get("sample_fraction", 0.5)),
+                cutoff=float(stability_cfg.get("cutoff", stage2_cfg.get("cutoff", 0.6))),
+                max_features=stability_cfg.get("max_features", max_features),
+                alpha_grid=alpha_tuple,
+                random_state=stability_cfg.get("random_state"),
+                max_iter=int(stability_cfg.get("max_iter", 200)),
+                tolerance=float(stability_cfg.get("tolerance", 1e-4)),
+            )
+
+        cutoff = float(
+            stability_config.cutoff if stability_config else stage2_cfg.get("cutoff", 0.6)
+        )
+
+        return StageTwoConfig(
+            enabled=bool(stability_config),
+            corr_cap=corr_cap,
+            max_features=max_features,
+            inner_ratio=inner_ratio,
+            cutoff=cutoff,
+            stability=stability_config,
+        )
+
+    @staticmethod
+    def _build_stage3_config(cfg: Mapping[str, object]) -> DiversityConfig:
+        div_cfg = cfg.get("stage3_diversity", {})
+        enabled = bool(div_cfg.get("enabled", False))
+        method = str(div_cfg.get("method", "facility_location")).lower()
+        top_k = div_cfg.get("top_k", div_cfg.get("k"))
+        if top_k is not None:
+            top_k = int(top_k)
+        family_cap_cfg = div_cfg.get("family_cap", {})
+        family_cap = None
+        if isinstance(family_cap_cfg, Mapping):
+            family_cap = family_cap_cfg.get("max_per_family")
+        elif family_cap_cfg not in (None, False):
+            family_cap = family_cap_cfg
+        if family_cap is not None:
+            family_cap = int(family_cap)
+        return DiversityConfig(
+            enabled=enabled,
+            method=method,
+            top_k=top_k,
+            family_cap=family_cap,
+        )
+
     def _resolve_feature_columns(self, df: pd.DataFrame) -> List[str]:
         target = self.stage1.target_column
         candidates = [c for c in df.columns if c != target]
@@ -119,10 +231,9 @@ class SelectionPipeline:
             cfg=self.selection_cfg.get("cpcv", self.config.get("cpcv", {})),
             train_cfg=self.config.get("training_strategy", {}),
         )
-        inner_ratio = float(self.selection_cfg.get("stage2_selection", {}).get("inner_ratio", 0.5))
         return build_cross_fit_splits(
             scheduler=scheduler,
-            inner_ratio=inner_ratio,
+            inner_ratio=self.stage2.inner_ratio,
             require_valid=True,
         )
 
@@ -165,13 +276,60 @@ class SelectionPipeline:
 
         candidate_features = set(screening_result.passing_features) | set(self.stage1.whitelist)
         if not candidate_features:
-            candidate_features = set(sorted(clean_features, key=lambda f: screening_result.effects.get(f, 0.0), reverse=True)[:32])
+            fallback_limit = self.stage1.max_features or 32
+            candidate_features = set(
+                sorted(
+                    clean_features,
+                    key=lambda f: screening_result.effects.get(f, 0.0),
+                    reverse=True,
+                )[:fallback_limit]
+            )
+
+        ranked_candidates = sorted(
+            candidate_features,
+            key=lambda f: (
+                screening_result.effects.get(f, 0.0),
+                f in self.stage1.whitelist,
+            ),
+            reverse=True,
+        )
+
+        stage2_diag: Optional[StageTwoDiagnostics] = None
+        stage2_candidates = ranked_candidates
+        if self.stage2.enabled and self.stage2.stability and ranked_candidates:
+            stage2_diag, stage2_candidates = self._run_stage2_selection(
+                cleaned_df,
+                target,
+                ranked_candidates,
+                cross_splits,
+                screening_result.effects,
+            )
+
+        diversity_diag: Optional[DiversityDiagnostics] = None
+        diversity_candidates = stage2_candidates
+        if (
+            self.stage3.enabled
+            and self.stage3.method == "facility_location"
+            and diversity_candidates
+        ):
+            diversity_diag, diversity_candidates = self._apply_diversity(
+                cleaned_df,
+                diversity_candidates,
+                screening_result.effects,
+                stage2_diag,
+            )
+
+        representative_pool = diversity_candidates or stage2_candidates or ranked_candidates
+        selection_scores = dict(screening_result.effects)
+        if stage2_diag:
+            for feature, effect in stage2_diag.holdout_effects.items():
+                selection_scores[feature] = max(selection_scores.get(feature, 0.0), effect)
 
         selected_features, discarded_corr = greedy_representative_selection(
             cleaned_df,
             target,
-            list(candidate_features),
-            screening_result.effects,
+            representative_pool,
+            selection_scores,
             corr_cap=self.stage1.corr_cap,
             max_features=self.stage1.max_features,
         )
@@ -205,6 +363,8 @@ class SelectionPipeline:
         artifacts = PipelineArtifacts(
             integrity=integrity_report,
             screening=screening_result,
+            stage2=stage2_diag,
+            diversity=diversity_diag,
             selection=selection_diag,
             calibration=calibration_result,
             selected_features=final_feature_set,
@@ -274,6 +434,25 @@ class SelectionPipeline:
                 "feature_bool": artifacts.calibration.feature_bool,
             },
         }
+        if artifacts.stage2:
+            payload["stage2"] = {
+                "method": artifacts.stage2.method,
+                "frequencies": artifacts.stage2.frequencies,
+                "holdout_effects": artifacts.stage2.holdout_effects,
+                "selected_features": artifacts.stage2.selected_features,
+                "discarded_low_freq": artifacts.stage2.discarded_low_freq,
+                "models_evaluated": artifacts.stage2.models_evaluated,
+                "cutoff": artifacts.stage2.cutoff,
+                "avg_magnitude": artifacts.stage2.avg_magnitude,
+                "support_counts": artifacts.stage2.support_counts,
+            }
+        if artifacts.diversity:
+            payload["diversity"] = {
+                "method": artifacts.diversity.method,
+                "selected": artifacts.diversity.selected,
+                "coverage": artifacts.diversity.coverage,
+                "discarded": artifacts.diversity.discarded,
+            }
         with artifact_path.open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
 
@@ -311,6 +490,23 @@ class SelectionPipeline:
                 "corr_cap": self.stage1.corr_cap,
                 "vif_threshold": self.stage1.vif_threshold,
             },
+            "selection_stage2": {
+                "enabled": self.stage2.enabled,
+                "method": (artifacts.stage2.method if artifacts.stage2 else "none"),
+                "cutoff": self.stage2.cutoff,
+                "max_features": self.stage2.max_features,
+                "subsamples": (
+                    self.stage2.stability.subsamples
+                    if self.stage2.stability
+                    else None
+                ),
+            },
+            "diversity": {
+                "enabled": self.stage3.enabled,
+                "method": (artifacts.diversity.method if artifacts.diversity else "none"),
+                "top_k": self.stage3.top_k,
+                "family_cap": self.stage3.family_cap,
+            },
             "calibration": {
                 "quantiles": list(self.stage1.quantiles),
                 "mad_factor": self.stage1.mad_factor,
@@ -326,6 +522,187 @@ class SelectionPipeline:
             data_meta_hash=data_meta,
         )
         append_selection_snapshot(self.paths.feature_active_path, snapshot_payload)
+
+    def _run_stage2_selection(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        candidates: Sequence[str],
+        cross_splits: Sequence[CrossFitSplit],
+        effect_scores: Mapping[str, float],
+    ) -> Tuple[StageTwoDiagnostics, List[str]]:
+        assert self.stage2.stability is not None
+        freq_accum: Dict[str, float] = defaultdict(float)
+        magnitude_accum: Dict[str, float] = defaultdict(float)
+        support_accum: Dict[str, int] = defaultdict(int)
+        holdout_accum: Dict[str, float] = defaultdict(float)
+        holdout_counts: Dict[str, int] = defaultdict(int)
+        models_evaluated = 0
+
+        for split in cross_splits:
+            for train_idx, hold_idx in (
+                (split.inner_train_a, split.inner_train_b),
+                (split.inner_train_b, split.inner_train_a),
+            ):
+                train_df = df.iloc[train_idx]
+                hold_df = df.iloc[hold_idx]
+                outcome: StabilitySelectionOutcome = stability_selection(
+                    train_df,
+                    target,
+                    candidates,
+                    self.stage2.stability,
+                )
+                if outcome.subsamples == 0:
+                    continue
+                models_evaluated += 1
+                for feature in candidates:
+                    freq_accum[feature] += outcome.frequencies.get(feature, 0.0)
+                    magnitude_accum[feature] += outcome.avg_magnitude.get(feature, 0.0)
+                    support_accum[feature] += outcome.support_counts.get(feature, 0)
+
+                hold_features = [
+                    feature
+                    for feature in candidates
+                    if outcome.frequencies.get(feature, 0.0) > 0.0
+                ]
+                hold_effects = self._holdout_effects(hold_df, target, hold_features)
+                for feature, effect in hold_effects.items():
+                    holdout_accum[feature] += effect
+                    holdout_counts[feature] += 1
+
+        if models_evaluated == 0:
+            limited = list(
+                candidates[: self.stage2.max_features]
+                if self.stage2.max_features
+                else candidates
+            )
+            diag = StageTwoDiagnostics(
+                method="stability_selection",
+                frequencies={feature: 0.0 for feature in candidates},
+                holdout_effects={},
+                selected_features=limited,
+                discarded_low_freq=[],
+                models_evaluated=0,
+                support_counts={feature: 0 for feature in candidates},
+                avg_magnitude={feature: 0.0 for feature in candidates},
+                cutoff=self.stage2.cutoff,
+            )
+            return diag, limited
+
+        avg_freq = {
+            feature: freq_accum[feature] / models_evaluated for feature in candidates
+        }
+        avg_mag = {
+            feature: magnitude_accum[feature] / models_evaluated for feature in candidates
+        }
+        holdout_avg = {
+            feature: holdout_accum[feature] / holdout_counts[feature]
+            for feature in holdout_counts
+            if holdout_counts[feature] > 0
+        }
+
+        selected = [
+            feature
+            for feature in candidates
+            if avg_freq.get(feature, 0.0) >= self.stage2.cutoff
+        ]
+
+        limit = self.stage2.max_features or len(candidates)
+        if not selected:
+            def _score(name: str) -> Tuple[float, float, float]:
+                return (
+                    avg_freq.get(name, 0.0),
+                    holdout_avg.get(name, 0.0),
+                    effect_scores.get(name, 0.0),
+                )
+
+            selected = sorted(candidates, key=_score, reverse=True)[:limit]
+        else:
+            selected = sorted(
+                selected,
+                key=lambda name: (
+                    avg_freq.get(name, 0.0),
+                    holdout_avg.get(name, 0.0),
+                ),
+                reverse=True,
+            )[:limit]
+
+        discarded = [
+            feature for feature in candidates if feature not in selected and avg_freq.get(feature, 0.0) < self.stage2.cutoff
+        ]
+
+        diag = StageTwoDiagnostics(
+            method="stability_selection",
+            frequencies=avg_freq,
+            holdout_effects=holdout_avg,
+            selected_features=selected,
+            discarded_low_freq=discarded,
+            models_evaluated=models_evaluated,
+            support_counts=dict(support_accum),
+            avg_magnitude=avg_mag,
+            cutoff=self.stage2.cutoff,
+        )
+        return diag, selected
+
+    def _apply_diversity(
+        self,
+        df: pd.DataFrame,
+        candidates: Sequence[str],
+        effect_scores: Mapping[str, float],
+        stage2_diag: Optional[StageTwoDiagnostics],
+    ) -> Tuple[DiversityDiagnostics, List[str]]:
+        effective_scores = dict(effect_scores)
+        if stage2_diag:
+            for feature, value in stage2_diag.holdout_effects.items():
+                effective_scores[feature] = max(effective_scores.get(feature, 0.0), value)
+
+        top_k = self.stage3.top_k
+        if self.stage1.max_features is not None:
+            top_k = min(top_k or self.stage1.max_features, self.stage1.max_features)
+
+        result: DiversitySelectionResult = facility_location_diversity(
+            df,
+            candidates,
+            effective_scores,
+            top_k=top_k,
+            family_cap=self.stage3.family_cap,
+        )
+
+        selected = result.selected or list(candidates)
+        diag = DiversityDiagnostics(
+            method=result.method,
+            selected=selected,
+            coverage=result.coverage,
+            discarded=result.discarded,
+        )
+        return diag, selected
+
+    @staticmethod
+    def _holdout_effects(
+        frame: pd.DataFrame,
+        target_column: str,
+        features: Sequence[str],
+    ) -> Dict[str, float]:
+        if not features or target_column not in frame.columns:
+            return {}
+        target = frame[target_column].to_numpy(copy=False).astype(float)
+        results: Dict[str, float] = {}
+        for feature in features:
+            if feature not in frame.columns:
+                continue
+            series = frame[feature].to_numpy(copy=False).astype(float)
+            mask = np.isfinite(series) & np.isfinite(target)
+            if mask.sum() < 16:
+                continue
+            x = series[mask]
+            y = target[mask]
+            if x.std() <= 1e-8 or y.std() <= 1e-8:
+                continue
+            corr = np.corrcoef(x, y)[0, 1]
+            if np.isnan(corr):
+                continue
+            results[feature] = float(abs(corr))
+        return results
 
 
 def _git_commit_hash() -> str:

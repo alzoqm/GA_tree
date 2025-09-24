@@ -1,4 +1,4 @@
-"""CLI entrypoint for the feature selection pipeline (Stage 1)."""
+"""CLI entrypoint for the feature selection pipeline (Stages 1 & 2)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from selection.pipeline import SelectionPipeline
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the feature selection pipeline (Stage 1)")
+    parser = argparse.ArgumentParser(description="Run the feature selection pipeline (Stages 1 & 2)")
     parser.add_argument("--config", default="Config/experiment_config.yaml", help="Experiment config path")
     parser.add_argument("--dry-run", action="store_true", help="Skip filesystem writes")
     return parser.parse_args()

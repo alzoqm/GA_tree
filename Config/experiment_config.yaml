@@ -140,6 +140,21 @@ selection_pipeline:
     corr_cap: 0.9
     max_features: 64
     inner_ratio: 0.5
+    stability_selection:
+      enabled: false
+      subsamples: 48
+      sample_fraction: 0.6
+      cutoff: 0.6
+      max_features: 32
+      alpha_grid: [0.8, 0.4, 0.1]
+      random_state: null
+      max_iter: 200
+      tolerance: 0.0001
+  stage3_diversity:
+    enabled: false
+    method: facility_location
+    top_k: 32
+    family_cap: {max_per_family: 2}
   stage4_calibration:
     vif_threshold: 12.0
     robust_quantiles: [0.01, 0.99]
