@@ -221,6 +221,143 @@ def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
     assert "flag_signal" in artifacts.selected_features
 
 
+def test_stage1_effect_threshold_filters_low_effect(tmp_path):
+    rng = np.random.default_rng(5150)
+    n = 640
+    strong_latent = rng.standard_normal(n)
+    weak_latent = 0.1 * strong_latent + 0.9 * rng.standard_normal(n)
+    target = 2.0 * strong_latent + 0.02 * rng.standard_normal(n)
+
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feat_strong": 1.8 * strong_latent + 0.02 * rng.standard_normal(n),
+            "feat_weak": weak_latent + 0.05 * rng.standard_normal(n),
+            "noise": rng.standard_normal(n),
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 73, "device": "cpu"},
+        "cpcv": {
+            "folds": 2,
+            "test_folds": 1,
+            "min_trades_per_split": 40,
+            "shuffle_seed": 4,
+            "max_combinations": 1,
+        },
+        "training_strategy": {"max_hold_period_bars": 12},
+    }
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 60,
+        "stage1_screening": {
+            "combine": {"method": "simes", "alpha": 0.99, "fdr": "bh"},
+            "methods": {
+                "spearman": {"enabled": True},
+                "kendall": {"enabled": True},
+            },
+            "effect_min": 0.4,
+            "cliffs_delta_min": 0.0,
+        },
+        "stage2_selection": {
+            "corr_cap": 0.95,
+            "max_features": 5,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+            "knockoffs": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 10.0,
+            "robust_quantiles": [0.02, 0.98],
+            "mad_margin": {"factor": 0.0},
+        },
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert artifacts.screening.passing_features == ["feat_strong"]
+    assert artifacts.screening.effects["feat_strong"] >= selection_cfg["stage1_screening"]["effect_min"]
+    assert artifacts.screening.cliffs_delta["feat_strong"] >= 0.0
+    assert "feat_weak" not in artifacts.selected_features
+
+
+def test_stage1_kendall_method_records(tmp_path):
+    rng = np.random.default_rng(6060)
+    n = 400
+    time_index = np.arange(n)
+    target = 0.002 * time_index + rng.normal(scale=0.05, size=n)
+    monotonic_feature = time_index + rng.normal(scale=0.5, size=n)
+    noise = rng.standard_normal(n)
+
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feat_trend": monotonic_feature,
+            "feat_noise": noise,
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 91, "device": "cpu"},
+        "cpcv": {"folds": 3, "test_folds": 1, "min_trades_per_split": 96, "shuffle_seed": 6},
+        "training_strategy": {"max_hold_period_bars": 18},
+    }
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 100,
+        "stage1_screening": {
+            "combine": {"method": "simes", "alpha": 0.1, "fdr": "bh"},
+            "methods": {"kendall": {"enabled": True}},
+        },
+        "stage2_selection": {
+            "corr_cap": 0.95,
+            "max_features": 3,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+            "knockoffs": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 12.0,
+            "robust_quantiles": [0.05, 0.95],
+            "mad_margin": {"factor": 0.0},
+        },
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert artifacts.screening.methods == ["kendall"]
+    assert "feat_trend" in artifacts.screening.passing_features
+    assert all(detail.method == "kendall" for detail in artifacts.screening.details)
+    assert "feat_trend" in artifacts.selected_features
+
+
 def test_pipeline_raises_when_no_significant_features(tmp_path):
     rng = np.random.default_rng(99)
     n = 200

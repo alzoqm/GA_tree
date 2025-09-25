@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -17,6 +17,8 @@ class DiversitySelectionResult:
     selected: List[str]
     coverage: Dict[str, float]
     discarded: List[str]
+    similarity: str = "corr"
+    diagnostics: Dict[str, float] = field(default_factory=dict)
 
 
 def _family_key(feature: str) -> str:
@@ -44,6 +46,25 @@ def _prepare_matrix(df: pd.DataFrame, features: Sequence[str]) -> tuple[np.ndarr
     return matrix, usable
 
 
+def _partial_correlation_similarity(matrix: np.ndarray, jitter: float = 1e-6) -> np.ndarray:
+    if matrix.size == 0:
+        return np.empty((0, 0))
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    denom = max(centered.shape[0] - 1, 1)
+    covariance = (centered.T @ centered) / denom
+    covariance += np.eye(covariance.shape[0]) * jitter
+    try:
+        precision = np.linalg.pinv(covariance)
+    except np.linalg.LinAlgError:
+        precision = np.linalg.pinv(covariance + np.eye(covariance.shape[0]) * jitter)
+    diag = np.diag(precision)
+    denom_matrix = np.sqrt(np.outer(diag, diag))
+    denom_matrix[denom_matrix <= 1e-12] = 1.0
+    partial = -precision / denom_matrix
+    np.fill_diagonal(partial, 1.0)
+    return np.nan_to_num(np.abs(partial), nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def facility_location_diversity(
     df: pd.DataFrame,
     candidate_features: Sequence[str],
@@ -58,12 +79,9 @@ def facility_location_diversity(
     if len(features) == 0 or matrix.shape[0] == 0:
         return DiversitySelectionResult(method="facility_location", selected=[], coverage={}, discarded=list(candidate_features))
 
-    correlation = np.corrcoef(matrix, rowvar=False)
-    if np.isscalar(correlation):
-        similarity = np.array([[float(abs(correlation))]], dtype=float)
-    else:
-        similarity = np.nan_to_num(np.abs(correlation), nan=0.0, posinf=0.0, neginf=0.0)
-    np.fill_diagonal(similarity, 1.0)
+    similarity = _partial_correlation_similarity(matrix)
+    if similarity.size == 0:
+        similarity = np.eye(len(features), dtype=float)
 
     weights = np.array([abs(effect_scores.get(name, 0.0)) for name in features], dtype=float)
     if np.all(weights == 0.0):
@@ -119,11 +137,19 @@ def facility_location_diversity(
     coverage_map = {features[i]: float(coverage[i]) for i in range(len(features))}
     discarded = [name for name in features if name not in selected]
 
+    diagnostics = {
+        "similarity": "partial_correlation",
+        "family_cap": float(family_cap) if family_cap is not None else 0.0,
+        "top_k": float(limit),
+    }
+
     return DiversitySelectionResult(
         method="facility_location",
         selected=selected,
         coverage=coverage_map,
         discarded=discarded,
+        similarity="partial_correlation",
+        diagnostics=diagnostics,
     )
 
 
@@ -148,12 +174,9 @@ def determinantal_point_process_diversity(
             discarded=list(candidate_features),
         )
 
-    correlation = np.corrcoef(matrix, rowvar=False)
-    if np.isscalar(correlation):
-        similarity = np.array([[float(abs(correlation))]], dtype=float)
-    else:
-        similarity = np.nan_to_num(np.abs(correlation), nan=0.0, posinf=0.0, neginf=0.0)
-    np.fill_diagonal(similarity, 1.0)
+    similarity = _partial_correlation_similarity(matrix, jitter)
+    if similarity.size == 0:
+        similarity = np.eye(len(features), dtype=float)
 
     weights = np.array([abs(effect_scores.get(name, 0.0)) for name in features], dtype=float)
     if np.all(weights <= 0.0):
@@ -214,6 +237,8 @@ def determinantal_point_process_diversity(
             selected=fallback.selected,
             coverage=fallback.coverage,
             discarded=fallback.discarded,
+            similarity=fallback.similarity,
+            diagnostics=fallback.diagnostics,
         )
 
     coverage_vector = np.zeros(len(features), dtype=float)
@@ -224,9 +249,19 @@ def determinantal_point_process_diversity(
     coverage_map = {features[i]: float(coverage_vector[i]) for i in range(len(features))}
     discarded = [name for name in features if name not in selected]
 
+    diagnostics = {
+        "similarity": "partial_correlation",
+        "lambda_scale": lambda_scale,
+        "jitter": jitter,
+        "family_cap": float(family_cap) if family_cap is not None else 0.0,
+        "top_k": float(limit),
+    }
+
     return DiversitySelectionResult(
         method="dpp",
         selected=selected,
         coverage=coverage_map,
         discarded=discarded,
+        similarity="partial_correlation",
+        diagnostics=diagnostics,
     )

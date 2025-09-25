@@ -44,6 +44,29 @@ class StabilitySelectionOutcome:
     support_counts: Dict[str, int]
 
 
+@dataclass(frozen=True)
+class KnockoffConfig:
+    enabled: bool
+    fdr: float
+    max_features: Optional[int]
+    shrinkage: float
+    min_eigenvalue: float
+    statistic: str
+    random_state: Optional[int]
+    generator: str
+    fallback: Tuple[str, ...]
+
+
+@dataclass
+class KnockoffOutcome:
+    statistics: Dict[str, float]
+    threshold: float
+    selected_features: List[str]
+    discarded: List[str]
+    fdr: float
+    generator: str
+
+
 def _soft_threshold(value: float, lam: float) -> float:
     if value > lam:
         return value - lam
@@ -115,6 +138,79 @@ def _prepare_training_matrix(
     X = X[mask]
     y = y[mask]
     return X, y, usable
+
+
+def _prepare_feature_matrix(
+    frame: pd.DataFrame,
+    features: Sequence[str],
+) -> Tuple[np.ndarray, List[str]]:
+    usable: List[str] = []
+    columns: List[np.ndarray] = []
+    for feature in features:
+        if feature not in frame.columns:
+            continue
+        series = frame[feature].to_numpy(copy=False)
+        if np.isnan(series).all():
+            continue
+        columns.append(series.astype(float))
+        usable.append(feature)
+    if not usable:
+        return np.empty((0, 0)), []
+    matrix = np.column_stack(columns)
+    mask = np.all(np.isfinite(matrix), axis=1)
+    matrix = matrix[mask]
+    return matrix, usable
+
+
+def _partial_correlation_matrix(matrix: np.ndarray, alpha: float) -> np.ndarray:
+    if matrix.size == 0:
+        return np.empty((0, 0))
+    n_samples = matrix.shape[0]
+    centered = matrix - matrix.mean(axis=0, keepdims=True)
+    denom = max(n_samples - 1, 1)
+    covariance = (centered.T @ centered) / denom
+    covariance += np.eye(covariance.shape[0]) * float(max(alpha, 0.0))
+    try:
+        precision = np.linalg.pinv(covariance)
+    except np.linalg.LinAlgError:
+        precision = np.linalg.pinv(covariance + np.eye(covariance.shape[0]) * 1e-6)
+    diag = np.diag(precision)
+    denom_matrix = np.sqrt(np.outer(diag, diag))
+    denom_matrix[denom_matrix == 0.0] = 1.0
+    partial = -precision / denom_matrix
+    np.fill_diagonal(partial, 1.0)
+    return partial
+
+
+def _transform_knockoff_inputs(matrix: np.ndarray, method: str) -> np.ndarray:
+    if matrix.size == 0:
+        return matrix
+    method = str(method or "modelx").lower()
+    if method == "copula":
+        transformed = np.empty_like(matrix, dtype=float)
+        denom = matrix.shape[0] + 1.0
+        for col in range(matrix.shape[1]):
+            series = pd.Series(matrix[:, col])
+            ranks = series.rank(method="average").to_numpy(dtype=float)
+            uniform = ranks / denom
+            centered = uniform - 0.5
+            std = centered.std()
+            if std <= 1e-12:
+                std = 1.0
+            transformed[:, col] = centered / std
+        return transformed
+    if method == "robust":
+        median = np.median(matrix, axis=0)
+        mad = np.median(np.abs(matrix - median), axis=0)
+        mad[mad < 1e-8] = 1.0
+        return (matrix - median) / mad
+    if method == "tski":
+        robust = _transform_knockoff_inputs(matrix, "robust")
+        if robust.shape[0] <= 1:
+            return robust
+        lagged = np.vstack([robust[0], robust[:-1]])
+        return 0.7 * robust + 0.3 * lagged
+    return matrix
 
 
 def stability_selection(
@@ -236,6 +332,127 @@ def stability_selection(
     )
 
 
+def _compute_knockoff_statistics(
+    X: np.ndarray,
+    Xk: np.ndarray,
+    y: np.ndarray,
+    statistic: str,
+) -> np.ndarray:
+    y_centered = y - y.mean()
+    if statistic == "correlation":
+        orig = np.array([
+            0.0 if X[:, j].std() < 1e-8 else abs(np.corrcoef(X[:, j], y_centered)[0, 1])
+            for j in range(X.shape[1])
+        ])
+        knock = np.array([
+            0.0 if Xk[:, j].std() < 1e-8 else abs(np.corrcoef(Xk[:, j], y_centered)[0, 1])
+            for j in range(Xk.shape[1])
+        ])
+        return orig - knock
+    raise ValueError(f"Unsupported knockoff statistic: {statistic}")
+
+
+def _generate_modelx_knockoffs(
+    X: np.ndarray,
+    *,
+    shrinkage: float,
+    min_eigenvalue: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n_samples, n_features = X.shape
+    if n_features == 0 or n_samples == 0:
+        return X.copy(), X.copy()
+    cov = np.cov(X, rowvar=False)
+    cov += np.eye(n_features) * shrinkage
+    eigvals = np.linalg.eigvalsh(cov)
+    min_val = float(np.min(eigvals)) if eigvals.size else 1.0
+    s_value = max(min(2.0 * min_val - 1e-6, 1.0), min_eigenvalue)
+    S = np.eye(n_features) * s_value
+    inv_cov = np.linalg.pinv(cov)
+    middle = 2.0 * S - S @ inv_cov @ S
+    jitter = 1e-6
+    for _ in range(5):
+        try:
+            C = np.linalg.cholesky(middle + np.eye(n_features) * jitter)
+            break
+        except np.linalg.LinAlgError:
+            jitter *= 10.0
+    else:
+        C = np.linalg.cholesky(np.eye(n_features) * max(jitter, 1e-3))
+    gaussian = rng.standard_normal(size=(n_samples, n_features)) @ C.T
+    knockoffs = X - X @ inv_cov @ S + gaussian
+    return X, knockoffs
+
+
+def _knockoff_threshold(statistics: Dict[str, float], fdr: float) -> float:
+    if not statistics:
+        return float("inf")
+    values = sorted({abs(v) for v in statistics.values() if abs(v) > 1e-10})
+    if not values:
+        return float("inf")
+    for t in values:
+        numerator = 1 + sum(1 for v in statistics.values() if v <= -t)
+        denominator = max(1, sum(1 for v in statistics.values() if v >= t))
+        if numerator / denominator <= fdr:
+            return t
+    return float("inf")
+
+
+def modelx_knockoffs(
+    frame: pd.DataFrame,
+    target_column: str,
+    features: Sequence[str],
+    config: KnockoffConfig,
+    *,
+    strategy: Optional[str] = None,
+) -> KnockoffOutcome:
+    X, y, usable = _prepare_training_matrix(frame, target_column, features)
+    if X.size == 0 or not usable:
+        return KnockoffOutcome(
+            statistics={},
+            threshold=float("inf"),
+            selected_features=[],
+            discarded=list(features),
+            fdr=config.fdr,
+            generator=strategy or config.generator,
+        )
+    generator = str(strategy or config.generator or "modelx").lower()
+    X_transformed = _transform_knockoff_inputs(X, generator)
+    X_std, _, _ = _standardize_matrix(X_transformed)
+    rng = np.random.default_rng(config.random_state)
+    shrinkage = config.shrinkage
+    min_eigen = config.min_eigenvalue
+    if generator == "robust":
+        shrinkage = max(shrinkage, 5e-3)
+    elif generator == "tski":
+        shrinkage = max(shrinkage, 1e-2)
+    _, knockoffs = _generate_modelx_knockoffs(
+        X_std,
+        shrinkage=shrinkage,
+        min_eigenvalue=min_eigen,
+        rng=rng,
+    )
+    stats_array = _compute_knockoff_statistics(X_std, knockoffs, y, config.statistic)
+    statistics = {usable[i]: float(stats_array[i]) for i in range(len(usable))}
+    threshold = _knockoff_threshold(statistics, config.fdr)
+    if np.isinf(threshold):
+        ranked = sorted(statistics.items(), key=lambda kv: kv[1], reverse=True)
+        limit = config.max_features or len(ranked)
+        selected = [name for name, _ in ranked[:limit]]
+    else:
+        selected = [name for name, value in statistics.items() if value >= threshold]
+        selected.sort(key=lambda name: statistics[name], reverse=True)
+        if config.max_features is not None:
+            selected = selected[: config.max_features]
+    discarded = [name for name in features if name not in selected]
+    return KnockoffOutcome(
+        statistics=statistics,
+        threshold=float(threshold),
+        selected_features=selected,
+        discarded=discarded,
+        fdr=config.fdr,
+        generator=generator,
+    )
 def _compute_vif(frame: pd.DataFrame) -> Dict[str, float]:
     if frame.shape[1] == 0:
         return {}
@@ -280,9 +497,18 @@ def greedy_representative_selection(
     effect_scores: Dict[str, float],
     corr_cap: float = 0.9,
     max_features: int | None = None,
+    partial_alpha: float = 0.01,
 ) -> Tuple[List[str], List[str]]:
+    feature_matrix, usable = _prepare_feature_matrix(df, candidate_features)
+    index_map = {name: idx for idx, name in enumerate(usable)}
+    partial_matrix: Optional[np.ndarray]
+    if usable:
+        partial_matrix = _partial_correlation_matrix(feature_matrix, alpha=partial_alpha)
+    else:
+        partial_matrix = None
+
     sorted_candidates = sorted(
-        (f for f in candidate_features if f in df.columns),
+        (f for f in candidate_features if f in index_map),
         key=lambda name: effect_scores.get(name, 0.0),
         reverse=True,
     )
@@ -293,8 +519,18 @@ def greedy_representative_selection(
             break
         accept = True
         for kept in selected:
-            corr = df[[feature, kept]].corr().iloc[0, 1]
-            if abs(corr) >= corr_cap:
+            if partial_matrix is not None:
+                idx_feature = index_map.get(feature)
+                idx_kept = index_map.get(kept)
+                if idx_feature is None or idx_kept is None:
+                    continue
+                similarity = partial_matrix[idx_feature, idx_kept]
+            else:
+                corr_frame = df[[feature, kept]]
+                similarity = corr_frame.corr().iloc[0, 1]
+            if np.isnan(similarity):
+                continue
+            if abs(similarity) >= corr_cap:
                 accept = False
                 discarded.append(feature)
                 break

@@ -1,10 +1,10 @@
-# /selection/calibration.py
+# /selection/screening.py
 """Stage 1 screening utilities (rank tests + FDR)."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import erf, sqrt
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -13,6 +13,8 @@ import pandas as pd
 from numpy.random import Generator, default_rng
 
 from .splits import CrossFitSplit
+from .math_utils import chi2_sf
+from .utils import cliffs_delta
 
 
 @dataclass
@@ -22,12 +24,14 @@ class ScreeningDetail:
     method: str
     effect: float
     pvalue: float
+    extras: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class ScreeningResult:
     pvalues: Dict[str, float]
     effects: Dict[str, float]
+    cliffs_delta: Dict[str, float]
     details: List[ScreeningDetail]
     passing_features: List[str]
     methods: List[str]
@@ -48,28 +52,53 @@ def _approx_spearman_pvalue(r: float, n: int) -> float:
     return float(max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / sqrt(2)))))))
 
 
-def _cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
-    x = np.asarray(x)
-    y = np.asarray(y)
-    if x.size == 0 or y.size == 0:
-        return 0.0
-    rx = np.sort(x)
-    ry = np.sort(y)
-    nx = rx.size
-    ny = ry.size
-    i = j = 0
-    greater = lesser = 0
-    while i < nx and j < ny:
-        if rx[i] > ry[j]:
-            greater += nx - i
-            j += 1
-        elif rx[i] < ry[j]:
-            lesser += ny - j
-            i += 1
-        else:
-            i += 1
-            j += 1
-    return float((greater - lesser) / (nx * ny))
+def _normal_cdf(z: float) -> float:
+    return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+
+
+def _kendall_tau(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    n = x.size
+    if n <= 1:
+        return 0.0, 0
+    concordant = discordant = 0
+    for i in range(n - 1):
+        xi = x[i]
+        yi = y[i]
+        for j in range(i + 1, n):
+            dx = xi - x[j]
+            dy = yi - y[j]
+            if dx == 0 and dy == 0:
+                continue
+            prod = dx * dy
+            if prod > 0:
+                concordant += 1
+            elif prod < 0:
+                discordant += 1
+    total_pairs = n * (n - 1) // 2
+    if total_pairs == 0:
+        return 0.0, 0
+    num = concordant - discordant
+    counts_x = np.unique(x, return_counts=True)[1]
+    counts_y = np.unique(y, return_counts=True)[1]
+    tie_x_pairs = sum(c * (c - 1) // 2 for c in counts_x if c > 1)
+    tie_y_pairs = sum(c * (c - 1) // 2 for c in counts_y if c > 1)
+    den_x = total_pairs - tie_x_pairs
+    den_y = total_pairs - tie_y_pairs
+    denom = sqrt(max(den_x, 1) * max(den_y, 1))
+    if denom == 0:
+        return 0.0, concordant + discordant
+    tau = num / denom
+    return float(max(-1.0, min(1.0, tau))), concordant + discordant
+
+
+def _kendall_tau_pvalue(tau: float, n: int) -> float:
+    if n <= 1:
+        return 1.0
+    var = (4.0 * n + 10.0) / (9.0 * n * (n - 1))
+    if var <= 0:
+        return 1.0
+    z = tau / sqrt(var)
+    return float(max(0.0, min(1.0, 2.0 * (1.0 - _normal_cdf(abs(z))))))
 
 
 def _rbf_kernel(values: np.ndarray, bandwidth: float | str | None) -> np.ndarray:
@@ -237,29 +266,91 @@ def _distance_correlation_test(
     return statistic, float(max(0.0, min(1.0, pvalue)))
 
 
+def _combine_simes(pvalues: Sequence[float]) -> float:
+    ordered = sorted(pvalues)
+    m = len(ordered)
+    combined = min((m / (i + 1)) * p for i, p in enumerate(ordered))
+    return float(min(1.0, combined))
+
+
+def _combine_fisher(pvalues: Sequence[float]) -> float:
+    stat = -2.0 * sum(np.log(p if p > 1e-16 else 1e-16) for p in pvalues)
+    df = 2.0 * len(pvalues)
+    return float(max(0.0, min(1.0, chi2_sf(stat, df))))
+
+
 def _combine_pvalues(pvalues: Sequence[float], method: str) -> float:
     valid = [p for p in pvalues if 0.0 <= p <= 1.0]
     if not valid:
         return 1.0
     method = (method or "simes").lower()
     if method == "simes":
-        ordered = sorted(valid)
-        m = len(ordered)
-        combined = min((m / (i + 1)) * p for i, p in enumerate(ordered))
-        return float(min(1.0, combined))
+        return _combine_simes(valid)
     if method == "fisher":
-        # Fisher's method without SciPy: -2 sum log p ~ chi2(2m); we approximate via normal
-        stat = -2.0 * sum(np.log(p if p > 1e-12 else 1e-12) for p in valid)
-        # Wilson-Hilferty normal approximation
-        z = ((stat / (2 * len(valid))) ** (1 / 3) - (1 - 2 / (9 * len(valid)))) / sqrt(2 / (9 * len(valid)))
-        return float(max(0.0, min(1.0, 1.0 - 0.5 * (1.0 + erf(z / sqrt(2))))))
+        return _combine_fisher(valid)
     if method == "empirical_brown":
-        # Stage 1 fallback: reuse Simes as a dependence-aware conservative rule
-        ordered = sorted(valid)
-        m = len(ordered)
-        combined = min((m / (i + 1)) * p for i, p in enumerate(ordered))
-        return float(min(1.0, combined))
+        raise RuntimeError("empirical_brown requires covariance context")
     raise ValueError(f"Unknown combine method: {method}")
+
+
+def _empirical_brown(pvalues: Sequence[float], covariance: Optional[np.ndarray]) -> float:
+    pvals = np.asarray(pvalues, dtype=float)
+    k = pvals.size
+    if k == 0:
+        return 1.0
+    if k == 1 or covariance is None:
+        return _combine_simes(pvals)
+    clipped = np.clip(pvals, 1e-16, 1.0)
+    x = -2.0 * np.log(clipped)
+    cov = np.asarray(covariance, dtype=float)
+    if cov.shape != (k, k):
+        return _combine_simes(pvals)
+    cov = np.nan_to_num(cov, nan=0.0)
+    mu = 2.0 * k
+    # Variance of the sum using covariance matrix
+    ones = np.ones(k)
+    var = float(ones @ cov @ ones)
+    if var <= 0:
+        return _combine_simes(pvals)
+    scale = var / (2.0 * mu)
+    if scale <= 0:
+        return _combine_simes(pvals)
+    df = 2.0 * mu * mu / var
+    stat = x.sum() / scale
+    return float(max(0.0, min(1.0, chi2_sf(stat, df))))
+
+
+def _estimate_empirical_covariance(
+    per_feature_pvals: Mapping[str, Mapping[int, float]],
+    test_count: int,
+) -> Optional[np.ndarray]:
+    if test_count == 0:
+        return None
+    rows: List[np.ndarray] = []
+    for mapping in per_feature_pvals.values():
+        if not mapping:
+            continue
+        row = np.full(test_count, np.nan, dtype=float)
+        for idx, value in mapping.items():
+            if 0 <= idx < test_count:
+                row[idx] = -2.0 * np.log(max(value, 1e-16))
+        if np.all(np.isnan(row)):
+            continue
+        rows.append(row)
+    if len(rows) < 2:
+        return None
+    data = np.vstack(rows)
+    means = np.nanmean(data, axis=0)
+    centered = data - means
+    covariance = np.zeros((test_count, test_count), dtype=float)
+    for i in range(test_count):
+        for j in range(test_count):
+            valid = ~np.isnan(centered[:, i]) & ~np.isnan(centered[:, j])
+            if valid.sum() < 2:
+                covariance[i, j] = 4.0 if i == j else 0.0
+            else:
+                covariance[i, j] = float(np.dot(centered[valid, i], centered[valid, j]) / (valid.sum() - 1))
+    return covariance
 
 
 def _apply_fdr(pvalues: Mapping[str, float], alpha: float, method: str) -> List[str]:
@@ -290,8 +381,8 @@ def _evaluate_screening_methods(
     y: np.ndarray,
     methods: Mapping[str, Mapping[str, object] | object],
     rng: Generator,
-) -> Dict[str, Tuple[float, float]]:
-    results: Dict[str, Tuple[float, float]] = {}
+) -> Dict[str, Tuple[float, float, Dict[str, float]]]:
+    results: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
     sample_size = x.size
     if sample_size == 0:
         return results
@@ -310,15 +401,22 @@ def _evaluate_screening_methods(
             rho = _spearman_corr(x, y)
             pval = _approx_spearman_pvalue(rho, sample_size)
             effect = abs(rho)
+            delta = float(abs(cliffs_delta(x, y)))
             if bool(cfg.get("cliffs_delta", True)):
-                effect = max(effect, abs(_cliffs_delta(x, y)))
-            results[method_name] = (float(effect), float(pval))
+                effect = max(effect, delta)
+            results[method_name] = (float(effect), float(pval), {"cliffs_delta": delta})
+        elif method_name in {"kendall", "kendall_tau"}:
+            tau, used_pairs = _kendall_tau(x, y)
+            if used_pairs <= 0:
+                continue
+            pval = _kendall_tau_pvalue(tau, sample_size)
+            results[method_name] = (float(abs(tau)), float(pval), {})
         elif method_name.startswith("hsic"):
             effect, pval = _hsic_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval))
+            results[method_name] = (float(effect), float(pval), {})
         elif method_name in {"dcor", "dcor_t", "distance_correlation"}:
             effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval))
+            results[method_name] = (float(effect), float(pval), {})
         else:
             continue
     return results
@@ -334,15 +432,19 @@ def screening_out_of_fold(
     *,
     methods: Optional[Mapping[str, Mapping[str, object]]] = None,
     random_state: Optional[int] = None,
+    effect_min: float = 0.0,
+    cliffs_delta_min: float = 0.0,
 ) -> ScreeningResult:
     combine_method = str(combine_cfg.get("method", "simes")).lower()
     fdr_alpha = float(combine_cfg.get("alpha", 0.1))
     fdr_method = str(combine_cfg.get("fdr", "by")).lower()
 
-    per_feature_effects: Dict[str, List[float]] = defaultdict(list)
-    per_feature_pvals: Dict[str, List[float]] = defaultdict(list)
+    per_feature_effects: Dict[str, Dict[int, float]] = defaultdict(dict)
+    per_feature_pvals: Dict[str, Dict[int, float]] = defaultdict(dict)
     details: List[ScreeningDetail] = []
     executed_methods: set[str] = set()
+    test_positions: Dict[Tuple[str, str, str], int] = {}
+    per_feature_deltas: Dict[str, Dict[int, float]] = defaultdict(dict)
 
     method_spec = methods or {"spearman": {"enabled": True}}
     rng = default_rng(random_state)
@@ -363,9 +465,13 @@ def screening_out_of_fold(
                 results = _evaluate_screening_methods(x, y, method_spec, rng)
                 if not results:
                     continue
-                for method_name, (effect, pval) in results.items():
-                    per_feature_effects[feature].append(effect)
-                    per_feature_pvals[feature].append(pval)
+                for method_name, (effect, pval, extras) in results.items():
+                    test_key = (split.outer.combo_id, fold_label, method_name)
+                    test_idx = test_positions.setdefault(test_key, len(test_positions))
+                    per_feature_effects[feature][test_idx] = effect
+                    per_feature_pvals[feature][test_idx] = pval
+                    if "cliffs_delta" in extras:
+                        per_feature_deltas[feature][test_idx] = abs(extras["cliffs_delta"])
                     executed_methods.add(method_name)
                     details.append(
                         ScreeningDetail(
@@ -374,22 +480,54 @@ def screening_out_of_fold(
                             method=method_name,
                             effect=effect,
                             pvalue=pval,
+                            extras={k: float(v) for k, v in extras.items()},
                         )
                     )
 
+    test_count = len(test_positions)
+    covariance = _estimate_empirical_covariance(per_feature_pvals, test_count)
+
     combined_pvalues: Dict[str, float] = {}
     effect_summary: Dict[str, float] = {}
+    delta_summary: Dict[str, float] = {}
     for feature in feature_columns:
-        pvals = per_feature_pvals.get(feature, [])
-        combined_pvalues[feature] = _combine_pvalues(pvals, method=combine_method)
-        effects = per_feature_effects.get(feature, [])
-        effect_summary[feature] = float(max(effects)) if effects else 0.0
+        mapping = per_feature_pvals.get(feature, {})
+        if not mapping:
+            combined_pvalues[feature] = 1.0
+            effect_summary[feature] = 0.0
+            delta_summary[feature] = 0.0
+            continue
+        ordered_indices = sorted(mapping.keys())
+        pvals = [mapping[idx] for idx in ordered_indices]
+        if combine_method == "empirical_brown":
+            if covariance is not None:
+                sub_cov = covariance[np.ix_(ordered_indices, ordered_indices)]
+                combined = _empirical_brown(pvals, sub_cov)
+            else:
+                combined = _combine_simes(pvals)
+        else:
+            combined = _combine_pvalues(pvals, method=combine_method)
+        combined_pvalues[feature] = combined
+        effects_map = per_feature_effects.get(feature, {})
+        effect_summary[feature] = float(max(effects_map.values())) if effects_map else 0.0
+        delta_map = per_feature_deltas.get(feature, {})
+        delta_summary[feature] = float(max(delta_map.values())) if delta_map else 0.0
 
     selected = _apply_fdr(combined_pvalues, alpha=fdr_alpha, method=fdr_method)
+    if effect_min > 0.0 or cliffs_delta_min > 0.0:
+        filtered: List[str] = []
+        for feature in selected:
+            if effect_min > 0.0 and effect_summary.get(feature, 0.0) < effect_min:
+                continue
+            if cliffs_delta_min > 0.0 and delta_summary.get(feature, 0.0) < cliffs_delta_min:
+                continue
+            filtered.append(feature)
+        selected = filtered
     # Zero out features not passing FDR to ensure downstream contracts know.
     return ScreeningResult(
         pvalues=combined_pvalues,
         effects=effect_summary,
+        cliffs_delta=delta_summary,
         details=details,
         passing_features=selected,
         methods=sorted(executed_methods),
