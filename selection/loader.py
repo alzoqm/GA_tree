@@ -47,22 +47,79 @@ def resolve_paths(cfg: Dict, config_dir: Path | None = None) -> SelectionPaths:
     """Resolve selection related paths relative to the config location."""
 
     base_dir = Path(config_dir or ".").resolve()
+    project_root = base_dir.parent
     data_cfg = cfg.get("data", {})
+    env_cfg = cfg.get("environment", {})
     selection_cfg = cfg.get("selection_pipeline", {})
 
-    def _resolve(path_value: Optional[str]) -> Optional[Path]:
+    data_root: Optional[Path] = None
+    raw_data_dir = env_cfg.get("data_dir")
+    if raw_data_dir:
+        data_root_candidate = Path(raw_data_dir)
+        data_root = (
+            (base_dir / data_root_candidate).resolve()
+            if not data_root_candidate.is_absolute()
+            else data_root_candidate.resolve()
+        )
+
+    def _resolve(
+        path_value: Optional[str],
+        *,
+        prefer_data_dir: bool = False,
+        default_dir: Optional[Path] = None,
+        must_exist: bool = False,
+    ) -> Optional[Path]:
         if not path_value:
             return None
-        raw = Path(path_value)
-        return (base_dir / raw).resolve() if not raw.is_absolute() else raw.resolve()
 
-    final_pkl = _resolve(data_cfg.get("final_features_path_pkl"))
-    final_csv = _resolve(data_cfg.get("final_features_path"))
-    model_config_path = _resolve(data_cfg.get("model_config_path"))
-    feature_active_path = _resolve(
-        data_cfg.get("feature_classification_path", "Config/feature_classification_active.yaml")
+        raw = Path(path_value)
+        if raw.is_absolute():
+            candidate = raw.resolve()
+            if not must_exist or candidate.exists():
+                return candidate
+            return candidate
+
+        search_roots: list[Path] = []
+        if prefer_data_dir and data_root is not None:
+            search_roots.append(data_root)
+        if default_dir is not None:
+            search_roots.append(default_dir.resolve())
+        search_roots.extend([project_root, base_dir])
+
+        for root in search_roots:
+            candidate = (root / raw).resolve()
+            if not must_exist or candidate.exists():
+                return candidate
+
+        fallback_root = search_roots[0] if search_roots else base_dir
+        return (fallback_root / raw).resolve()
+
+    final_pkl = _resolve(
+        data_cfg.get("final_features_path_pkl"),
+        prefer_data_dir=True,
+        default_dir=project_root,
     )
-    artifact_dir = _resolve(selection_cfg.get("artifact_dir", "dataset/selection_artifacts"))
+    final_csv = _resolve(
+        data_cfg.get("final_features_path"),
+        prefer_data_dir=True,
+        default_dir=project_root,
+    )
+    model_config_path = _resolve(
+        data_cfg.get("model_config_path"),
+        prefer_data_dir=True,
+        default_dir=project_root,
+    )
+    feature_active_path = _resolve(
+        data_cfg.get(
+            "feature_classification_path",
+            "Config/feature_classification_active.yaml",
+        ),
+        default_dir=project_root,
+    )
+    artifact_dir = _resolve(
+        selection_cfg.get("artifact_dir", "dataset/selection_artifacts"),
+        default_dir=project_root,
+    )
 
     if model_config_path is None or feature_active_path is None:
         raise ValueError("model_config_path and feature_classification_path must be set in config")
