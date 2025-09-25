@@ -219,6 +219,8 @@ evaluation:
     mode: "weighted"
     size_weight: 0.5
     depth_weight: 0.5
+    min_nodes: 32
+    
   oos_objectives:
     objectives: ["mean_return", "max_drawdown", "sharpe_ratio", "psr", "win_rate", "profit_factor", "calmar_ratio", "sortino_ratio", "volatility", "omega_ratio", "information_ratio", "compound_value", "trade_win_rate", "turnover"]
     minimize: [false, true, false, false, false, false, false, false, true, false, false, false, false, true]

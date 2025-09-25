@@ -239,6 +239,7 @@ evaluation:
     mode: "weighted"     # "weighted" | "max" | "geomean"
     size_weight: 0.5     # used when mode == weighted
     depth_weight: 0.5    # used when mode == weighted
+    min_nodes: 32
     
   # 아웃오브샘플 목표 (윈도우별 OOS 평가용)
   oos_objectives:

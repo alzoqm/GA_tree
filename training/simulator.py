@@ -261,6 +261,18 @@ class FitnessSimulator:
 
         need_size = 'comp_size_norm' in req_names or 'complexity' in req_names
         need_depth = 'comp_depth_norm' in req_names or 'complexity' in req_names
+        cx_cfg: dict[str, object] = {}
+        min_nodes = 0
+        if (need_size or need_depth) and isinstance(evaluation_config, dict):
+            cx_cfg = evaluation_config.get('complexity', {}) or {}
+            min_nodes_cfg = cx_cfg.get('min_nodes', cx_cfg.get('min_node', 0))
+            try:
+                min_nodes = int(float(min_nodes_cfg))
+            except (TypeError, ValueError):
+                min_nodes = 0
+            min_nodes = max(0, min_nodes)
+        size_used_np: np.ndarray | None = None
+        small_complexity_mask_np: np.ndarray | None = None
         need_root_balance = 'root_balance_penalty' in req_names
         comp_cols: dict[str, np.ndarray] = {}
         comp_size_np = None
@@ -285,11 +297,22 @@ class FitnessSimulator:
             pt = population.population_tensor
             used = (pt[:, :, COL_NODE_TYPE] != float(NODE_TYPE_UNUSED))
             used_f = used.to(dtype=torch.float32)
+            size_used = used.sum(dim=1).to(dtype=torch.float32)
+            if min_nodes > 0:
+                small_complexity_mask = size_used <= float(min_nodes)
+            else:
+                small_complexity_mask = torch.zeros_like(size_used, dtype=torch.bool)
+            size_used_np = size_used.detach().to('cpu').numpy().astype(np.float32)
+            small_complexity_mask_np = small_complexity_mask.detach().to('cpu').numpy() if min_nodes > 0 else np.zeros((B,), dtype=bool)
 
             if need_size:
-                denom = max(1, population.max_nodes - 3)
-                size_used = used.sum(dim=1).to(dtype=torch.float32)
-                comp_size = torch.clamp((size_used - 3.0) / float(denom), min=0.0, max=1.0)
+                denom = float(population.max_nodes - min_nodes)
+                if denom <= 0:
+                    comp_size = torch.zeros_like(size_used)
+                else:
+                    comp_size = torch.clamp((size_used - float(min_nodes)) / denom, min=0.0, max=1.0)
+                if min_nodes > 0:
+                    comp_size = torch.where(small_complexity_mask, torch.zeros_like(comp_size), comp_size)
                 comp_size_np = comp_size.detach().to('cpu').numpy().astype(np.float32)
                 comp_size_np[invalid_mask] = 1e9
                 if 'comp_size_norm' in req_names:
@@ -301,6 +324,8 @@ class FitnessSimulator:
                 depth_masked = depth_vals * used_f
                 max_depth_vals = torch.amax(depth_masked, dim=1)
                 comp_depth = torch.clamp(max_depth_vals / float(denom_d), min=0.0, max=1.0)
+                if min_nodes > 0:
+                    comp_depth = torch.where(small_complexity_mask, torch.zeros_like(comp_depth), comp_depth)
                 comp_depth_np = comp_depth.detach().to('cpu').numpy().astype(np.float32)
                 comp_depth_np[invalid_mask] = 1e9
                 if 'comp_depth_norm' in req_names:
@@ -308,7 +333,6 @@ class FitnessSimulator:
 
         # Composite single complexity metric
         if 'complexity' in req_names:
-            cx_cfg = evaluation_config.get('complexity', {}) if isinstance(evaluation_config, dict) else {}
             mode = str(cx_cfg.get('mode', 'weighted')).lower()
             w_size = float(cx_cfg.get('size_weight', 0.5))
             w_depth = float(cx_cfg.get('depth_weight', 0.5))
@@ -325,6 +349,11 @@ class FitnessSimulator:
             else:  # weighted average (default)
                 denom_w = (w_size + w_depth) if (w_size + w_depth) != 0 else 1.0
                 comp = ((w_size * comp_size_np + w_depth * comp_depth_np) / denom_w).astype(np.float32)
+            if min_nodes > 0:
+                if small_complexity_mask_np is None and size_used_np is not None:
+                    small_complexity_mask_np = size_used_np <= float(min_nodes)
+                if small_complexity_mask_np is not None:
+                    comp[small_complexity_mask_np] = 0.0
             comp[invalid_mask] = 1e9
             comp_cols['complexity'] = comp
 
