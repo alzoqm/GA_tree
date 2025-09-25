@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import subprocess
 from collections import defaultdict
@@ -42,6 +43,9 @@ from .snapshot import (
 from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class StageOneConfig:
     target_column: str
@@ -61,6 +65,7 @@ class StageOneConfig:
     whitelist: Sequence[str] = ()
     screening_methods: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     random_state: Optional[int] = None
+    enforce_significance: bool = True
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,7 @@ class SelectionPipeline:
         if not normalized_methods:
             normalized_methods = {"spearman": {"enabled": True}}
         random_state = screen_cfg.get("random_state")
+        enforce_significance = bool(screen_cfg.get("enforce_significance", True))
         return StageOneConfig(
             target_column=target_column,
             min_bars_per_split=min_bars,
@@ -179,6 +185,7 @@ class SelectionPipeline:
             whitelist=whitelist,
             screening_methods=normalized_methods,
             random_state=int(random_state) if random_state is not None else None,
+            enforce_significance=enforce_significance,
         )
 
     @staticmethod
@@ -307,16 +314,26 @@ class SelectionPipeline:
             random_state=self.stage1.random_state,
         )
 
-        candidate_features = set(screening_result.passing_features) | set(self.stage1.whitelist)
-        if not candidate_features:
-            fallback_limit = self.stage1.max_features or 32
-            candidate_features = set(
-                sorted(
-                    clean_features,
-                    key=lambda f: screening_result.effects.get(f, 0.0),
-                    reverse=True,
-                )[:fallback_limit]
+        passing_features = set(screening_result.passing_features)
+        whitelist = set(self.stage1.whitelist)
+
+        if not passing_features:
+            raise RuntimeError(
+                "No features passed the FDR threshold during screening. "
+                "Consider loosening screening parameters if this is unexpected."
             )
+
+        if self.stage1.enforce_significance:
+            missing_whitelist = sorted(whitelist - passing_features)
+            if missing_whitelist:
+                logger.warning(
+                    "Dropping %d whitelisted features that failed significance checks: %s",
+                    len(missing_whitelist),
+                    ", ".join(missing_whitelist[:10]) + ("..." if len(missing_whitelist) > 10 else ""),
+                )
+            candidate_features = passing_features
+        else:
+            candidate_features = passing_features | whitelist
 
         ranked_candidates = sorted(
             candidate_features,
@@ -380,8 +397,10 @@ class SelectionPipeline:
             mad_factor=self.stage1.mad_factor,
         )
 
-        # Merge bool features determined during calibration with whitelist to form final set
-        final_feature_set = sorted(set(final_features) | set(calibration_result.feature_bool) | set(self.stage1.whitelist))
+        # Merge bool features determined during calibration with surviving whitelist entries
+        surviving = set(final_features) | set(calibration_result.feature_bool)
+        whitelist_survivors = [feature for feature in self.stage1.whitelist if feature in surviving]
+        final_feature_set = sorted(surviving | set(whitelist_survivors))
 
         updated_model_cfg = self._update_model_config(
             model_config,
@@ -423,16 +442,20 @@ class SelectionPipeline:
                 bounds = existing_num[feature]
                 final_num[feature] = [float(bounds[0]), float(bounds[1])]
 
-        final_bool = [feature for feature in calibration.feature_bool if feature in final_features]
+        final_feature_set = set(final_features)
+
+        final_bool = [feature for feature in calibration.feature_bool if feature in final_feature_set]
         for feature in existing_bool:
-            if feature in final_features and feature not in final_bool:
+            if feature in final_feature_set and feature not in final_bool:
                 final_bool.append(feature)
 
-        final_cmp = {
-            key: value
-            for key, value in existing_cmp.items()
-            if key in final_features
-        }
+        final_cmp: Dict[str, List[str]] = {}
+        for key, value in existing_cmp.items():
+            if key not in final_feature_set:
+                continue
+            filtered_values = [item for item in value if item in final_feature_set]
+            if filtered_values:
+                final_cmp[key] = filtered_values
 
         updated["feature_num"] = final_num
         updated["feature_bool"] = final_bool

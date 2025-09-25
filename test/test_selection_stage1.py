@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from selection.integrity import apply_integrity_gates
@@ -104,7 +105,7 @@ def test_pipeline_selects_signal_features(tmp_path):
     assert len(artifacts.selected_features) <= selection_cfg["stage2_selection"]["max_features"]
 
 
-def test_pipeline_persists_outputs(tmp_path):
+def test_pipeline_persists_outputs(tmp_path, caplog):
     rng = np.random.default_rng(7)
     n = 420
     signal = rng.standard_normal(n)
@@ -147,6 +148,7 @@ def test_pipeline_persists_outputs(tmp_path):
 
     paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
 
+    caplog.set_level("WARNING", logger="selection.pipeline")
     pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=False)
     artifacts = pipeline.run(frame, baseline_model)
 
@@ -155,15 +157,105 @@ def test_pipeline_persists_outputs(tmp_path):
     assert "feat_alpha" in written_model["feature_num"]
     low, high = written_model["feature_num"]["feat_alpha"]
     assert low < high
-    assert "flag_breakout" in written_model["feature_bool"]
+    assert "flag_breakout" not in written_model["feature_bool"]
+    assert any("Dropping" in message for message in caplog.messages)
 
     # Snapshot file created with selection_snapshot
     snapshot_data = yaml.safe_load(active_path.read_text(encoding="utf-8"))
     assert "selection_snapshot" in snapshot_data
-    assert "feat_alpha" in snapshot_data["selection_snapshot"]["active_feature_whitelist"]
+    snapshot_whitelist = snapshot_data["selection_snapshot"]["active_feature_whitelist"]
+    assert "feat_alpha" in snapshot_whitelist
+    assert "flag_breakout" not in snapshot_whitelist
 
     # Artifact JSON recorded
     json_files = list(artifact_dir.glob("selection_stage1_*.json"))
     assert json_files, "Expected artifact JSON file"
     artifact_payload = json.loads(json_files[0].read_text(encoding="utf-8"))
     assert artifact_payload["selected_features"] == artifacts.selected_features
+
+
+def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
+    rng = np.random.default_rng(11)
+    n = 300
+    base = rng.standard_normal(n)
+    target = base + rng.standard_normal(n) * 0.2
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feat_good": base,
+            "flag_signal": rng.integers(0, 2, n),
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 3, "device": "cpu"},
+        "cpcv": {"folds": 3, "test_folds": 1, "min_trades_per_split": 48, "shuffle_seed": 8},
+        "training_strategy": {},
+    }
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 60,
+        "stage1_screening": {
+            "combine": {"method": "simes", "alpha": 0.05, "fdr": "by"},
+            "enforce_significance": False,
+        },
+        "integrity": {"min_unique_fraction": 0.0},
+        "feature_whitelist": ["flag_signal"],
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert "flag_signal" in artifacts.selected_features
+
+
+def test_pipeline_raises_when_no_significant_features(tmp_path):
+    rng = np.random.default_rng(99)
+    n = 200
+    target = rng.standard_normal(n)
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "pure_noise": rng.standard_normal(n),
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 1, "device": "cpu"},
+        "cpcv": {"folds": 3, "test_folds": 1, "min_trades_per_split": 64, "shuffle_seed": 5},
+        "training_strategy": {},
+    }
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 64,
+        "stage1_screening": {"combine": {"method": "simes", "alpha": 0.01, "fdr": "by"}},
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+
+    with pytest.raises(RuntimeError, match="No features passed the FDR threshold"):
+        pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
