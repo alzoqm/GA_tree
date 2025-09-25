@@ -44,6 +44,26 @@ class StabilitySelectionOutcome:
     support_counts: Dict[str, int]
 
 
+@dataclass(frozen=True)
+class KnockoffConfig:
+    enabled: bool
+    fdr: float
+    max_features: Optional[int]
+    shrinkage: float
+    min_eigenvalue: float
+    statistic: str
+    random_state: Optional[int]
+
+
+@dataclass
+class KnockoffOutcome:
+    statistics: Dict[str, float]
+    threshold: float
+    selected_features: List[str]
+    discarded: List[str]
+    fdr: float
+
+
 def _soft_threshold(value: float, lam: float) -> float:
     if value > lam:
         return value - lam
@@ -236,6 +256,109 @@ def stability_selection(
     )
 
 
+def _compute_knockoff_statistics(
+    X: np.ndarray,
+    Xk: np.ndarray,
+    y: np.ndarray,
+    statistic: str,
+) -> np.ndarray:
+    y_centered = y - y.mean()
+    if statistic == "correlation":
+        orig = np.array([
+            0.0 if X[:, j].std() < 1e-8 else abs(np.corrcoef(X[:, j], y_centered)[0, 1])
+            for j in range(X.shape[1])
+        ])
+        knock = np.array([
+            0.0 if Xk[:, j].std() < 1e-8 else abs(np.corrcoef(Xk[:, j], y_centered)[0, 1])
+            for j in range(Xk.shape[1])
+        ])
+        return orig - knock
+    raise ValueError(f"Unsupported knockoff statistic: {statistic}")
+
+
+def _generate_modelx_knockoffs(
+    X: np.ndarray,
+    *,
+    shrinkage: float,
+    min_eigenvalue: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n_samples, n_features = X.shape
+    if n_features == 0 or n_samples == 0:
+        return X.copy(), X.copy()
+    cov = np.cov(X, rowvar=False)
+    cov += np.eye(n_features) * shrinkage
+    eigvals = np.linalg.eigvalsh(cov)
+    min_val = float(np.min(eigvals)) if eigvals.size else 1.0
+    s_value = max(min(2.0 * min_val - 1e-6, 1.0), min_eigenvalue)
+    S = np.eye(n_features) * s_value
+    inv_cov = np.linalg.pinv(cov)
+    middle = 2.0 * S - S @ inv_cov @ S
+    jitter = 1e-6
+    for _ in range(5):
+        try:
+            C = np.linalg.cholesky(middle + np.eye(n_features) * jitter)
+            break
+        except np.linalg.LinAlgError:
+            jitter *= 10.0
+    else:
+        C = np.linalg.cholesky(np.eye(n_features) * max(jitter, 1e-3))
+    gaussian = rng.standard_normal(size=(n_samples, n_features)) @ C.T
+    knockoffs = X - X @ inv_cov @ S + gaussian
+    return X, knockoffs
+
+
+def _knockoff_threshold(statistics: Dict[str, float], fdr: float) -> float:
+    if not statistics:
+        return float("inf")
+    values = sorted({abs(v) for v in statistics.values() if abs(v) > 1e-10})
+    if not values:
+        return float("inf")
+    for t in values:
+        numerator = 1 + sum(1 for v in statistics.values() if v <= -t)
+        denominator = max(1, sum(1 for v in statistics.values() if v >= t))
+        if numerator / denominator <= fdr:
+            return t
+    return float("inf")
+
+
+def modelx_knockoffs(
+    frame: pd.DataFrame,
+    target_column: str,
+    features: Sequence[str],
+    config: KnockoffConfig,
+) -> KnockoffOutcome:
+    X, y, usable = _prepare_training_matrix(frame, target_column, features)
+    if X.size == 0 or not usable:
+        return KnockoffOutcome(statistics={}, threshold=float("inf"), selected_features=[], discarded=list(features), fdr=config.fdr)
+    X_std, _, _ = _standardize_matrix(X)
+    rng = np.random.default_rng(config.random_state)
+    _, knockoffs = _generate_modelx_knockoffs(
+        X_std,
+        shrinkage=config.shrinkage,
+        min_eigenvalue=config.min_eigenvalue,
+        rng=rng,
+    )
+    stats_array = _compute_knockoff_statistics(X_std, knockoffs, y, config.statistic)
+    statistics = {usable[i]: float(stats_array[i]) for i in range(len(usable))}
+    threshold = _knockoff_threshold(statistics, config.fdr)
+    if np.isinf(threshold):
+        ranked = sorted(statistics.items(), key=lambda kv: kv[1], reverse=True)
+        limit = config.max_features or len(ranked)
+        selected = [name for name, _ in ranked[:limit]]
+    else:
+        selected = [name for name, value in statistics.items() if value >= threshold]
+        selected.sort(key=lambda name: statistics[name], reverse=True)
+        if config.max_features is not None:
+            selected = selected[: config.max_features]
+    discarded = [name for name in features if name not in selected]
+    return KnockoffOutcome(
+        statistics=statistics,
+        threshold=float(threshold),
+        selected_features=selected,
+        discarded=discarded,
+        fdr=config.fdr,
+    )
 def _compute_vif(frame: pd.DataFrame) -> Dict[str, float]:
     if frame.shape[1] == 0:
         return {}
