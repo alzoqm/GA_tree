@@ -123,43 +123,73 @@ cpcv:
   evaluation_cache_dir: "results/cpcv_cache"
 
 # 6. Feature Selection Pipeline (Stage 1 defaults)
+# selection_pipeline:
+#   enabled: false
+#   dry_run: true
+#   target_column: "target"
+#   artifact_dir: "results/selection_artifacts"
+#   min_bars_per_split: 256
+#   integrity:
+#     max_missing_ratio: 0.4
+#     min_unique_fraction: 0.005
+#     max_zero_fraction: 0.995
+#     correlation_threshold: 0.999
+#   stage1_screening:
+#     combine: {method: simes, alpha: 0.1, fdr: by}
+#   stage2_selection:
+#     corr_cap: 0.9
+#     max_features: 64
+#     inner_ratio: 0.5
+#     stability_selection:
+#       enabled: false
+#       subsamples: 48
+#       sample_fraction: 0.6
+#       cutoff: 0.6
+#       max_features: 32
+#       alpha_grid: [0.8, 0.4, 0.1]
+#       random_state: null
+#       max_iter: 200
+#       tolerance: 0.0001
+#   stage3_diversity:
+#     enabled: false
+#     method: facility_location
+#     top_k: 32
+#     family_cap: {max_per_family: 2}
+#   stage4_calibration:
+#     vif_threshold: 12.0
+#     robust_quantiles: [0.01, 0.99]
+#     mad_margin: {factor: 1.4826}
+#   feature_whitelist: []
+
 selection_pipeline:
-  enabled: false
-  dry_run: true
+  enabled: true
+  dry_run: false  # 실제 파일에 결과를 저장하려면 false로 설정
   target_column: "target"
   artifact_dir: "results/selection_artifacts"
   min_bars_per_split: 256
-  integrity:
-    max_missing_ratio: 0.4
-    min_unique_fraction: 0.005
-    max_zero_fraction: 0.995
-    correlation_threshold: 0.999
+
   stage1_screening:
+    methods:
+      spearman: {enabled: true, cliffs_delta: true} # 빠르고 효과적
+      hsic: {enabled: false}  # 매우 느리므로 기본적으로 비활성화
+      dcor: {enabled: false}  # 매우 느리므로 기본적으로 비활성화
     combine: {method: simes, alpha: 0.1, fdr: by}
+
   stage2_selection:
     corr_cap: 0.9
-    max_features: 64
-    inner_ratio: 0.5
+    max_features: 64 # 최종 피처 수 상한 (선택적)
     stability_selection:
-      enabled: false
+      enabled: true   # 안정성 선택 활성화 (강건성 확보)
       subsamples: 48
       sample_fraction: 0.6
       cutoff: 0.6
       max_features: 32
-      alpha_grid: [0.8, 0.4, 0.1]
-      random_state: null
-      max_iter: 200
-      tolerance: 0.0001
+
   stage3_diversity:
-    enabled: false
-    method: facility_location
+    enabled: true
+    method: facility_location  # DPP보다 빠르면서 좋은 성능
     top_k: 32
     family_cap: {max_per_family: 2}
-  stage4_calibration:
-    vif_threshold: 12.0
-    robust_quantiles: [0.01, 0.99]
-    mad_margin: {factor: 1.4826}
-  feature_whitelist: []
 
 # 5.1 Walk-Forward Optimization 설정 (데이터 길이에 맞게 재계산)
 walk_forward:

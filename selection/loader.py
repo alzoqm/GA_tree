@@ -23,13 +23,38 @@ class SelectionPaths:
     artifact_dir: Path
 
     def final_features_path(self) -> Path:
-        if self.final_features_pkl and self.final_features_pkl.exists():
-            return self.final_features_pkl
-        if self.final_features_csv and self.final_features_csv.exists():
-            return self.final_features_csv
+        """Return the resolved path to the final features dataset.
+
+        The pipeline now stores final features as pickle by default. To remain
+        backward compatible with existing configs that only specify a CSV
+        location, we try the following in order:
+          1. The explicitly configured pickle path.
+          2. A pickle path derived from the CSV path (same stem, ``.pkl``).
+          3. The explicitly configured CSV path.
+        """
+
+        candidates: list[Path] = []
+
+        if self.final_features_pkl:
+            candidates.append(self.final_features_pkl)
+
+        derived_pickle: Optional[Path] = None
+        if self.final_features_csv:
+            derived_pickle = self.final_features_csv.with_suffix(".pkl")
+            # Avoid duplicating the same path if the config already pointed to the
+            # pickle variant explicitly.
+            if not candidates or derived_pickle != candidates[0]:
+                candidates.append(derived_pickle)
+            candidates.append(self.final_features_csv)
+
+        for candidate in candidates:
+            if candidate and candidate.exists():
+                return candidate
+
+        searched = ", ".join(str(path) for path in candidates if path)
         raise FileNotFoundError(
             "No final features file found. Looked for: "
-            f"{self.final_features_pkl} and {self.final_features_csv}"
+            f"{searched or 'no candidates available'}"
         )
 
 
