@@ -1,147 +1,188 @@
+# GA Tree Trading Framework
 
+A GPU-accelerated research framework for evolving cryptocurrency futures strategies as interpretable decision trees. The system combines massive-scale genetic search, walk-forward and combinatorial cross-validation workflows, multi-objective fitness, and statistical robustness diagnostics to surface resilient trading policies.
 
-# GA-Tree Trading Bot
+> **Heads-up**: This repository is under active development. Expect rapid iteration, occasional breaking changes, and incomplete documentation for newly landed features. Pin a specific commit before running extended experiments, and re-run preprocessing/training after pulling updates to avoid config or checkpoint mismatches.
 
-This repository contains a high-performance framework for discovering cryptocurrency futures trading strategies using a massively parallel Genetic Algorithm (GA). The strategies are evolved as decision trees and are rigorously evaluated using Walk-Forward Optimization (WFO) to ensure robustness and prevent overfitting.
+## Architecture At A Glance
+| Path / Module                 | Role                                                                                                                                   |
+|------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `Config/`                    | Central experiment and feature definitions (`experiment_config.yaml`, `feature_config.yaml`, backup variants).                         |
+| `data/`                      | Binance data ingestion, deterministic funding/mark estimation, feature generation helpers.                                             |
+| `preprocess_data.py`         | End-to-end data pipeline orchestration driven by Config settings.                                                                      |
+| `models/`                    | `GATree` / `GATreePop` tensor representations, feature registries, GPU-friendly tree utilities.                                        |
+| `csrc/`                      | C++/CUDA sources for prediction, evolution, and simulator kernels compiled via `setup.py`.                                             |
+| `gatree_cuda_compat/`        | Python bindings exposing compiled CUDA kernels; required at runtime for GPU execution.                                                 |
+| `evolution/`                 | Selection (PPTS), crossover (subtree, node, root-branch), mutation (node/subtree/parameter) operators, unified `Evolution` loop.       |
+| `training/`                  | Simulation, trading environment, multi-objective fitness, WFO/CPCV coordinators, generation runner, caching, pruning.                 |
+| `fitness/`                   | CPCV objective aggregation and distributional statistics.                                                                              |
+| `analysis/`                  | Robustness probes (PBO/DSR), W&B logger, tree/feature visualisation, post-run analytics tooling.                                      |
+| `utils/`                     | Checkpoint manager with resume/cleanup utilities.                                                                                      |
+| `selection/`, `selection_data.py` | Optional feature selection CLI and pipeline stages (screening, stability, calibration).                                      |
+| `test/`                      | Pytest-based regression suites for selection stages and CUDA trading environment kernels.                                              |
 
-The entire core of the GA, including population evaluation, selection, crossover, and mutation, is accelerated with custom C++/CUDA kernels, allowing for the exploration of vast search spaces with large populations and complex feature sets.
+## End-to-End Flow
+```
+                           +-----------------------------+
+                           | Config/experiment_config    |
+                           +-----------------------------+
+                                         |
+                                         v
++--------------------+      +---------------------------+       +-----------------------------+
+| Binance / local IO |<-----| preprocess_data.py        |-----> | final_features.(csv|pkl)    |
++--------------------+      +---------------------------+       +-----------------------------+
+                                         |
+                                         v
+                           +-----------------------------+
+                           | GATreePop initialization    |
+                           | (population tensor on GPU)  |
+                           +-----------------------------+
+                                         |
+                                         v
+                    +-------------------------------------------+
+                    | Evolution engine (selection/crossover/    |
+                    | mutation with CUDA kernels)               |
+                    +-------------------------------------------+
+                                 |
+                 +---------------+----------------+
+                 |                                |
+                 v                                v
++-------------------------------+   +-------------------------------+
+| WalkForwardOptimizer (WFO)    |   | CPCVManager (CPCV scheduler)  |
++-------------------------------+   +-------------------------------+
+                 |                                |
+                 +---------------+----------------+
+                                 v
+                      +------------------------------+
+                      | Fitness simulator & metrics  |
+                      | (IS/OOS objectives, pruning) |
+                      +------------------------------+
+                                 |
+                      +----------+-----------+
+                      | Robustness diagnostics |
+                      | (PBO, DSR, bootstrap)  |
+                      +----------+-----------+
+                                 |
+                      +------------------------------+
+                      | Artifacts, checkpoints, W&B   |
+                      | logging & analysis exports    |
+                      +------------------------------+
+```
 
-## Key Features
-
--   **Genetic Algorithm with Tree-based Strategies**: Evolves trading logic as interpretable decision trees (`GATree`), optimizing for complex market conditions.
--   **Massively Parallel GPU Acceleration**: Custom CUDA kernels for all critical GA operations (prediction, selection, crossover, mutation) and simulation components, enabling large-scale experiments that are orders of magnitude faster than CPU-based alternatives.
--   **Walk-Forward Optimization (WFO)**: Implements a robust backtesting framework using rolling time windows for training (In-Sample) and validation (Out-of-Sample) to build strategies that are resilient to market regime changes.
--   **Multi-Objective Fitness Function**: Optimizes for multiple performance metrics simultaneously (e.g., return, drawdown, Sharpe Ratio, PSR) using Pareto optimization, allowing for a nuanced selection of strategies based on a user-defined risk/reward profile.
--   **Comprehensive Trading Simulator**: A realistic futures trading environment that models:
-    -   Dynamic, volatility-based slippage.
-    -   Funding rates.
-    -   Leverage and deterministic liquidation.
-    -   Taker fees and insurance fund fees.
--   **Advanced Feature Engineering Pipeline**: A data processing pipeline that generates multi-timeframe features using TA-Lib and custom composite indicators, all managed via a central YAML configuration.
--   **Checkpointing and Resumption**: A robust mechanism to save and resume long-running training sessions automatically or on-demand.
--   **Integrated Analysis & Logging**: Includes built-in tools for analyzing the best-evolved models and logging experiment metrics, parameters, and artifacts to Weights & Biases.
-
-## Architecture Overview
-
-The project is structured into several key components:
-
--   **/csrc**: Contains the C++/CUDA source code for all performance-critical operations. These are compiled into Python extensions via `setup.py`.
--   **/gatree\_cuda\_compat**: A compatibility module that imports and exposes all compiled CUDA kernels under a single, easy-to-use namespace.
--   **/data**: Handles the data pipeline, including downloading from Binance (`data_download.py`), deterministic funding/mark price estimation (`funding_mark_proxy.py`), and feature generation (`ta_lib_feature_generator.py`, `merge_dataset.py`).
--   **/models**: Defines the core data structures for trading strategies: `GATree` (an individual strategy) and `GATreePop` (a population of strategies).
--   **/evolution**: Implements the genetic operators—Selection (`PPTSSelection`), Crossover, and Mutation—and the main `Evolution` engine that orchestrates the evolutionary process.
--   **/training**: Contains the high-level logic for running experiments, including the `TradingEnvironment`, `FitnessSimulator`, `WalkForwardOptimizer`, and the main `runner` scripts.
--   **/analysis**: Provides tools for post-run analysis (`analyze_best.py`), plotting (`plots.py`), statistical tests (`stat_tests.py`), and Weights & Biases integration (`wandb_logger.py`).
--   **/utils**: Utility modules, including the `CheckpointManager`.
-
-## Getting Started
-
-### Prerequisites
-
--   NVIDIA GPU with CUDA support
--   CUDA Toolkit (11.x or newer recommended)
--   C++ Compiler (GCC/G++, Clang, or MSVC)
--   Python 3.9+
--   [TA-Lib](https://github.com/mrjbq7/ta-lib) C library installed on your system.
-
-### Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url>
-    cd <repository-directory>
-    ```
-
-2.  **Create and activate a virtual environment:**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
-
-3.  **Install Python dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *(Note: You will need to create a `requirements.txt` file. Based on the imports, it should include `torch`, `pandas`, `numpy`, `pyyaml`, `tqdm`, `python-binance`, `python-dotenv`, `pyvis`, `networkx`, `scikit-learn`, and `wandb`.)*
-
-4.  **Compile the CUDA extensions:**
-    This step compiles the C++/CUDA source files into Python modules.
-    ```bash
-    python setup.py build_ext --inplace
-    ```
-
-5.  **Set up Environment Variables:**
-    Create a `.env` file in the project root for API keys:
-    ```env
-    # .env
-    BINANCE_API_KEY="YOUR_BINANCE_API_KEY"
-    BINANCE_API_SECRET="YOUR_BINANCE_SECRET_KEY"
-    WANDB_API_KEY="YOUR_WANDB_API_KEY"
-    ```
+## Features
+- **Data & Feature Engineering**: Deterministic download/merge of spot, futures, and funding data with optional proxy estimation, memory optimisations, and YAML-driven multi-timeframe feature generation (`preprocess_data.py`, `data/`).
+- **GPU-native Tree Representation**: `GATree`/`GATreePop` store trees in fixed-shape tensors with adjacency, depth, and branch metadata enabling batched CUDA kernels and validation hooks (`gatree_cuda.validate_trees`).
+- **Genetic Operators**: PPTS multi-objective selection, weighted crossover chains (subtree, root-branch, node), structural and parametric mutation suites with device-aware limits and context-sensitive behaviour.
+- **Training Strategies**: Switchable Walk-Forward Optimisation and Combinatorial Purged Cross-Validation. WFO supports sliding/expanding windows, embargo, warmup, and OOS aggregation. CPCV includes scheduler-driven splits, reuse/caching, and parallel combination processing.
+- **Multi-Objective Fitness**: `training/multi_objective_fitness` evaluates configurable metric sets (return, drawdown, PSR, Sharpe, win-rate, hit-rate) with min/max orientation, clamping, and Pareto ranking.
+- **Trading Environment Simulator**: CUDA-backed environment modelling leverage, slippage (ATR-relative), taker fees, liquidation, and root-branch balance penalties; supports node-level attributions for pruning.
+- **Checkpoint & Resume**: `utils/checkpoint_manager.CheckpointManager` manages main/cpcv/wfo checkpoints, config/data fingerprint validation, tensor offloading, cleanup policies, and resume metadata (including W&B run IDs).
+- **Generation Caching & Pruning**: CPCV cache deduplicates segment simulations across combinations; optional `PopulationPruner` applies node-level attrition before aggregation.
+- **Robustness Analytics**: `analysis/robustness` derives heuristic PBO, deflated Sharpe, block-bootstrap CI, and SPA placeholders; results logged per candidate with notes for threshold breaches.
+- **Weights & Biases Integration**: Optional experiment tracking, artifact logging, per-generation tables, configurable metric monitoring (`analysis/wandb_logger`).
+- **Feature Selection Pipeline**: Multi-stage screening, stability selection, diversity control, and calibration via `selection_data.py`; outputs curated feature configs for downstream GA runs.
+- **Visualisation & Reporting**: `analysis/analyze_best.py`, `analysis/trees.py`, and `analysis/visualize_topk_html.py` export feature usage, interaction heatmaps, HTML tree renders, and permutation importance.
+- **CUDA Extension**: `setup.py` builds unified kernels powering prediction, crossover/mutation, and simulator loops; CPU fallbacks are limited, so GPU build is strongly recommended.
+- **Testing**: Pytest suite (`test/`) covers selection stages and CUDA environment equity accounting; CUDA-marked tests require compiled extensions and a GPU device.
 
 ## Usage
+### Prerequisites
+- Python 3.9 or later.
+- NVIDIA GPU with a compatible CUDA toolkit (11.x or newer recommended).
+- C++17-capable compiler toolchain.
+- TA-Lib C library (feature generators rely on TA-Lib indicators).
+- Optional: Binance API key/secret for historical data downloads; Weights & Biases account for experiment logging.
 
-Running an experiment involves three main steps: configuring the experiment, preprocessing the data, and running the main training pipeline.
-
-### Step 1: Configure the Experiment
-
-Modify `Config/experiment_config.yaml` to define all aspects of your experiment. This is the central control file.
-
--   **`environment`**: Set the CUDA device, random seed, and output directories.
--   **`data`**: Specify the trading symbol (e.g., `BTCUSDT`), interval, and feature engineering settings.
--   **`ga_core`**: Define the GA parameters like population size, number of generations, and elite size. Optional `evolution_loop.early_stopping` settings let you stop the per-window generation loop once a chosen metric stops improving.
--   **`operators`**: Configure the probabilities and behaviors of crossover and mutation operators.
--   **`walk_forward`**: Enable and configure the WFO parameters, including window sizes and step sizes.
--   **`evaluation`**: Set up the simulation environment (fees, slippage) and define the multi-objective fitness functions for in-sample (IS), out-of-sample (OOS), and final aggregation.
--   **`feature_classification`**: Categorize your features to control how they are used within the decision tree nodes.
-
-### Step 2: Preprocess Data
-
-Run the preprocessing script to download market data, generate features, and save the final dataset. The script is idempotent and will skip execution if the final files already exist.
-
+### 1. Clone & Environment Setup
 ```bash
-python preprocess_data.py
+git clone <repo-url>
+cd GA_tree
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-This will create `final_test_features.csv` and `model_test_config.yaml` in the directory specified by `data_dir` in your config.
-
-### Step 3: Run the Training Pipeline
-
-Execute the main script to start the Walk-Forward Optimization process.
-
+### 2. Build CUDA Extension
 ```bash
-# Start a new run
-python main.py
+python setup.py build_ext --inplace
+```
+If you skip this step `main.py` will abort after reporting `gatree_cuda` is missing.
 
-# Resume a run from the latest checkpoint
-python main.py --resume
+### 3. Configure Experiment
+Edit `Config/experiment_config.yaml`:
+- `environment`: device, random seed, output directory, data directory.
+- `data`: symbol, interval, history depth, output filenames, feature config path.
+- `ga_core`: population size/shape, generation count, early stopping.
+- `operators`: PPTS settings, crossover weights/modes, mutation probabilities and limits.
+- `training_strategy`: choose `wfo` or `cpcv`; specify hold-period for purge/embargo defaults.
+- `walk_forward` or `cpcv`: window geometry, parallel chunks, reuse policy, min trades.
+- `evaluation`: trading simulator fees/slippage/leverage, IS/OOS objective sets, aggregation rules, pruning config.
+- `feature_classification` & optional `selection_pipeline`: maintain feature taxonomy and selection parameters.
+- `wandb`, `resumption`, `robustness_filter`, `fitness_objectives`: enable logging, auto-resume, diagnostics.
 
-# Clear all existing checkpoints and start fresh
-python main.py --clear-checkpoints
+### 4. Provide Secrets (optional)
+Create `.env` with API keys when `data/data_download.py` needs authenticated endpoints and when W&B logging is enabled:
+```
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+WANDB_API_KEY=...
 ```
 
-The process will iterate through the WFO windows, performing training and evaluation as configured. Final results, including the best-evolved population, are saved in the `output_dir`.
-
-### Step 4: Analyze the Results
-
-After a run is complete, you can analyze the best-evolved models to understand their structure and behavior.
-
+### 5. Preprocess Data
 ```bash
-python analysis/analyze_best.py --config Config/experiment_config.yaml```
+python preprocess_data.py --config Config/experiment_config.yaml
+```
+Generates `final_features.csv/.pkl` and `model_config.yaml` under `environment.data_dir`, injecting funding/mark proxies, memory optimisation, and skipping regeneration when assets already exist and are non-empty.
 
-This script generates several outputs in the `analysis/` sub-directory of your experiment's results folder, including:
--   `feature_usage.png`: Bar chart of the most frequently used features.
--   `comparison_type_mix.png`: Distribution of comparison types (e.g., feature-vs-number).
--   `feature_interaction.png`: A heatmap of feature co-occurrence in decision nodes.
--   `permutation_importance.png`: Feature importance based on performance degradation when a feature's values are shuffled.
--   JSON files containing the raw data for the plots.
+### 6. (Optional) Run Feature Selection Stages
+```bash
+python selection_data.py --config Config/experiment_config.yaml
+```
+Writes curated feature sets and calibration artefacts to `selection_pipeline.artifact_dir`; honour `--dry-run` to validate without persisting.
 
-## Testing
+### 7. Launch Training
+```bash
+python main.py                       # fresh run
+python main.py --resume              # resume using latest checkpoint
+python main.py --clear-checkpoints   # wipe checkpoints before starting
+python main.py --config path/to/alt_config.yaml  # custom config
+```
+Pipeline stages: environment setup, dataset validation/loading (prefers pickle), GPU population build, evolution loop, WFO or CPCV orchestration, evaluation, robustness, artifact export. Checkpoints reside in `<output_dir>/checkpoints/` and retain W&B run IDs when enabled.
 
-The project includes a suite of tests using `pytest` to verify the integrity of the CUDA kernels and core Python logic. To run the tests, ensure you have `pytest` installed and execute it from the project root:
+### 8. Inspect Outputs
+Key artefacts in `environment.output_dir`:
+- `best_population.pth` / `best_population_topK.pth`: elite chromosomes (torch tensors).
+- `wfo_results.json` or `cpcv_results.json`: aggregated metrics, objective names/directions, scheduler metadata.
+- `cpcv_cache/` (optional): generation-level simulation caches.
+- `checkpoints/`: generation snapshots (population tensors, objectives, node stats).
+- W&B logs/artifacts (when enabled) synced to the configured project.
 
+### 9. Post-run Analytics
+```bash
+python analysis/analyze_best.py --config Config/experiment_config.yaml
+python analysis/visualize_topk_html.py --config Config/experiment_config.yaml
+```
+Exports feature usage charts, interaction heatmaps, HTML visualisations of top strategies, and raw JSON/CSV tables under `<output_dir>/analysis/`.
+
+### 10. Run Tests
 ```bash
 pytest
 ```
+Use `pytest -m "not cuda"` when running on machines without a GPU or compiled kernels.
 
-**Note**: The tests marked with `@pytest.mark.cuda` require a CUDA-enabled environment and compiled extensions to run.
+## Configuration Highlights & Tips
+- **Auto Resume**: `resumption.auto_resume` combined with `--resume` ensures recovery after interruptions. Stale checkpoints are pruned via `cleanup_old_checkpoints` / `keep_last_n_generations`.
+- **Robustness Filters**: `robustness_filter` thresholds can exclude fragile candidates before aggregation; results feed into `analysis/robustness` for reporting.
+- **Aggregation Metrics**: `fitness_objectives.cpcv_objectives` defines CPCV-specific distributions (mean, median, IQR, hit-rate). Add names/minimize flags to align W&B logging and result exports.
+- **Caching**: Enable `cpcv.evaluation_cache_dir` to reuse simulation segments across generations, reducing duplicated GPU workloads.
+- **Population Pruning**: Activate `evaluation.pruning.enabled` to leverage node statistics and maintain compact trees.
+- **WFO Aggregation**: `evaluation.oos_aggregate` supports percentile/consistency methods and optional deflated Sharpe reporting (`include_dsr`).
+
+## Troubleshooting
+- **Missing CUDA Module**: Re-run `python setup.py build_ext --inplace`; verify compiler and CUDA toolkit paths.
+- **Data Mismatch on Resume**: Checkpoint manager warns if `final_features` changed size or timestamp; regenerate data or clear checkpoints when configs diverge.
+- **Insufficient Trades**: WFO/CPCV skip windows/splits failing `min_trades_per_window` / `min_trades_per_split`; adjust parameters or expand dataset.
+- **W&B Optional**: Disable by setting `wandb.enabled: false` or `mode: disabled` when offline.
+
+This README reflects the current codebase; update `Config/` values to suit your market, horizon, and experiment scale.
