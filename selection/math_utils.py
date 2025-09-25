@@ -1,3 +1,4 @@
+# /selection/math_utils.py
 """Mathematical helpers (gamma functions, chi-square CDF) without SciPy."""
 
 from __future__ import annotations

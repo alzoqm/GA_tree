@@ -1,3 +1,4 @@
+# /selection/boolean_stats.py
 """Boolean event statistics and inference utilities."""
 
 from __future__ import annotations
