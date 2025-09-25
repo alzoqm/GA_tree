@@ -241,3 +241,77 @@ def test_stage2_high_cutoff_triggers_fallback(tmp_path):
     assert len(artifacts.stage2.selected_features) == selection_cfg["stage2_selection"]["max_features"]
     assert "feat_main" in artifacts.selected_features
     assert "feat_gamma" in artifacts.selected_features
+
+
+def test_knockoff_chain_records_attempts(tmp_path):
+    rng = np.random.default_rng(7721)
+    n = 720
+    latent = rng.standard_normal(n)
+    target = latent + 0.1 * rng.standard_normal(n)
+    strong = latent + 0.05 * rng.standard_normal(n)
+    aux = 0.8 * latent + 0.2 * rng.standard_normal(n)
+    noise = rng.standard_normal((n, 2))
+
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feat_primary": strong,
+            "feat_aux": aux,
+            "noise_a": noise[:, 0],
+            "noise_b": noise[:, 1],
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text("feature_num: {}\nfeature_bool: []\n", encoding="utf-8")
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 27, "device": "cpu"},
+        "cpcv": {"folds": 4, "test_folds": 1, "min_trades_per_split": 96, "shuffle_seed": 8},
+        "training_strategy": {"max_hold_period_bars": 32},
+    }
+
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 120,
+        "stage1_screening": {
+            "combine": {"method": "simes", "alpha": 0.2, "fdr": "bh"},
+        },
+        "stage2_selection": {
+            "corr_cap": 0.9,
+            "max_features": 3,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+            "knockoffs": {
+                "enabled": True,
+                "fdr": 0.25,
+                "statistic": "correlation",
+                "shrinkage": 1e-3,
+                "random_state": 101,
+                "generator": "stability_selection",
+                "fallback": ["robust", "modelx"],
+            },
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 10.0,
+            "robust_quantiles": [0.02, 0.98],
+            "mad_margin": {"factor": 0.0},
+        },
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert artifacts.stage2 is not None
+    assert artifacts.stage2.knockoff_attempts[0] == "stability_selection"
+    assert "robust" in artifacts.stage2.knockoff_attempts
+    assert artifacts.stage2.knockoff_generator in {"robust", "modelx"}
+    assert "feat_primary" in artifacts.stage2.knockoff_statistics

@@ -1,10 +1,10 @@
-# /selection/calibration.py
+# /selection/screening.py
 """Stage 1 screening utilities (rank tests + FDR)."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import erf, sqrt
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -24,12 +24,14 @@ class ScreeningDetail:
     method: str
     effect: float
     pvalue: float
+    extras: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class ScreeningResult:
     pvalues: Dict[str, float]
     effects: Dict[str, float]
+    cliffs_delta: Dict[str, float]
     details: List[ScreeningDetail]
     passing_features: List[str]
     methods: List[str]
@@ -48,6 +50,55 @@ def _approx_spearman_pvalue(r: float, n: int) -> float:
     z = r * sqrt(n - 1)
     # two-sided using normal CDF via error function
     return float(max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / sqrt(2)))))))
+
+
+def _normal_cdf(z: float) -> float:
+    return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+
+
+def _kendall_tau(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    n = x.size
+    if n <= 1:
+        return 0.0, 0
+    concordant = discordant = 0
+    for i in range(n - 1):
+        xi = x[i]
+        yi = y[i]
+        for j in range(i + 1, n):
+            dx = xi - x[j]
+            dy = yi - y[j]
+            if dx == 0 and dy == 0:
+                continue
+            prod = dx * dy
+            if prod > 0:
+                concordant += 1
+            elif prod < 0:
+                discordant += 1
+    total_pairs = n * (n - 1) // 2
+    if total_pairs == 0:
+        return 0.0, 0
+    num = concordant - discordant
+    counts_x = np.unique(x, return_counts=True)[1]
+    counts_y = np.unique(y, return_counts=True)[1]
+    tie_x_pairs = sum(c * (c - 1) // 2 for c in counts_x if c > 1)
+    tie_y_pairs = sum(c * (c - 1) // 2 for c in counts_y if c > 1)
+    den_x = total_pairs - tie_x_pairs
+    den_y = total_pairs - tie_y_pairs
+    denom = sqrt(max(den_x, 1) * max(den_y, 1))
+    if denom == 0:
+        return 0.0, concordant + discordant
+    tau = num / denom
+    return float(max(-1.0, min(1.0, tau))), concordant + discordant
+
+
+def _kendall_tau_pvalue(tau: float, n: int) -> float:
+    if n <= 1:
+        return 1.0
+    var = (4.0 * n + 10.0) / (9.0 * n * (n - 1))
+    if var <= 0:
+        return 1.0
+    z = tau / sqrt(var)
+    return float(max(0.0, min(1.0, 2.0 * (1.0 - _normal_cdf(abs(z))))))
 
 
 def _rbf_kernel(values: np.ndarray, bandwidth: float | str | None) -> np.ndarray:
@@ -330,8 +381,8 @@ def _evaluate_screening_methods(
     y: np.ndarray,
     methods: Mapping[str, Mapping[str, object] | object],
     rng: Generator,
-) -> Dict[str, Tuple[float, float]]:
-    results: Dict[str, Tuple[float, float]] = {}
+) -> Dict[str, Tuple[float, float, Dict[str, float]]]:
+    results: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
     sample_size = x.size
     if sample_size == 0:
         return results
@@ -350,15 +401,22 @@ def _evaluate_screening_methods(
             rho = _spearman_corr(x, y)
             pval = _approx_spearman_pvalue(rho, sample_size)
             effect = abs(rho)
+            delta = float(abs(cliffs_delta(x, y)))
             if bool(cfg.get("cliffs_delta", True)):
-                effect = max(effect, abs(cliffs_delta(x, y)))
-            results[method_name] = (float(effect), float(pval))
+                effect = max(effect, delta)
+            results[method_name] = (float(effect), float(pval), {"cliffs_delta": delta})
+        elif method_name in {"kendall", "kendall_tau"}:
+            tau, used_pairs = _kendall_tau(x, y)
+            if used_pairs <= 0:
+                continue
+            pval = _kendall_tau_pvalue(tau, sample_size)
+            results[method_name] = (float(abs(tau)), float(pval), {})
         elif method_name.startswith("hsic"):
             effect, pval = _hsic_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval))
+            results[method_name] = (float(effect), float(pval), {})
         elif method_name in {"dcor", "dcor_t", "distance_correlation"}:
             effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval))
+            results[method_name] = (float(effect), float(pval), {})
         else:
             continue
     return results
@@ -374,6 +432,8 @@ def screening_out_of_fold(
     *,
     methods: Optional[Mapping[str, Mapping[str, object]]] = None,
     random_state: Optional[int] = None,
+    effect_min: float = 0.0,
+    cliffs_delta_min: float = 0.0,
 ) -> ScreeningResult:
     combine_method = str(combine_cfg.get("method", "simes")).lower()
     fdr_alpha = float(combine_cfg.get("alpha", 0.1))
@@ -384,6 +444,7 @@ def screening_out_of_fold(
     details: List[ScreeningDetail] = []
     executed_methods: set[str] = set()
     test_positions: Dict[Tuple[str, str, str], int] = {}
+    per_feature_deltas: Dict[str, Dict[int, float]] = defaultdict(dict)
 
     method_spec = methods or {"spearman": {"enabled": True}}
     rng = default_rng(random_state)
@@ -404,11 +465,13 @@ def screening_out_of_fold(
                 results = _evaluate_screening_methods(x, y, method_spec, rng)
                 if not results:
                     continue
-                for method_name, (effect, pval) in results.items():
+                for method_name, (effect, pval, extras) in results.items():
                     test_key = (split.outer.combo_id, fold_label, method_name)
                     test_idx = test_positions.setdefault(test_key, len(test_positions))
                     per_feature_effects[feature][test_idx] = effect
                     per_feature_pvals[feature][test_idx] = pval
+                    if "cliffs_delta" in extras:
+                        per_feature_deltas[feature][test_idx] = abs(extras["cliffs_delta"])
                     executed_methods.add(method_name)
                     details.append(
                         ScreeningDetail(
@@ -417,6 +480,7 @@ def screening_out_of_fold(
                             method=method_name,
                             effect=effect,
                             pvalue=pval,
+                            extras={k: float(v) for k, v in extras.items()},
                         )
                     )
 
@@ -425,11 +489,13 @@ def screening_out_of_fold(
 
     combined_pvalues: Dict[str, float] = {}
     effect_summary: Dict[str, float] = {}
+    delta_summary: Dict[str, float] = {}
     for feature in feature_columns:
         mapping = per_feature_pvals.get(feature, {})
         if not mapping:
             combined_pvalues[feature] = 1.0
             effect_summary[feature] = 0.0
+            delta_summary[feature] = 0.0
             continue
         ordered_indices = sorted(mapping.keys())
         pvals = [mapping[idx] for idx in ordered_indices]
@@ -444,12 +510,24 @@ def screening_out_of_fold(
         combined_pvalues[feature] = combined
         effects_map = per_feature_effects.get(feature, {})
         effect_summary[feature] = float(max(effects_map.values())) if effects_map else 0.0
+        delta_map = per_feature_deltas.get(feature, {})
+        delta_summary[feature] = float(max(delta_map.values())) if delta_map else 0.0
 
     selected = _apply_fdr(combined_pvalues, alpha=fdr_alpha, method=fdr_method)
+    if effect_min > 0.0 or cliffs_delta_min > 0.0:
+        filtered: List[str] = []
+        for feature in selected:
+            if effect_min > 0.0 and effect_summary.get(feature, 0.0) < effect_min:
+                continue
+            if cliffs_delta_min > 0.0 and delta_summary.get(feature, 0.0) < cliffs_delta_min:
+                continue
+            filtered.append(feature)
+        selected = filtered
     # Zero out features not passing FDR to ensure downstream contracts know.
     return ScreeningResult(
         pvalues=combined_pvalues,
         effects=effect_summary,
+        cliffs_delta=delta_summary,
         details=details,
         passing_features=selected,
         methods=sorted(executed_methods),

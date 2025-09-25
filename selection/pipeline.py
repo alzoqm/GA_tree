@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -73,6 +73,9 @@ class StageOneConfig:
     screening_methods: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     random_state: Optional[int] = None
     enforce_significance: bool = True
+    effect_min: float = 0.0
+    cliffs_delta_min: float = 0.0
+    graph_lasso_alpha: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,9 @@ class StageTwoDiagnostics:
     knockoff_statistics: Dict[str, float] = field(default_factory=dict)
     knockoff_threshold: Optional[float] = None
     knockoff_fdr: Optional[float] = None
+    knockoff_generator: Optional[str] = None
+    knockoff_attempts: List[str] = field(default_factory=list)
+    knockoff_errors: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,8 @@ class DiversityDiagnostics:
     selected: List[str]
     coverage: Dict[str, float]
     discarded: List[str]
+    similarity: str
+    parameters: Dict[str, Any]
 
 
 @dataclass
@@ -178,6 +186,10 @@ class SelectionPipeline:
             normalized_methods = {"spearman": {"enabled": True}}
         random_state = screen_cfg.get("random_state")
         enforce_significance = bool(screen_cfg.get("enforce_significance", True))
+        effect_min = float(screen_cfg.get("effect_min", screen_cfg.get("effect_size_min", 0.0)) or 0.0)
+        cliffs_delta_min = float(screen_cfg.get("cliffs_delta_min", 0.0) or 0.0)
+        graph_cfg = cfg.get("stage1_graph", {})
+        graph_alpha = float(graph_cfg.get("alpha", graph_cfg.get("graph_lasso_alpha", 0.01)) or 0.01)
         return StageOneConfig(
             target_column=target_column,
             min_bars_per_split=min_bars,
@@ -197,6 +209,9 @@ class SelectionPipeline:
             screening_methods=normalized_methods,
             random_state=int(random_state) if random_state is not None else None,
             enforce_significance=enforce_significance,
+            effect_min=effect_min,
+            cliffs_delta_min=cliffs_delta_min,
+            graph_lasso_alpha=graph_alpha,
         )
 
     @staticmethod
@@ -233,6 +248,12 @@ class SelectionPipeline:
         knockoff_cfg = stage2_cfg.get("knockoffs", {})
         knockoffs_config: Optional[KnockoffConfig] = None
         if bool(knockoff_cfg.get("enabled", False)):
+            fallback_cfg = knockoff_cfg.get("fallback")
+            if isinstance(fallback_cfg, Mapping):
+                fallback_iter = fallback_cfg.get("chain", [])
+            else:
+                fallback_iter = fallback_cfg or []
+            fallback_tuple = tuple(str(item).lower() for item in fallback_iter)
             knockoffs_config = KnockoffConfig(
                 enabled=True,
                 fdr=float(knockoff_cfg.get("fdr", 0.1)),
@@ -241,6 +262,8 @@ class SelectionPipeline:
                 min_eigenvalue=float(knockoff_cfg.get("min_eigenvalue", 1e-3)),
                 statistic=str(knockoff_cfg.get("statistic", "correlation")).lower(),
                 random_state=knockoff_cfg.get("random_state"),
+                generator=str(knockoff_cfg.get("generator", knockoff_cfg.get("strategy", "modelx"))).lower(),
+                fallback=fallback_tuple,
             )
 
         return StageTwoConfig(
@@ -300,6 +323,22 @@ class SelectionPipeline:
             require_valid=True,
         )
 
+    @staticmethod
+    def _knockoff_generators(config: KnockoffConfig) -> List[str]:
+        chain: List[str] = []
+        seen: set[str] = set()
+        primary = str(config.generator or "modelx").lower()
+        if primary and primary not in seen:
+            chain.append(primary)
+            seen.add(primary)
+        for entry in config.fallback:
+            name = str(entry or "").lower()
+            if not name or name in seen:
+                continue
+            chain.append(name)
+            seen.add(name)
+        return chain
+
     def run(self, df: pd.DataFrame, model_config: Mapping[str, object]) -> PipelineArtifacts:
         target = self.stage1.target_column
         if target not in df.columns:
@@ -337,6 +376,8 @@ class SelectionPipeline:
             min_bars=self.stage1.min_bars_per_split,
             methods=self.stage1.screening_methods,
             random_state=self.stage1.random_state,
+            effect_min=self.stage1.effect_min,
+            cliffs_delta_min=self.stage1.cliffs_delta_min,
         )
 
         passing_features = set(screening_result.passing_features)
@@ -405,6 +446,7 @@ class SelectionPipeline:
             selection_scores,
             corr_cap=self.stage1.corr_cap,
             max_features=self.stage1.max_features,
+            partial_alpha=self.stage1.graph_lasso_alpha,
         )
 
         final_features, selection_diag = enforce_vif_and_partial_r2(
@@ -570,6 +612,9 @@ class SelectionPipeline:
                 "knockoff_statistics": artifacts.stage2.knockoff_statistics,
                 "knockoff_threshold": artifacts.stage2.knockoff_threshold,
                 "knockoff_fdr": artifacts.stage2.knockoff_fdr,
+                "knockoff_generator": artifacts.stage2.knockoff_generator,
+                "knockoff_attempts": artifacts.stage2.knockoff_attempts,
+                "knockoff_errors": artifacts.stage2.knockoff_errors,
             }
         if artifacts.diversity:
             payload["diversity"] = {
@@ -577,6 +622,8 @@ class SelectionPipeline:
                 "selected": artifacts.diversity.selected,
                 "coverage": artifacts.diversity.coverage,
                 "discarded": artifacts.diversity.discarded,
+                "similarity": artifacts.diversity.similarity,
+                "parameters": artifacts.diversity.parameters,
             }
         with artifact_path.open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
@@ -655,6 +702,16 @@ class SelectionPipeline:
                     ),
                     "shrinkage": (
                         self.stage2.knockoffs.shrinkage
+                        if self.stage2.knockoffs
+                        else None
+                    ),
+                    "generator": (
+                        self.stage2.knockoffs.generator
+                        if self.stage2.knockoffs
+                        else None
+                    ),
+                    "fallback": (
+                        list(self.stage2.knockoffs.fallback)
                         if self.stage2.knockoffs
                         else None
                     ),
@@ -793,23 +850,59 @@ class SelectionPipeline:
             current_candidates = selected
 
         if self.stage2.knockoffs is not None and current_candidates:
-            outcome: KnockoffOutcome = modelx_knockoffs(
-                df,
-                target,
-                current_candidates,
-                self.stage2.knockoffs,
-            )
-            if diag.method == "none":
-                diag.method = "modelx_knockoffs"
+            attempts: List[str] = []
+            errors: Dict[str, str] = {}
+            knockoff_outcome: Optional[KnockoffOutcome] = None
+            generator_used: Optional[str] = None
+            for generator_name in self._knockoff_generators(self.stage2.knockoffs):
+                attempts.append(generator_name)
+                if generator_name == "stability_selection":
+                    continue
+                try:
+                    candidate_outcome = modelx_knockoffs(
+                        df,
+                        target,
+                        current_candidates,
+                        self.stage2.knockoffs,
+                        strategy=generator_name,
+                    )
+                except Exception as exc:  # pragma: no cover - safeguard
+                    logger.warning(
+                        "Knockoff generator %s failed: %s",
+                        generator_name,
+                        exc,
+                    )
+                    errors[generator_name] = str(exc)
+                    continue
+                knockoff_outcome = candidate_outcome
+                generator_used = generator_name
+                if candidate_outcome.selected_features:
+                    break
+
+            if knockoff_outcome is not None:
+                label = generator_used or (attempts[-1] if attempts else "modelx")
+                method_label = f"modelx_knockoffs[{label}]"
+                if diag.method == "none":
+                    diag.method = method_label
+                else:
+                    diag.method = f"{diag.method}+{method_label}"
+                diag.knockoff_statistics = knockoff_outcome.statistics
+                diag.knockoff_threshold = (
+                    None if np.isinf(knockoff_outcome.threshold) else knockoff_outcome.threshold
+                )
+                diag.knockoff_fdr = knockoff_outcome.fdr
+                diag.knockoff_generator = generator_used
+                diag.knockoff_attempts = attempts
+                diag.knockoff_errors = errors
+                diag.discarded_low_freq = sorted(
+                    set(diag.discarded_low_freq).union(knockoff_outcome.discarded)
+                )
+                if knockoff_outcome.selected_features:
+                    diag.selected_features = knockoff_outcome.selected_features
+                    current_candidates = knockoff_outcome.selected_features
             else:
-                diag.method = f"{diag.method}+modelx_knockoffs"
-            diag.knockoff_statistics = outcome.statistics
-            diag.knockoff_threshold = None if np.isinf(outcome.threshold) else outcome.threshold
-            diag.knockoff_fdr = outcome.fdr
-            diag.discarded_low_freq = sorted(set(diag.discarded_low_freq).union(outcome.discarded))
-            if outcome.selected_features:
-                diag.selected_features = outcome.selected_features
-                current_candidates = outcome.selected_features
+                diag.knockoff_attempts = attempts
+                diag.knockoff_errors = errors
 
         if diag.method == "none":
             diag.method = "stage1_passthrough"
@@ -867,6 +960,8 @@ class SelectionPipeline:
             selected=selected,
             coverage=result.coverage,
             discarded=result.discarded,
+            similarity=result.similarity,
+            parameters=dict(result.diagnostics),
         )
         return diag, selected
 
