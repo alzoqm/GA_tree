@@ -717,9 +717,22 @@ def _compute_tree_complexity(population: GATreePop, complexity_cfg: dict) -> np.
     size = used_mask.sum(dim=1).to(torch.float32)
     depth = torch.where(used_mask, depths, torch.zeros_like(depths)).max(dim=1).values.to(torch.float32)
 
+    min_nodes_cfg = complexity_cfg.get('min_nodes', complexity_cfg.get('min_node', 0))
+    try:
+        min_nodes = int(float(min_nodes_cfg))
+    except (TypeError, ValueError):
+        min_nodes = 0
+    min_nodes = max(0, min_nodes)
+
     max_nodes = max(1, population.max_nodes)
     max_depth = max(1, population.max_depth)
-    size_norm = (size / float(max_nodes)).clamp(0.0, 1.0)
+
+    if min_nodes >= max_nodes:
+        size_norm = torch.zeros_like(size)
+    else:
+        size_norm = (size - float(min_nodes)).clamp(min=0.0)
+        denom_nodes = float(max_nodes - min_nodes) if max_nodes > min_nodes else 1.0
+        size_norm = (size_norm / denom_nodes).clamp(0.0, 1.0)
     depth_norm = (depth / float(max_depth)).clamp(0.0, 1.0)
 
     mode = str(complexity_cfg.get('mode', 'weighted')).lower()
@@ -735,6 +748,10 @@ def _compute_tree_complexity(population: GATreePop, complexity_cfg: dict) -> np.
         if denom == 0:
             denom = 1.0
         complexity = (size_weight * size_norm + depth_weight * depth_norm) / denom
+
+    if min_nodes > 0:
+        low_complexity_mask = size <= float(min_nodes)
+        complexity = torch.where(low_complexity_mask, torch.zeros_like(complexity), complexity)
 
     return complexity.detach().cpu().numpy().astype(np.float32, copy=False)
 
