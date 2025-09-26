@@ -44,21 +44,21 @@ def _prepare_feature_matrix(
     frame: pd.DataFrame,
     features: Sequence[str],
 ) -> tuple[np.ndarray, List[str]]:
-    usable: List[str] = []
-    columns: List[np.ndarray] = []
-    for feature in features:
-        if feature not in frame.columns:
-            continue
-        series = frame[feature].to_numpy(copy=False)
-        if np.isnan(series).all():
-            continue
-        columns.append(series.astype(float))
-        usable.append(feature)
+    existing = [name for name in features if name in frame.columns]
+    if not existing:
+        return np.empty((0, 0)), []
+    subset = frame[existing]
+    non_nan = subset.notna().any(axis=0)
+    subset = subset.loc[:, non_nan]
+    usable = subset.columns.tolist()
     if not usable:
         return np.empty((0, 0)), []
-    matrix = np.column_stack(columns)
+    matrix = subset.to_numpy(dtype=float, copy=False)
     mask = np.all(np.isfinite(matrix), axis=1)
-    matrix = matrix[mask]
+    if mask.any():
+        matrix = matrix[mask]
+    else:
+        matrix = np.empty((0, len(usable)), dtype=float)
     return matrix, usable
 
 
@@ -139,12 +139,20 @@ def greedy_representative_selection(
 def _compute_vif(frame: pd.DataFrame) -> Dict[str, float]:
     if frame.shape[1] == 0:
         return {}
-    corr = frame.corr().fillna(0.0)
+    values = frame.to_numpy(dtype=float, copy=False)
+    mask = np.all(np.isfinite(values), axis=1)
+    values = values[mask]
+    if values.shape[0] <= 1:
+        return {col: 1.0 for col in frame.columns}
+    if values.shape[1] == 1:
+        return {frame.columns[0]: 1.0}
+    corr = np.corrcoef(values, rowvar=False)
+    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
     try:
-        inv_corr = np.linalg.pinv(corr.to_numpy())
+        inv_corr = np.linalg.pinv(corr)
     except np.linalg.LinAlgError:
-        inv_corr = np.linalg.pinv(corr.to_numpy() + np.eye(corr.shape[0]) * 1e-6)
-    return {col: float(inv_corr[i, i]) for i, col in enumerate(corr.columns)}
+        inv_corr = np.linalg.pinv(corr + np.eye(corr.shape[0]) * 1e-6)
+    return {col: float(inv_corr[i, i]) for i, col in enumerate(frame.columns)}
 
 
 def _target_partial_r2(target: np.ndarray, features: pd.DataFrame, feature_name: str) -> float:

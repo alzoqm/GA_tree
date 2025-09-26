@@ -28,21 +28,21 @@ def _family_key(feature: str) -> str:
 
 
 def _prepare_matrix(df: pd.DataFrame, features: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-    usable: List[str] = []
-    columns: List[np.ndarray] = []
-    for feature in features:
-        if feature not in df.columns:
-            continue
-        series = df[feature].to_numpy(copy=False)
-        if np.isnan(series).all():
-            continue
-        columns.append(series.astype(float))
-        usable.append(feature)
+    existing = [name for name in features if name in df.columns]
+    if not existing:
+        return np.empty((0, 0)), []
+    subset = df[existing]
+    non_nan = subset.notna().any(axis=0)
+    subset = subset.loc[:, non_nan]
+    usable = subset.columns.tolist()
     if not usable:
         return np.empty((0, 0)), []
-    matrix = np.column_stack(columns)
+    matrix = subset.to_numpy(dtype=float, copy=False)
     mask = np.all(np.isfinite(matrix), axis=1)
-    matrix = matrix[mask]
+    if mask.any():
+        matrix = matrix[mask]
+    else:
+        matrix = np.empty((0, len(usable)), dtype=float)
     return matrix, usable
 
 

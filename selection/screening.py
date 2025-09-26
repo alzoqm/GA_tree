@@ -326,30 +326,47 @@ def _estimate_empirical_covariance(
 ) -> Optional[np.ndarray]:
     if test_count == 0:
         return None
-    rows: List[np.ndarray] = []
-    for mapping in per_feature_pvals.values():
+    rows = np.full((len(per_feature_pvals), test_count), np.nan, dtype=float)
+    valid_row = np.zeros(len(per_feature_pvals), dtype=bool)
+    for row_idx, mapping in enumerate(per_feature_pvals.values()):
         if not mapping:
             continue
-        row = np.full(test_count, np.nan, dtype=float)
         for idx, value in mapping.items():
             if 0 <= idx < test_count:
-                row[idx] = -2.0 * np.log(max(value, 1e-16))
-        if np.all(np.isnan(row)):
-            continue
-        rows.append(row)
-    if len(rows) < 2:
+                rows[row_idx, idx] = -2.0 * np.log(max(float(value), 1e-16))
+        valid_row[row_idx] = not np.isnan(rows[row_idx]).all()
+
+    if valid_row.sum() < 2:
         return None
-    data = np.vstack(rows)
-    means = np.nanmean(data, axis=0)
-    centered = data - means
-    covariance = np.zeros((test_count, test_count), dtype=float)
-    for i in range(test_count):
-        for j in range(test_count):
-            valid = ~np.isnan(centered[:, i]) & ~np.isnan(centered[:, j])
-            if valid.sum() < 2:
-                covariance[i, j] = 4.0 if i == j else 0.0
-            else:
-                covariance[i, j] = float(np.dot(centered[valid, i], centered[valid, j]) / (valid.sum() - 1))
+
+    data = rows[valid_row]
+    mask = ~np.isnan(data)
+    if mask.sum() < 2:
+        return None
+
+    counts_per_test = mask.sum(axis=0)
+    means = np.divide(
+        np.nansum(data, axis=0),
+        np.maximum(counts_per_test, 1),
+        out=np.zeros(test_count, dtype=float),
+        where=counts_per_test > 0,
+    )
+    centered = np.where(mask, data - means, 0.0)
+    counts = mask.T @ mask
+    covariance = centered.T @ centered
+    with np.errstate(divide="ignore", invalid="ignore"):
+        covariance = np.divide(
+            covariance,
+            np.maximum(counts - 1, 1),
+            out=np.zeros_like(covariance),
+            where=counts > 1,
+        )
+
+    diag_idx = np.arange(test_count)
+    diag_mask = counts[diag_idx, diag_idx] <= 1
+    covariance[diag_idx[diag_mask], diag_idx[diag_mask]] = 4.0
+    off_diag_mask = counts <= 1
+    covariance[off_diag_mask & ~np.eye(test_count, dtype=bool)] = 0.0
     return covariance
 
 
@@ -537,17 +554,33 @@ def screening_out_of_fold(
     supervision = supervision.lower()
     supervised_mode = supervision == "supervised"
 
+    feature_list = [col for col in feature_columns if col in df.columns]
+    if feature_list:
+        feature_matrix = df[feature_list].to_numpy(copy=False)
+    else:
+        feature_matrix = np.empty((df.shape[0], 0), dtype=float)
+    target_array = (
+        df[target_column].to_numpy(copy=False)
+        if supervised_mode and target_column and target_column in df.columns
+        else None
+    )
+
     for split in cross_splits:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
             if indices.size < min_bars:
                 continue
-            fold_df = df.iloc[indices]
-            if supervised_mode and target_column and target_column in fold_df.columns:
-                target_values = fold_df[target_column].to_numpy(copy=False)
+
+            if supervised_mode and target_array is not None:
+                target_values = target_array[indices]
             else:
                 target_values = None
-            for feature in feature_columns:
-                series = fold_df[feature].to_numpy(copy=False)
+
+            if not feature_list:
+                continue
+
+            fold_matrix = feature_matrix[indices]
+            for col_idx, feature in enumerate(feature_list):
+                series = fold_matrix[:, col_idx]
                 if supervised_mode and target_values is None:
                     continue
                 results = _evaluate_screening_methods(

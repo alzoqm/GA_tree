@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Dict, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -68,16 +68,79 @@ def _g_test(a: int, b: int, c: int, d: int) -> tuple[float, float]:
     return g, min(1.0, pval)
 
 
-def _odds_ratio(a: int, b: int, c: int, d: int) -> float:
-    return (a + 0.5) * (d + 0.5) / ((b + 0.5) * (c + 0.5))
+def _odds_ratio(a: int | np.ndarray, b: int | np.ndarray, c: int | np.ndarray, d: int | np.ndarray) -> np.ndarray:
+    a_arr = np.asarray(a, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    c_arr = np.asarray(c, dtype=float)
+    d_arr = np.asarray(d, dtype=float)
+    numerator = (a_arr + 0.5) * (d_arr + 0.5)
+    denominator = (b_arr + 0.5) * (c_arr + 0.5)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = numerator / denominator
+    return np.nan_to_num(ratio, nan=1.0, posinf=1e9, neginf=1e-9)
 
 
-def _relative_risk(a: int, b: int, c: int, d: int) -> float:
-    exposed = a + b
-    unexposed = c + d
-    if exposed == 0 or unexposed == 0:
-        return 1.0
-    return ((a + 0.5) / (exposed + 1.0)) / ((c + 0.5) / (unexposed + 1.0))
+def _relative_risk(
+    a: int | np.ndarray,
+    b: int | np.ndarray,
+    c: int | np.ndarray,
+    d: int | np.ndarray,
+) -> np.ndarray:
+    a_arr = np.asarray(a, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    c_arr = np.asarray(c, dtype=float)
+    d_arr = np.asarray(d, dtype=float)
+    exposed = a_arr + b_arr
+    unexposed = c_arr + d_arr
+    with np.errstate(divide="ignore", invalid="ignore"):
+        numerator = (a_arr + 0.5) / (exposed + 1.0)
+        denominator = (c_arr + 0.5) / (unexposed + 1.0)
+        rr = numerator / denominator
+    rr = np.nan_to_num(rr, nan=1.0, posinf=1e9, neginf=1e-9)
+    invalid = (exposed <= 0) | (unexposed <= 0)
+    return np.where(invalid, 1.0, rr)
+
+
+def _g_test_vectorized(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Vectorized G-test statistic for a batch of 2x2 tables."""
+
+    totals = a + b + c + d
+    with np.errstate(divide="ignore", invalid="ignore"):
+        row1 = a + b
+        row2 = c + d
+        col1 = a + c
+        col2 = b + d
+        expected_a = np.where(totals > 0, row1 * col1 / totals, 0.0)
+        expected_b = np.where(totals > 0, row1 * col2 / totals, 0.0)
+        expected_c = np.where(totals > 0, row2 * col1 / totals, 0.0)
+        expected_d = np.where(totals > 0, row2 * col2 / totals, 0.0)
+
+        def _term(obs: np.ndarray, exp: np.ndarray) -> np.ndarray:
+            valid = (obs > 0) & (exp > 0)
+            ratio = np.where(valid, obs / exp, 1.0)
+            return np.where(valid, 2.0 * obs * np.log(ratio), 0.0)
+
+        g_stat = (
+            _term(a.astype(float), expected_a)
+            + _term(b.astype(float), expected_b)
+            + _term(c.astype(float), expected_c)
+            + _term(d.astype(float), expected_d)
+        )
+    return np.nan_to_num(g_stat, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _fisher_exact_vectorized(
+    a: Sequence[int],
+    b: Sequence[int],
+    c: Sequence[int],
+    d: Sequence[int],
+) -> np.ndarray:
+    """Compute Fisher's exact test p-values for many 2x2 tables."""
+
+    return np.array(
+        [_fisher_exact(int(ai), int(bi), int(ci), int(di)) for ai, bi, ci, di in zip(a, b, c, d)],
+        dtype=float,
+    )
 
 
 def compute_boolean_feature_stats(
@@ -91,62 +154,105 @@ def compute_boolean_feature_stats(
 ) -> Dict[str, BooleanFeatureStats]:
     """Compute boolean-event statistics for the provided feature set."""
 
+    feature_list = [name for name in features if name in df.columns]
+    if not feature_list:
+        return {}
+
+    index = df.index.intersection(target.index)
+    if index.empty:
+        return {}
+
     if rng is None:
         rng = np.random.default_rng()
     params = bootstrap or {}
     samples = int(params.get("samples", 200))
     block_size = int(params.get("block_size", 32))
     alpha = float(params.get("alpha", 0.05))
+
+    # Align data once and operate on numpy arrays to avoid per-feature DataFrame joins.
+    frame = df.loc[index, feature_list]
+    target_aligned = target.loc[index].to_numpy(dtype=float, copy=False)
+    indicator = (target_aligned > event_threshold).astype(np.int8, copy=False)
+
+    values = frame.to_numpy(dtype=np.float32, copy=False)
+    np.nan_to_num(values, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    values_int = values.astype(np.int16, copy=False)
+    # Enforce binary representation while matching the original floor-to-int behaviour.
+    binary = np.clip(values_int, 0, 1).astype(np.uint8, copy=False)
+
+    target_pos = indicator.astype(np.int32, copy=False)
+    ones = binary.sum(axis=0, dtype=np.int64)
+    a = binary.T @ target_pos
+    b = ones - a
+    target_total = target_pos.sum(dtype=np.int64)
+    zeros = binary.shape[0] - ones
+    c = target_total - a
+    d = zeros - c
+
+    g_stats = _g_test_vectorized(a, b, c, d)
+    g_pvalues = np.array([chi2_sf(float(stat), 1.0) if stat > 0 else 1.0 for stat in g_stats], dtype=float)
+    fisher_pvalues = _fisher_exact_vectorized(a, b, c, d)
+    odds_arr = np.asarray(_odds_ratio(a, b, c, d), dtype=float)
+    rr_arr = np.asarray(_relative_risk(a, b, c, d), dtype=float)
+
+    # Bootstrap mean-difference confidence intervals computed in a vectorised fashion.
+    ci_lower = np.zeros(len(feature_list), dtype=float)
+    ci_upper = np.zeros(len(feature_list), dtype=float)
+    if samples > 0 and binary.shape[0] > 0:
+        diffs = np.zeros((samples, len(feature_list)), dtype=np.float32)
+        for draw in range(samples):
+            idx = block_bootstrap_indices(binary.shape[0], block_size, rng)
+            sample_binary = binary[idx]
+            sample_target = target_aligned[idx]
+            pos_counts = sample_binary.sum(axis=0, dtype=np.int64)
+            pos_sum = np.einsum("ij,i->j", sample_binary, sample_target, dtype=np.float64)
+            sample_total = float(np.sum(sample_target))
+            sample_size = sample_binary.shape[0]
+            neg_counts = sample_size - pos_counts
+            neg_sum = sample_total - pos_sum
+            pos_mean = np.divide(
+                pos_sum,
+                pos_counts,
+                out=np.zeros_like(pos_sum, dtype=float),
+                where=pos_counts > 0,
+            )
+            neg_mean = np.divide(
+                neg_sum,
+                neg_counts,
+                out=np.zeros_like(neg_sum, dtype=float),
+                where=neg_counts > 0,
+            )
+            diffs[draw] = pos_mean - neg_mean
+
+        sorted_diffs = np.sort(diffs, axis=0)
+        low_idx = max(0, int((alpha / 2.0) * samples) - 1)
+        high_idx = max(0, min(samples - 1, int((1.0 - alpha / 2.0) * samples) - 1))
+        ci_lower = sorted_diffs[low_idx].astype(float)
+        ci_upper = sorted_diffs[high_idx].astype(float)
+
     stats: Dict[str, BooleanFeatureStats] = {}
-
-    indicator = (target > event_threshold).astype(int)
-    for feature in features:
-        aligned = df[[feature]].join(indicator.rename("target_indicator"), how="inner")
-        values = aligned[feature].fillna(0).astype(int)
-        targets = aligned["target_indicator"].astype(int)
-        a = int(((values == 1) & (targets == 1)).sum())
-        b = int(((values == 1) & (targets == 0)).sum())
-        c = int(((values == 0) & (targets == 1)).sum())
-        d = int(((values == 0) & (targets == 0)).sum())
-        g_stat, g_pval = _g_test(a, b, c, d)
-        fisher_p = _fisher_exact(a, b, c, d)
-        or_value = _odds_ratio(a, b, c, d)
-        rr_value = _relative_risk(a, b, c, d)
-
-        aligned_target = target.loc[aligned.index]
-        target_pos = aligned_target[values == 1]
-        target_neg = aligned_target[values == 0]
-        delta = cliffs_delta(target_pos.to_numpy(), target_neg.to_numpy())
-
-        ci = (0.0, 0.0)
-        if samples > 0 and aligned.shape[0] > 0:
-            boot_stats = []
-            values_np = values.to_numpy()
-            target_np = aligned_target.to_numpy()
-            for _ in range(samples):
-                idx = block_bootstrap_indices(aligned.shape[0], block_size, rng)
-                sample_bool = values_np[idx]
-                sample_target = target_np[idx]
-                pos = sample_target[sample_bool == 1]
-                neg = sample_target[sample_bool == 0]
-                if pos.size == 0 or neg.size == 0:
-                    boot_stats.append(0.0)
-                else:
-                    boot_stats.append(float(pos.mean() - neg.mean()))
-            boot_stats.sort()
-            low_idx = max(0, int((alpha / 2) * samples) - 1)
-            high_idx = min(samples - 1, int((1 - alpha / 2) * samples) - 1)
-            ci = (boot_stats[low_idx], boot_stats[high_idx])
+    for offset, feature in enumerate(feature_list):
+        column = binary[:, offset]
+        mask_pos = column == 1
+        mask_neg = column == 0
+        target_pos_values = target_aligned[mask_pos]
+        target_neg_values = target_aligned[mask_neg]
+        delta = cliffs_delta(target_pos_values, target_neg_values)
 
         stats[feature] = BooleanFeatureStats(
             feature=feature,
-            counts={"a": a, "b": b, "c": c, "d": d},
-            odds_ratio=or_value,
-            relative_risk=rr_value,
-            g_statistic=g_stat,
-            g_pvalue=g_pval,
-            fisher_pvalue=fisher_p,
-            cliffs_delta=delta,
-            bootstrap_ci=ci,
+            counts={
+                "a": int(a[offset]),
+                "b": int(b[offset]),
+                "c": int(c[offset]),
+                "d": int(d[offset]),
+            },
+            odds_ratio=float(odds_arr[offset]),
+            relative_risk=float(rr_arr[offset]),
+            g_statistic=float(g_stats[offset]),
+            g_pvalue=float(g_pvalues[offset]),
+            fisher_pvalue=float(fisher_pvalues[offset]),
+            cliffs_delta=float(delta),
+            bootstrap_ci=(float(ci_lower[offset]), float(ci_upper[offset])),
         )
     return stats
