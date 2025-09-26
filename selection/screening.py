@@ -376,16 +376,74 @@ def _apply_fdr(pvalues: Mapping[str, float], alpha: float, method: str) -> List[
     raise ValueError(f"Unsupported FDR method: {method}")
 
 
-def _evaluate_screening_methods(
+def _lagged_pairs(values: np.ndarray, lag: int) -> Tuple[np.ndarray, np.ndarray]:
+    if lag <= 0:
+        return np.empty(0), np.empty(0)
+    if values.size <= lag:
+        return np.empty(0), np.empty(0)
+    x = values[:-lag]
+    y = values[lag:]
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 8:
+        return np.empty(0), np.empty(0)
+    return x[mask].astype(float), y[mask].astype(float)
+
+
+def _run_method_test(
+    method_name: str,
     x: np.ndarray,
     y: np.ndarray,
+    cfg: Mapping[str, object],
+    rng: Generator,
+) -> Optional[Tuple[float, float, Dict[str, float]]]:
+    sample_size = x.size
+    if sample_size == 0 or y.size != sample_size:
+        return None
+    method = method_name.lower()
+    method_rng = default_rng(rng.integers(2**32))
+    if method in {"spearman", "spearman_rho"}:
+        rho = _spearman_corr(x, y)
+        pval = _approx_spearman_pvalue(rho, sample_size)
+        effect = abs(rho)
+        delta = float(abs(cliffs_delta(x, y)))
+        if bool(cfg.get("cliffs_delta", True)):
+            effect = max(effect, delta)
+        return float(effect), float(pval), {"cliffs_delta": delta}
+    if method in {"kendall", "kendall_tau"}:
+        tau, used_pairs = _kendall_tau(x, y)
+        if used_pairs <= 0:
+            return None
+        pval = _kendall_tau_pvalue(tau, sample_size)
+        return float(abs(tau)), float(pval), {}
+    if method.startswith("hsic"):
+        effect, pval = _hsic_test(x, y, cfg, method_rng)
+        return float(effect), float(pval), {}
+    if method in {"dcor", "dcor_t", "distance_correlation"}:
+        effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
+        return float(effect), float(pval), {}
+    return None
+
+
+def _evaluate_screening_methods(
+    series: np.ndarray,
+    target: Optional[np.ndarray],
     methods: Mapping[str, Mapping[str, object] | object],
     rng: Generator,
+    *,
+    supervision: str,
 ) -> Dict[str, Tuple[float, float, Dict[str, float]]]:
     results: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
-    sample_size = x.size
-    if sample_size == 0:
-        return results
+    values = series.astype(float)
+    supervised = supervision == "supervised" and target is not None
+    if supervised:
+        mask = np.isfinite(values) & np.isfinite(target)
+        x = values[mask]
+        y = target[mask].astype(float)
+        if x.size < 8 or y.size < 8:
+            return results
+    else:
+        x = np.empty(0)
+        y = np.empty(0)
     for name, raw_spec in methods.items():
         method_name = str(name).lower()
         if isinstance(raw_spec, Mapping):
@@ -397,35 +455,61 @@ def _evaluate_screening_methods(
         if not enabled:
             continue
         method_rng = default_rng(rng.integers(2**32))
-        if method_name in {"spearman", "spearman_rho"}:
-            rho = _spearman_corr(x, y)
-            pval = _approx_spearman_pvalue(rho, sample_size)
-            effect = abs(rho)
-            delta = float(abs(cliffs_delta(x, y)))
-            if bool(cfg.get("cliffs_delta", True)):
-                effect = max(effect, delta)
-            results[method_name] = (float(effect), float(pval), {"cliffs_delta": delta})
-        elif method_name in {"kendall", "kendall_tau"}:
-            tau, used_pairs = _kendall_tau(x, y)
-            if used_pairs <= 0:
-                continue
-            pval = _kendall_tau_pvalue(tau, sample_size)
-            results[method_name] = (float(abs(tau)), float(pval), {})
-        elif method_name.startswith("hsic"):
-            effect, pval = _hsic_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval), {})
-        elif method_name in {"dcor", "dcor_t", "distance_correlation"}:
-            effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
-            results[method_name] = (float(effect), float(pval), {})
-        else:
+        if supervised:
+            outcome = _run_method_test(method_name, x, y, cfg, method_rng)
+            if outcome is not None:
+                results[method_name] = outcome
             continue
+
+        base_name = method_name
+        if base_name.startswith("auto_"):
+            base_name = base_name[5:]
+        lags_raw = cfg.get("lags")
+        if lags_raw is None:
+            lag_value = cfg.get("lag", 1)
+            if isinstance(lag_value, Iterable) and not isinstance(lag_value, (str, bytes)):
+                lags = [int(l) for l in lag_value]
+            else:
+                lags = [int(lag_value or 1)]
+        else:
+            lags = [int(l) for l in lags_raw]
+        lags = [lag for lag in lags if lag > 0]
+        if not lags:
+            lags = [1]
+
+        lag_results: List[Tuple[int, float, float, Dict[str, float]]] = []
+        for lag in lags:
+            pair_x, pair_y = _lagged_pairs(values, lag)
+            outcome = _run_method_test(base_name, pair_x, pair_y, cfg, method_rng)
+            if outcome is None:
+                continue
+            effect, pval, extras = outcome
+            lag_results.append((lag, effect, pval, extras))
+        if not lag_results:
+            continue
+
+        combine_method = str(cfg.get("lag_combine", cfg.get("combine_method", "simes"))).lower()
+        pvals = [pval for _, _, pval, _ in lag_results]
+        if combine_method == "empirical_brown":
+            combined_pval = _empirical_brown(pvals, None)
+        else:
+            combined_pval = _combine_pvalues(pvals, method=combine_method)
+        best_lag, best_effect, _, best_extras = max(
+            lag_results,
+            key=lambda item: abs(item[1]),
+        )
+        delta = max((abs(extra.get("cliffs_delta", 0.0)) for _, _, _, extra in lag_results), default=0.0)
+        extras_out: Dict[str, float] = {"best_lag": float(best_lag)}
+        if delta > 0.0:
+            extras_out["cliffs_delta"] = float(delta)
+        results[method_name] = (float(abs(best_effect)), float(combined_pval), extras_out)
     return results
 
 
 def screening_out_of_fold(
     df: pd.DataFrame,
     feature_columns: Sequence[str],
-    target_column: str,
+    target_column: Optional[str],
     cross_splits: Sequence[CrossFitSplit],
     combine_cfg: Mapping[str, str | float],
     min_bars: int,
@@ -434,6 +518,7 @@ def screening_out_of_fold(
     random_state: Optional[int] = None,
     effect_min: float = 0.0,
     cliffs_delta_min: float = 0.0,
+    supervision: str = "supervised",
 ) -> ScreeningResult:
     combine_method = str(combine_cfg.get("method", "simes")).lower()
     fdr_alpha = float(combine_cfg.get("alpha", 0.1))
@@ -449,20 +534,29 @@ def screening_out_of_fold(
     method_spec = methods or {"spearman": {"enabled": True}}
     rng = default_rng(random_state)
 
+    supervision = supervision.lower()
+    supervised_mode = supervision == "supervised"
+
     for split in cross_splits:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
             if indices.size < min_bars:
                 continue
             fold_df = df.iloc[indices]
-            target = fold_df[target_column].to_numpy(copy=False)
+            if supervised_mode and target_column and target_column in fold_df.columns:
+                target_values = fold_df[target_column].to_numpy(copy=False)
+            else:
+                target_values = None
             for feature in feature_columns:
                 series = fold_df[feature].to_numpy(copy=False)
-                mask = ~np.isnan(series) & ~np.isnan(target)
-                if mask.sum() < 8:
+                if supervised_mode and target_values is None:
                     continue
-                x = series[mask]
-                y = target[mask]
-                results = _evaluate_screening_methods(x, y, method_spec, rng)
+                results = _evaluate_screening_methods(
+                    series,
+                    target_values,
+                    method_spec,
+                    rng,
+                    supervision=supervision,
+                )
                 if not results:
                     continue
                 for method_name, (effect, pval, extras) in results.items():
