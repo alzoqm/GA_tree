@@ -14,7 +14,7 @@ from typing import Dict, Mapping, Sequence
 import yaml
 
 
-@dataclass
+@dataclass(slots=True)
 class SnapshotPayload:
     created_at: str
     git_commit: str

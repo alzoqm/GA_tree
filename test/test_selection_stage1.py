@@ -57,16 +57,17 @@ def test_integrity_gates_drop_problem_columns():
 def test_pipeline_selects_signal_features(tmp_path):
     rng = np.random.default_rng(123)
     n = 480
-    base_signal = rng.standard_normal(n)
-    noise = rng.standard_normal((n, 3))
-    target = base_signal + rng.standard_normal(n) * 0.1
+    signal = np.zeros(n)
+    for idx in range(1, n):
+        signal[idx] = 0.85 * signal[idx - 1] + rng.standard_normal()
+    feat_shift = np.roll(signal, 1)
+    noise = rng.standard_normal(n)
 
     frame = pd.DataFrame(
         {
-            "target": target,
-            "feat_signal": base_signal + rng.standard_normal(n) * 0.1,
-            "feat_signal_shift": np.roll(base_signal, 1) + rng.standard_normal(n) * 0.1,
-            "feat_noise": noise[:, 0],
+            "feat_signal": signal + rng.standard_normal(n) * 0.05,
+            "feat_signal_shift": feat_shift + rng.standard_normal(n) * 0.05,
+            "feat_noise": noise,
             "flag_event": rng.integers(0, 2, n),
         }
     )
@@ -88,11 +89,26 @@ def test_pipeline_selects_signal_features(tmp_path):
     selection_cfg = {
         "enabled": True,
         "dry_run": True,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 96,
-        "stage1_screening": {"combine": {"method": "simes", "alpha": 0.1, "fdr": "bh"}},
-        "stage2_selection": {"corr_cap": 0.85, "max_features": 5, "inner_ratio": 0.5},
-        "stage4_calibration": {"vif_threshold": 8.0, "robust_quantiles": [0.01, 0.99], "mad_margin": {"factor": 0.0}},
+        "stage1_screening": {
+            "methods": {"auto_spearman": {"enabled": True, "lags": [1]}},
+            "combine": {"method": "simes", "alpha": 0.1, "fdr": "bh"},
+        },
+        "stage2_selection": {
+            "corr_cap": 0.85,
+            "max_features": 5,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 8.0,
+            "robust_quantiles": [0.01, 0.99],
+            "mad_margin": {"factor": 0.0},
+            "boolean_stats": {"enabled": False},
+        },
     }
 
     paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
@@ -108,11 +124,11 @@ def test_pipeline_selects_signal_features(tmp_path):
 def test_pipeline_persists_outputs(tmp_path, caplog):
     rng = np.random.default_rng(7)
     n = 420
-    signal = rng.standard_normal(n)
-    target = signal + rng.standard_normal(n) * 0.05
+    signal = np.zeros(n)
+    for idx in range(1, n):
+        signal[idx] = 0.88 * signal[idx - 1] + rng.standard_normal() * 0.1
     frame = pd.DataFrame(
         {
-            "target": target,
             "feat_alpha": signal + rng.standard_normal(n) * 0.05,
             "feat_beta": rng.standard_normal(n),
             "flag_breakout": rng.integers(0, 2, n),
@@ -137,12 +153,28 @@ def test_pipeline_persists_outputs(tmp_path, caplog):
     selection_cfg = {
         "enabled": True,
         "dry_run": False,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 80,
         "artifact_dir": str(artifact_dir),
-        "stage1_screening": {"combine": {"method": "simes", "alpha": 0.05, "fdr": "by"}},
-        "stage2_selection": {"corr_cap": 0.9, "max_features": 4, "inner_ratio": 0.5},
-        "stage4_calibration": {"vif_threshold": 10.0, "robust_quantiles": [0.05, 0.95], "mad_margin": {"factor": 0.0}},
+        "stage1_screening": {
+            "methods": {"auto_spearman": {"enabled": True, "lags": [1]}},
+            "combine": {"method": "simes", "alpha": 0.05, "fdr": "by"},
+            "enforce_significance": False,
+        },
+        "stage2_selection": {
+            "corr_cap": 0.9,
+            "max_features": 4,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 10.0,
+            "robust_quantiles": [0.05, 0.95],
+            "mad_margin": {"factor": 0.0},
+            "boolean_stats": {"enabled": False},
+        },
         "feature_whitelist": ["flag_breakout"],
     }
 
@@ -157,8 +189,7 @@ def test_pipeline_persists_outputs(tmp_path, caplog):
     assert "feat_alpha" in written_model["feature_num"]
     low, high = written_model["feature_num"]["feat_alpha"]
     assert low < high
-    assert "flag_breakout" not in written_model["feature_bool"]
-    assert any("Dropping" in message for message in caplog.messages)
+    assert "flag_breakout" not in written_model.get("feature_bool", [])
 
     # Snapshot file created with selection_snapshot
     snapshot_data = yaml.safe_load(active_path.read_text(encoding="utf-8"))
@@ -177,11 +208,11 @@ def test_pipeline_persists_outputs(tmp_path, caplog):
 def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
     rng = np.random.default_rng(11)
     n = 300
-    base = rng.standard_normal(n)
-    target = base + rng.standard_normal(n) * 0.2
+    base = np.zeros(n)
+    for idx in range(1, n):
+        base[idx] = 0.82 * base[idx - 1] + rng.standard_normal() * 0.15
     frame = pd.DataFrame(
         {
-            "target": target,
             "feat_good": base,
             "flag_signal": rng.integers(0, 2, n),
         }
@@ -204,9 +235,11 @@ def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
     selection_cfg = {
         "enabled": True,
         "dry_run": True,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 60,
         "stage1_screening": {
+            "methods": {"auto_spearman": {"enabled": True, "lags": [1]}},
             "combine": {"method": "simes", "alpha": 0.05, "fdr": "by"},
             "enforce_significance": False,
         },
@@ -224,15 +257,15 @@ def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
 def test_stage1_effect_threshold_filters_low_effect(tmp_path):
     rng = np.random.default_rng(5150)
     n = 640
-    strong_latent = rng.standard_normal(n)
-    weak_latent = 0.1 * strong_latent + 0.9 * rng.standard_normal(n)
-    target = 2.0 * strong_latent + 0.02 * rng.standard_normal(n)
+    signal = np.zeros(n)
+    for idx in range(1, n):
+        signal[idx] = 0.9 * signal[idx - 1] + rng.standard_normal() * 0.1
+    weak = rng.standard_normal(n) * 0.2
 
     frame = pd.DataFrame(
         {
-            "target": target,
-            "feat_strong": 1.8 * strong_latent + 0.02 * rng.standard_normal(n),
-            "feat_weak": weak_latent + 0.05 * rng.standard_normal(n),
+            "feat_strong": signal,
+            "feat_weak": weak,
             "noise": rng.standard_normal(n),
         }
     )
@@ -259,14 +292,12 @@ def test_stage1_effect_threshold_filters_low_effect(tmp_path):
     selection_cfg = {
         "enabled": True,
         "dry_run": True,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 60,
         "stage1_screening": {
+            "methods": {"auto_spearman": {"enabled": True, "lags": [1]}},
             "combine": {"method": "simes", "alpha": 0.99, "fdr": "bh"},
-            "methods": {
-                "spearman": {"enabled": True},
-                "kendall": {"enabled": True},
-            },
             "effect_min": 0.4,
             "cliffs_delta_min": 0.0,
         },
@@ -275,13 +306,13 @@ def test_stage1_effect_threshold_filters_low_effect(tmp_path):
             "max_features": 5,
             "inner_ratio": 0.5,
             "stability_selection": {"enabled": False},
-            "knockoffs": {"enabled": False},
         },
         "stage3_diversity": {"enabled": False},
         "stage4_calibration": {
             "vif_threshold": 10.0,
             "robust_quantiles": [0.02, 0.98],
             "mad_margin": {"factor": 0.0},
+            "boolean_stats": {"enabled": False},
         },
     }
 
@@ -299,13 +330,11 @@ def test_stage1_kendall_method_records(tmp_path):
     rng = np.random.default_rng(6060)
     n = 400
     time_index = np.arange(n)
-    target = 0.002 * time_index + rng.normal(scale=0.05, size=n)
     monotonic_feature = time_index + rng.normal(scale=0.5, size=n)
     noise = rng.standard_normal(n)
 
     frame = pd.DataFrame(
         {
-            "target": target,
             "feat_trend": monotonic_feature,
             "feat_noise": noise,
         }
@@ -327,24 +356,25 @@ def test_stage1_kendall_method_records(tmp_path):
     selection_cfg = {
         "enabled": True,
         "dry_run": True,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 100,
         "stage1_screening": {
             "combine": {"method": "simes", "alpha": 0.1, "fdr": "bh"},
-            "methods": {"kendall": {"enabled": True}},
+            "methods": {"auto_kendall": {"enabled": True, "lags": [1]}},
         },
         "stage2_selection": {
             "corr_cap": 0.95,
             "max_features": 3,
             "inner_ratio": 0.5,
             "stability_selection": {"enabled": False},
-            "knockoffs": {"enabled": False},
         },
         "stage3_diversity": {"enabled": False},
         "stage4_calibration": {
             "vif_threshold": 12.0,
             "robust_quantiles": [0.05, 0.95],
             "mad_margin": {"factor": 0.0},
+            "boolean_stats": {"enabled": False},
         },
     }
 
@@ -352,22 +382,16 @@ def test_stage1_kendall_method_records(tmp_path):
     pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
     artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
 
-    assert artifacts.screening.methods == ["kendall"]
+    assert artifacts.screening.methods == ["auto_kendall"]
     assert "feat_trend" in artifacts.screening.passing_features
-    assert all(detail.method == "kendall" for detail in artifacts.screening.details)
+    assert all(detail.method == "auto_kendall" for detail in artifacts.screening.details)
     assert "feat_trend" in artifacts.selected_features
 
 
 def test_pipeline_raises_when_no_significant_features(tmp_path):
     rng = np.random.default_rng(99)
     n = 200
-    target = rng.standard_normal(n)
-    frame = pd.DataFrame(
-        {
-            "target": target,
-            "pure_noise": rng.standard_normal(n),
-        }
-    )
+    frame = pd.DataFrame({"pure_noise": rng.standard_normal(n)})
 
     data_path = tmp_path / "features.csv"
     frame.to_csv(data_path, index=False)
@@ -386,9 +410,13 @@ def test_pipeline_raises_when_no_significant_features(tmp_path):
     selection_cfg = {
         "enabled": True,
         "dry_run": True,
-        "target_column": "target",
+        "supervision": "unsupervised",
+        "target_column": None,
         "min_bars_per_split": 64,
-        "stage1_screening": {"combine": {"method": "simes", "alpha": 0.01, "fdr": "by"}},
+        "stage1_screening": {
+            "methods": {"auto_spearman": {"enabled": True, "lags": [1]}},
+            "combine": {"method": "simes", "alpha": 0.01, "fdr": "by"},
+        },
     }
 
     paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)

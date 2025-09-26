@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import pytest
+
 
 from selection.calibration import calibrate_ranges
 from selection.loader import SelectionPaths

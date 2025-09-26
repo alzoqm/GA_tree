@@ -40,36 +40,46 @@ def block_bootstrap_indices(n: int, block_size: int, rng: np.random.Generator) -
     if n <= 0:
         return np.empty(0, dtype=int)
     block_size = max(1, min(int(block_size), n))
-    blocks = []
-    filled = 0
-    while filled < n:
-        start = int(rng.integers(0, max(1, n - block_size + 1)))
-        block = np.arange(start, min(start + block_size, n), dtype=int)
-        blocks.append(block)
-        filled += block.size
-    indices = np.concatenate(blocks)[:n]
-    return indices
+    num_blocks = int(np.ceil(n / block_size))
+    starts = rng.integers(0, max(1, n - block_size + 1), size=num_blocks)
+    offsets = np.arange(block_size)
+    blocks = starts[:, None] + offsets[None, :]
+    valid = blocks < n
+    indices = blocks[valid]
+    if indices.size < n:
+        padding = rng.integers(0, n, size=n - indices.size)
+        indices = np.concatenate([indices, padding])
+    return indices[:n].astype(int, copy=False)
 
 
 def cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
     """Compute Cliff's delta effect size between two samples."""
 
-    x_sorted = np.sort(np.asarray(x, dtype=float))
-    y_sorted = np.sort(np.asarray(y, dtype=float))
-    nx = x_sorted.size
-    ny = y_sorted.size
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    if x_arr.size == 0 or y_arr.size == 0:
+        return 0.0
+
+    # Remove non-finite observations to avoid propagating NaNs.
+    x_arr = x_arr[np.isfinite(x_arr)]
+    y_arr = y_arr[np.isfinite(y_arr)]
+    nx = x_arr.size
+    ny = y_arr.size
     if nx == 0 or ny == 0:
         return 0.0
-    i = j = 0
-    greater = lesser = 0
-    while i < nx and j < ny:
-        if x_sorted[i] > y_sorted[j]:
-            greater += nx - i
-            j += 1
-        elif x_sorted[i] < y_sorted[j]:
-            lesser += ny - j
-            i += 1
-        else:
-            i += 1
-            j += 1
-    return float((greater - lesser) / (nx * ny))
+
+    x_sorted = np.sort(x_arr)
+    y_sorted = np.sort(y_arr)
+
+    # ``left`` counts how many y are strictly less than each x, ``right`` counts how many
+    # are less-or-equal; the difference gives the strictly greater count.
+    left = np.searchsorted(y_sorted, x_sorted, side="left").astype(np.int64, copy=False)
+    right = np.searchsorted(y_sorted, x_sorted, side="right").astype(np.int64, copy=False)
+
+    greater = left.sum(dtype=np.int64)
+    lesser = (ny - right).sum(dtype=np.int64)
+    if greater == 0 and lesser == 0:
+        return 0.0
+
+    delta = (greater - lesser) / float(nx * ny)
+    return float(max(-1.0, min(1.0, delta)))

@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import pytest
+
 
 from selection.loader import SelectionPaths
 from selection.pipeline import SelectionPipeline

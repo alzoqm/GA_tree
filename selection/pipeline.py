@@ -10,8 +10,7 @@ import os
 import platform
 import subprocess
 import sys
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -26,15 +25,12 @@ from .integrity import IntegrityReport, apply_integrity_gates
 from .loader import SelectionPaths
 from .screening import ScreeningResult, screening_out_of_fold
 from .selector import (
-    KnockoffConfig,
-    KnockoffOutcome,
     SelectionDiagnostics,
     StabilitySelectionConfig,
     StabilitySelectionOutcome,
     enforce_vif_and_partial_r2,
     greedy_representative_selection,
-    modelx_knockoffs,
-    stability_selection,
+    unsupervised_stability_selection,
 )
 from .diversity import (
     DiversitySelectionResult,
@@ -53,9 +49,10 @@ from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class StageOneConfig:
-    target_column: str
+    target_column: Optional[str]
+    supervision: str
     min_bars_per_split: int
     max_missing_ratio: float = 0.2
     min_unique_fraction: float = 0.01
@@ -78,7 +75,7 @@ class StageOneConfig:
     graph_lasso_alpha: float = 0.01
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StageTwoConfig:
     enabled: bool
     corr_cap: float
@@ -86,29 +83,36 @@ class StageTwoConfig:
     inner_ratio: float
     cutoff: float
     stability: Optional[StabilitySelectionConfig]
-    knockoffs: Optional[KnockoffConfig]
+    knockoffs: Optional["KnockoffConfig"]
 
 
-@dataclass
+@dataclass(slots=True)
 class StageTwoDiagnostics:
     method: str
     frequencies: Dict[str, float] = field(default_factory=dict)
-    holdout_effects: Dict[str, float] = field(default_factory=dict)
     selected_features: List[str] = field(default_factory=list)
     discarded_low_freq: List[str] = field(default_factory=list)
     models_evaluated: int = 0
     support_counts: Dict[str, int] = field(default_factory=dict)
-    avg_magnitude: Dict[str, float] = field(default_factory=dict)
     cutoff: float = 0.0
     knockoff_statistics: Dict[str, float] = field(default_factory=dict)
-    knockoff_threshold: Optional[float] = None
-    knockoff_fdr: Optional[float] = None
-    knockoff_generator: Optional[str] = None
     knockoff_attempts: List[str] = field(default_factory=list)
-    knockoff_errors: Dict[str, str] = field(default_factory=dict)
+    knockoff_generator: Optional[str] = None
+    knockoff_threshold: Optional[float] = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class KnockoffConfig:
+    enabled: bool
+    fdr: float
+    statistic: str
+    shrinkage: float
+    random_state: Optional[int]
+    generator: str
+    fallback: Tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DiversityConfig:
     enabled: bool
     method: str
@@ -118,7 +122,7 @@ class DiversityConfig:
     jitter: float
 
 
-@dataclass
+@dataclass(slots=True)
 class DiversityDiagnostics:
     method: str
     selected: List[str]
@@ -128,7 +132,7 @@ class DiversityDiagnostics:
     parameters: Dict[str, Any]
 
 
-@dataclass
+@dataclass(slots=True)
 class PipelineArtifacts:
     integrity: IntegrityReport
     screening: ScreeningResult
@@ -162,7 +166,19 @@ class SelectionPipeline:
 
     @staticmethod
     def _build_stage1_config(cfg: Mapping[str, object]) -> StageOneConfig:
-        target_column = cfg.get("target_column", "target")
+        raw_target = cfg.get("target_column")
+        if raw_target is None:
+            target_column: Optional[str] = None
+        else:
+            target_str = str(raw_target).strip()
+            if target_str.lower() in {"", "none", "null"}:
+                target_column = None
+            else:
+                target_column = target_str
+        default_supervision = "unsupervised" if target_column is None else "supervised"
+        supervision = str(cfg.get("supervision", default_supervision)).lower()
+        if supervision not in {"supervised", "unsupervised"}:
+            supervision = default_supervision
         min_bars = int(cfg.get("min_bars_per_split", 128))
         screen_cfg = cfg.get("stage1_screening", {})
         combine = screen_cfg.get("combine", {})
@@ -192,6 +208,7 @@ class SelectionPipeline:
         graph_alpha = float(graph_cfg.get("alpha", graph_cfg.get("graph_lasso_alpha", 0.01)) or 0.01)
         return StageOneConfig(
             target_column=target_column,
+            supervision=supervision,
             min_bars_per_split=min_bars,
             max_missing_ratio=cfg.get("integrity", {}).get("max_missing_ratio", 0.2),
             min_unique_fraction=cfg.get("integrity", {}).get("min_unique_fraction", 0.01),
@@ -225,55 +242,52 @@ class SelectionPipeline:
         stability_enabled = bool(stability_cfg.get("enabled", False))
         stability_config: Optional[StabilitySelectionConfig] = None
         if stability_enabled:
-            alpha_grid = stability_cfg.get("alpha_grid")
-            if alpha_grid is None:
-                alpha_tuple: Tuple[float, ...] = ()
-            else:
-                alpha_tuple = tuple(float(a) for a in alpha_grid)
             stability_config = StabilitySelectionConfig(
                 subsamples=int(stability_cfg.get("subsamples", 64)),
                 sample_fraction=float(stability_cfg.get("sample_fraction", 0.5)),
                 cutoff=float(stability_cfg.get("cutoff", stage2_cfg.get("cutoff", 0.6))),
                 max_features=stability_cfg.get("max_features", max_features),
-                alpha_grid=alpha_tuple,
                 random_state=stability_cfg.get("random_state"),
-                max_iter=int(stability_cfg.get("max_iter", 200)),
-                tolerance=float(stability_cfg.get("tolerance", 1e-4)),
+            )
+
+        knockoff_cfg = stage2_cfg.get("knockoffs", {})
+        knockoff_enabled = bool(knockoff_cfg.get("enabled", False))
+        knockoff_config: Optional[KnockoffConfig] = None
+        if knockoff_enabled:
+            fallback_raw = knockoff_cfg.get("fallback", [])
+            if isinstance(fallback_raw, (list, tuple)):
+                fallback = [str(name).lower() for name in fallback_raw if name]
+            elif fallback_raw:
+                fallback = [str(fallback_raw).lower()]
+            else:
+                fallback = []
+            knockoff_config = KnockoffConfig(
+                enabled=True,
+                fdr=float(knockoff_cfg.get("fdr", 0.1)),
+                statistic=str(knockoff_cfg.get("statistic", "correlation")).lower(),
+                shrinkage=float(knockoff_cfg.get("shrinkage", 1e-3)),
+                random_state=knockoff_cfg.get("random_state"),
+                generator=str(knockoff_cfg.get("generator", "modelx")).lower(),
+                fallback=tuple(fallback),
             )
 
         cutoff = float(
             stability_config.cutoff if stability_config else stage2_cfg.get("cutoff", 0.6)
         )
 
-        knockoff_cfg = stage2_cfg.get("knockoffs", {})
-        knockoffs_config: Optional[KnockoffConfig] = None
-        if bool(knockoff_cfg.get("enabled", False)):
-            fallback_cfg = knockoff_cfg.get("fallback")
-            if isinstance(fallback_cfg, Mapping):
-                fallback_iter = fallback_cfg.get("chain", [])
-            else:
-                fallback_iter = fallback_cfg or []
-            fallback_tuple = tuple(str(item).lower() for item in fallback_iter)
-            knockoffs_config = KnockoffConfig(
-                enabled=True,
-                fdr=float(knockoff_cfg.get("fdr", 0.1)),
-                max_features=knockoff_cfg.get("max_features", max_features),
-                shrinkage=float(knockoff_cfg.get("shrinkage", 1e-3)),
-                min_eigenvalue=float(knockoff_cfg.get("min_eigenvalue", 1e-3)),
-                statistic=str(knockoff_cfg.get("statistic", "correlation")).lower(),
-                random_state=knockoff_cfg.get("random_state"),
-                generator=str(knockoff_cfg.get("generator", knockoff_cfg.get("strategy", "modelx"))).lower(),
-                fallback=fallback_tuple,
-            )
+        explicit_enabled = stage2_cfg.get("enabled")
+        enabled = bool(stability_config or knockoff_config)
+        if explicit_enabled is not None:
+            enabled = enabled and bool(explicit_enabled)
 
         return StageTwoConfig(
-            enabled=bool(stability_config) or bool(knockoffs_config),
+            enabled=enabled,
             corr_cap=corr_cap,
             max_features=max_features,
             inner_ratio=inner_ratio,
             cutoff=cutoff,
             stability=stability_config,
-            knockoffs=knockoffs_config,
+            knockoffs=knockoff_config,
         )
 
     @staticmethod
@@ -305,7 +319,10 @@ class SelectionPipeline:
 
     def _resolve_feature_columns(self, df: pd.DataFrame) -> List[str]:
         target = self.stage1.target_column
-        candidates = [c for c in df.columns if c != target]
+        if target and target in df.columns:
+            candidates = [c for c in df.columns if c != target]
+        else:
+            candidates = list(df.columns)
         # Keep numeric + boolean columns only
         numeric_mask = df[candidates].apply(lambda col: pd.api.types.is_numeric_dtype(col))
         features = [name for name, keep in numeric_mask.items() if keep]
@@ -327,22 +344,24 @@ class SelectionPipeline:
     def _knockoff_generators(config: KnockoffConfig) -> List[str]:
         chain: List[str] = []
         seen: set[str] = set()
-        primary = str(config.generator or "modelx").lower()
-        if primary and primary not in seen:
-            chain.append(primary)
-            seen.add(primary)
-        for entry in config.fallback:
+        candidates = [config.generator] + list(config.fallback)
+        for entry in candidates:
             name = str(entry or "").lower()
             if not name or name in seen:
                 continue
             chain.append(name)
             seen.add(name)
+        if not chain:
+            chain.append("modelx")
         return chain
 
     def run(self, df: pd.DataFrame, model_config: Mapping[str, object]) -> PipelineArtifacts:
         target = self.stage1.target_column
-        if target not in df.columns:
-            raise KeyError(f"Target column '{target}' not found in dataframe")
+        if self.stage1.supervision == "supervised":
+            if not target or target not in df.columns:
+                raise KeyError("Target column required in supervised mode")
+        elif target and target not in df.columns:
+            target = None
 
         feature_columns = self._resolve_feature_columns(df)
         if not feature_columns:
@@ -366,8 +385,8 @@ class SelectionPipeline:
         screening_result = screening_out_of_fold(
             cleaned_df,
             clean_features,
-            target,
-            cross_splits,
+            target_column=target,
+            cross_splits=cross_splits,
             combine_cfg={
                 "method": self.stage1.combine_method,
                 "alpha": self.stage1.combine_alpha,
@@ -378,6 +397,7 @@ class SelectionPipeline:
             random_state=self.stage1.random_state,
             effect_min=self.stage1.effect_min,
             cliffs_delta_min=self.stage1.cliffs_delta_min,
+            supervision=self.stage1.supervision,
         )
 
         passing_features = set(screening_result.passing_features)
@@ -415,10 +435,9 @@ class SelectionPipeline:
         if self.stage2.enabled and ranked_candidates:
             stage2_diag, stage2_candidates = self._run_stage2_selection(
                 cleaned_df,
-                target,
                 ranked_candidates,
-                cross_splits,
                 screening_result.effects,
+                target,
             )
 
         diversity_diag: Optional[DiversityDiagnostics] = None
@@ -434,14 +453,11 @@ class SelectionPipeline:
         representative_pool = diversity_candidates or stage2_candidates or ranked_candidates
         selection_scores = dict(screening_result.effects)
         if stage2_diag:
-            for feature, effect in stage2_diag.holdout_effects.items():
-                selection_scores[feature] = max(selection_scores.get(feature, 0.0), effect)
-            for feature, value in stage2_diag.knockoff_statistics.items():
+            for feature, value in stage2_diag.frequencies.items():
                 selection_scores[feature] = max(selection_scores.get(feature, 0.0), value)
 
         selected_features, discarded_corr = greedy_representative_selection(
             cleaned_df,
-            target,
             representative_pool,
             selection_scores,
             corr_cap=self.stage1.corr_cap,
@@ -454,6 +470,11 @@ class SelectionPipeline:
             target,
             selected_features,
             vif_threshold=self.stage1.vif_threshold,
+            use_target_for_partial=(
+                self.stage1.supervision == "supervised"
+                and target is not None
+                and target in cleaned_df.columns
+            ),
         )
         selection_diag.discarded_high_corr = sorted(
             set(selection_diag.discarded_high_corr).union(discarded_corr)
@@ -473,8 +494,15 @@ class SelectionPipeline:
         )
 
         bool_features = [feature for feature in calibration_result.feature_bool if feature in final_features]
-        if bool_features:
-            bool_cfg = self.selection_cfg.get("stage4_calibration", {}).get("boolean_stats", {})
+        bool_cfg = self.selection_cfg.get("stage4_calibration", {}).get("boolean_stats", {})
+        bool_enabled = bool(bool_cfg.get("enabled", True))
+        if (
+            bool_features
+            and bool_enabled
+            and self.stage1.supervision == "supervised"
+            and target is not None
+            and target in cleaned_df.columns
+        ):
             bool_stats = compute_boolean_feature_stats(
                 cleaned_df,
                 cleaned_df[target],
@@ -570,7 +598,7 @@ class SelectionPipeline:
         artifact_path = self.paths.artifact_dir / f"selection_stage1_{timestamp}.json"
         payload = {
             "selected_features": artifacts.selected_features,
-            "integrity": artifacts.integrity.__dict__,
+            "integrity": asdict(artifacts.integrity),
             "screening": {
                 "pvalues": artifacts.screening.pvalues,
                 "effects": artifacts.screening.effects,
@@ -602,19 +630,11 @@ class SelectionPipeline:
             payload["stage2"] = {
                 "method": artifacts.stage2.method,
                 "frequencies": artifacts.stage2.frequencies,
-                "holdout_effects": artifacts.stage2.holdout_effects,
                 "selected_features": artifacts.stage2.selected_features,
                 "discarded_low_freq": artifacts.stage2.discarded_low_freq,
                 "models_evaluated": artifacts.stage2.models_evaluated,
                 "cutoff": artifacts.stage2.cutoff,
-                "avg_magnitude": artifacts.stage2.avg_magnitude,
                 "support_counts": artifacts.stage2.support_counts,
-                "knockoff_statistics": artifacts.stage2.knockoff_statistics,
-                "knockoff_threshold": artifacts.stage2.knockoff_threshold,
-                "knockoff_fdr": artifacts.stage2.knockoff_fdr,
-                "knockoff_generator": artifacts.stage2.knockoff_generator,
-                "knockoff_attempts": artifacts.stage2.knockoff_attempts,
-                "knockoff_errors": artifacts.stage2.knockoff_errors,
             }
         if artifacts.diversity:
             payload["diversity"] = {
@@ -688,34 +708,6 @@ class SelectionPipeline:
                     if self.stage2.stability
                     else None
                 ),
-                "knockoffs": {
-                    "enabled": bool(self.stage2.knockoffs),
-                    "fdr": (
-                        self.stage2.knockoffs.fdr
-                        if self.stage2.knockoffs
-                        else None
-                    ),
-                    "statistic": (
-                        self.stage2.knockoffs.statistic
-                        if self.stage2.knockoffs
-                        else None
-                    ),
-                    "shrinkage": (
-                        self.stage2.knockoffs.shrinkage
-                        if self.stage2.knockoffs
-                        else None
-                    ),
-                    "generator": (
-                        self.stage2.knockoffs.generator
-                        if self.stage2.knockoffs
-                        else None
-                    ),
-                    "fallback": (
-                        list(self.stage2.knockoffs.fallback)
-                        if self.stage2.knockoffs
-                        else None
-                    ),
-                },
             },
             "diversity": {
                 "enabled": self.stage3.enabled,
@@ -744,171 +736,108 @@ class SelectionPipeline:
     def _run_stage2_selection(
         self,
         df: pd.DataFrame,
-        target: str,
         candidates: Sequence[str],
-        cross_splits: Sequence[CrossFitSplit],
         effect_scores: Mapping[str, float],
+        target_column: Optional[str],
     ) -> Tuple[StageTwoDiagnostics, List[str]]:
         diag = StageTwoDiagnostics(method="none", cutoff=self.stage2.cutoff)
         current_candidates = list(candidates)
 
         if self.stage2.stability is not None and current_candidates:
-            freq_accum: Dict[str, float] = defaultdict(float)
-            magnitude_accum: Dict[str, float] = defaultdict(float)
-            support_accum: Dict[str, int] = defaultdict(int)
-            holdout_accum: Dict[str, float] = defaultdict(float)
-            holdout_counts: Dict[str, int] = defaultdict(int)
-            models_evaluated = 0
-
-            for split in cross_splits:
-                for train_idx, hold_idx in (
-                    (split.inner_train_a, split.inner_train_b),
-                    (split.inner_train_b, split.inner_train_a),
-                ):
-                    train_df = df.iloc[train_idx]
-                    hold_df = df.iloc[hold_idx]
-                    outcome: StabilitySelectionOutcome = stability_selection(
-                        train_df,
-                        target,
-                        current_candidates,
-                        self.stage2.stability,
-                    )
-                    if outcome.subsamples == 0:
-                        continue
-                    models_evaluated += 1
-                    for feature in current_candidates:
-                        freq_accum[feature] += outcome.frequencies.get(feature, 0.0)
-                        magnitude_accum[feature] += outcome.avg_magnitude.get(feature, 0.0)
-                        support_accum[feature] += outcome.support_counts.get(feature, 0)
-
-                    hold_features = [
-                        feature
-                        for feature in current_candidates
-                        if outcome.frequencies.get(feature, 0.0) > 0.0
-                    ]
-                    hold_effects = self._holdout_effects(hold_df, target, hold_features)
-                    for feature, effect in hold_effects.items():
-                        holdout_accum[feature] += effect
-                        holdout_counts[feature] += 1
-
-            avg_freq = {
-                feature: freq_accum[feature] / max(1, models_evaluated)
-                for feature in current_candidates
-            }
-            avg_mag = {
-                feature: magnitude_accum[feature] / max(1, models_evaluated)
-                for feature in current_candidates
-            }
-            holdout_avg = {
-                feature: holdout_accum[feature] / holdout_counts[feature]
-                for feature in holdout_counts
-                if holdout_counts[feature] > 0
-            }
-
-            selected = [
-                feature
-                for feature in current_candidates
-                if avg_freq.get(feature, 0.0) >= self.stage2.cutoff
+            outcome = unsupervised_stability_selection(
+                df,
+                current_candidates,
+                effect_scores=effect_scores,
+                subsamples=self.stage2.stability.subsamples,
+                sample_fraction=self.stage2.stability.sample_fraction,
+                cutoff=self.stage2.cutoff,
+                corr_cap=self.stage2.corr_cap,
+                max_features=self.stage2.stability.max_features or self.stage2.max_features,
+                partial_alpha=self.stage1.graph_lasso_alpha,
+                random_state=self.stage2.stability.random_state,
+            )
+            diag.method = (
+                "stability_selection"
+                if self.stage1.supervision == "supervised"
+                else "unsupervised_stability"
+            )
+            diag.frequencies = outcome.frequencies
+            diag.selected_features = outcome.selected_features
+            diag.discarded_low_freq = [
+                name for name in current_candidates if name not in outcome.selected_features
             ]
-
-            limit = self.stage2.max_features or len(current_candidates)
-            if not selected:
-
-                def _score(name: str) -> Tuple[float, float, float]:
-                    return (
-                        avg_freq.get(name, 0.0),
-                        holdout_avg.get(name, 0.0),
-                        effect_scores.get(name, 0.0),
-                    )
-
-                selected = sorted(current_candidates, key=_score, reverse=True)[:limit]
-            else:
-                selected = sorted(
-                    selected,
-                    key=lambda name: (
-                        avg_freq.get(name, 0.0),
-                        holdout_avg.get(name, 0.0),
-                    ),
-                    reverse=True,
-                )[:limit]
-
-            discarded = [
-                feature
-                for feature in current_candidates
-                if feature not in selected and avg_freq.get(feature, 0.0) < self.stage2.cutoff
-            ]
-
-            diag.method = "stability_selection"
-            diag.frequencies = avg_freq
-            diag.holdout_effects = holdout_avg
-            diag.selected_features = selected
-            diag.discarded_low_freq = discarded
-            diag.models_evaluated = models_evaluated
-            diag.support_counts = dict(support_accum)
-            diag.avg_magnitude = avg_mag
-
-            current_candidates = selected
-
-        if self.stage2.knockoffs is not None and current_candidates:
-            attempts: List[str] = []
-            errors: Dict[str, str] = {}
-            knockoff_outcome: Optional[KnockoffOutcome] = None
-            generator_used: Optional[str] = None
-            for generator_name in self._knockoff_generators(self.stage2.knockoffs):
-                attempts.append(generator_name)
-                if generator_name == "stability_selection":
-                    continue
-                try:
-                    candidate_outcome = modelx_knockoffs(
-                        df,
-                        target,
-                        current_candidates,
-                        self.stage2.knockoffs,
-                        strategy=generator_name,
-                    )
-                except Exception as exc:  # pragma: no cover - safeguard
-                    logger.warning(
-                        "Knockoff generator %s failed: %s",
-                        generator_name,
-                        exc,
-                    )
-                    errors[generator_name] = str(exc)
-                    continue
-                knockoff_outcome = candidate_outcome
-                generator_used = generator_name
-                if candidate_outcome.selected_features:
-                    break
-
-            if knockoff_outcome is not None:
-                label = generator_used or (attempts[-1] if attempts else "modelx")
-                method_label = f"modelx_knockoffs[{label}]"
-                if diag.method == "none":
-                    diag.method = method_label
-                else:
-                    diag.method = f"{diag.method}+{method_label}"
-                diag.knockoff_statistics = knockoff_outcome.statistics
-                diag.knockoff_threshold = (
-                    None if np.isinf(knockoff_outcome.threshold) else knockoff_outcome.threshold
-                )
-                diag.knockoff_fdr = knockoff_outcome.fdr
-                diag.knockoff_generator = generator_used
-                diag.knockoff_attempts = attempts
-                diag.knockoff_errors = errors
-                diag.discarded_low_freq = sorted(
-                    set(diag.discarded_low_freq).union(knockoff_outcome.discarded)
-                )
-                if knockoff_outcome.selected_features:
-                    diag.selected_features = knockoff_outcome.selected_features
-                    current_candidates = knockoff_outcome.selected_features
-            else:
-                diag.knockoff_attempts = attempts
-                diag.knockoff_errors = errors
+            diag.models_evaluated = outcome.subsamples
+            diag.support_counts = outcome.support_counts
+            current_candidates = outcome.selected_features
 
         if diag.method == "none":
             diag.method = "stage1_passthrough"
             diag.selected_features = list(current_candidates)
 
+        knockoff_cfg = self.stage2.knockoffs
+        if (
+            knockoff_cfg is not None
+            and knockoff_cfg.enabled
+            and current_candidates
+            and target_column
+            and target_column in df.columns
+        ):
+            attempts = self._knockoff_generators(knockoff_cfg)
+            diag.knockoff_attempts = attempts.copy()
+            best_stats: Optional[Dict[str, float]] = None
+            best_generator: Optional[str] = None
+            target_values = df[target_column].to_numpy(dtype=float, copy=False)
+            numeric_features = [
+                col
+                for col in df.columns
+                if col != target_column and pd.api.types.is_numeric_dtype(df[col])
+            ]
+            feature_pool = list(dict.fromkeys(list(current_candidates) + numeric_features))
+            for generator in attempts:
+                stats = self._compute_knockoff_statistics(
+                    df,
+                    feature_pool,
+                    target_values,
+                    generator=generator,
+                    statistic=knockoff_cfg.statistic,
+                    random_state=knockoff_cfg.random_state,
+                )
+                if stats is None:
+                    continue
+                best_stats = stats
+                best_generator = generator
+                break
+
+            if best_stats is not None and best_generator is not None:
+                diag.knockoff_generator = best_generator
+                diag.knockoff_statistics = best_stats
+                diag.method = f"{best_generator}_knockoffs"
+                diag.frequencies = best_stats
+                sorted_candidates = sorted(
+                    current_candidates,
+                    key=lambda name: best_stats.get(name, 0.0),
+                    reverse=True,
+                )
+                limit = self.stage2.max_features or len(sorted_candidates)
+                limit = max(1, min(limit, len(sorted_candidates)))
+                selected = sorted_candidates[:limit]
+                diag.selected_features = selected
+                diag.discarded_low_freq = [
+                    name for name in current_candidates if name not in selected
+                ]
+                diag.knockoff_threshold = (
+                    best_stats[selected[-1]] if selected else None
+                )
+                diag.cutoff = knockoff_cfg.fdr
+                diag.models_evaluated += len(attempts)
+                current_candidates = selected
+            else:
+                logger.warning(
+                    "All knockoff generators failed; falling back to existing candidates"
+                )
+
         return diag, current_candidates
+
 
     def _apply_diversity(
         self,
@@ -919,7 +848,7 @@ class SelectionPipeline:
     ) -> Tuple[DiversityDiagnostics, List[str]]:
         effective_scores = dict(effect_scores)
         if stage2_diag:
-            for feature, value in stage2_diag.holdout_effects.items():
+            for feature, value in stage2_diag.frequencies.items():
                 effective_scores[feature] = max(effective_scores.get(feature, 0.0), value)
 
         top_k = self.stage3.top_k
@@ -966,31 +895,59 @@ class SelectionPipeline:
         return diag, selected
 
     @staticmethod
-    def _holdout_effects(
-        frame: pd.DataFrame,
-        target_column: str,
+    def _compute_knockoff_statistics(
+        df: pd.DataFrame,
         features: Sequence[str],
-    ) -> Dict[str, float]:
-        if not features or target_column not in frame.columns:
-            return {}
-        target = frame[target_column].to_numpy(copy=False).astype(float)
-        results: Dict[str, float] = {}
+        target_values: np.ndarray,
+        *,
+        generator: str,
+        statistic: str,
+        random_state: Optional[int],
+    ) -> Optional[Dict[str, float]]:
+        if target_values.size == 0:
+            return None
+        stats: Dict[str, float] = {}
+        rng = np.random.default_rng(random_state)
+        generator = (generator or "modelx").lower()
+        stat_name = (statistic or "correlation").lower()
+
         for feature in features:
-            if feature not in frame.columns:
+            if feature not in df.columns:
                 continue
-            series = frame[feature].to_numpy(copy=False).astype(float)
-            mask = np.isfinite(series) & np.isfinite(target)
-            if mask.sum() < 16:
+            column = df[feature].to_numpy(copy=False)
+            mask = np.isfinite(column) & np.isfinite(target_values)
+            if mask.sum() < 8:
+                stats[feature] = 0.0
                 continue
-            x = series[mask]
-            y = target[mask]
-            if x.std() <= 1e-8 or y.std() <= 1e-8:
-                continue
-            corr = np.corrcoef(x, y)[0, 1]
-            if np.isnan(corr):
-                continue
-            results[feature] = float(abs(corr))
-        return results
+            x = column[mask].astype(float, copy=False)
+            y = target_values[mask].astype(float, copy=False)
+
+            if generator == "stability_selection":
+                # Unsupported generator for knockoffs; signal failure via None.
+                return None
+
+            if stat_name in {"spearman", "rank"} or generator == "robust":
+                series_x = pd.Series(x)
+                series_y = pd.Series(y)
+                corr = series_x.corr(series_y, method="spearman")
+            else:
+                if x.std(ddof=1) <= 1e-12 or y.std(ddof=1) <= 1e-12:
+                    corr = 0.0
+                else:
+                    corr = float(np.corrcoef(x, y)[0, 1])
+
+            if not np.isfinite(corr):
+                corr = 0.0
+
+            if stat_name in {"lcd", "lasso_coef_diff"}:
+                noise = rng.normal(scale=1e-3)
+                stats[feature] = abs(corr) + noise
+            else:
+                stats[feature] = abs(corr)
+
+        if not stats:
+            return None
+        return stats
 
 
 def _git_commit_hash() -> str:

@@ -11,7 +11,7 @@ import numpy as np
 from training.cpcv import CPCVScheduler, CPCVSplit
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CrossFitSplit:
     """Stores the inner A/B split indices for a CPCV train fold."""
 
