@@ -17,7 +17,7 @@ from .math_utils import chi2_sf
 from .utils import cliffs_delta
 
 
-@dataclass
+@dataclass(slots=True)
 class ScreeningDetail:
     fold_id: str
     feature: str
@@ -27,7 +27,7 @@ class ScreeningDetail:
     extras: Dict[str, float] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class ScreeningResult:
     pvalues: Dict[str, float]
     effects: Dict[str, float]
@@ -37,10 +37,37 @@ class ScreeningResult:
     methods: List[str]
 
 
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return values.astype(np.float32)
+    order = np.argsort(values, kind="mergesort")
+    sorted_vals = values[order]
+    if sorted_vals.size == 1:
+        ranks = np.array([1.0], dtype=np.float32)
+    else:
+        diff = np.diff(sorted_vals)
+        boundaries = np.concatenate(([0], np.nonzero(diff)[0] + 1, [sorted_vals.size]))
+        counts = np.diff(boundaries)
+        starts = boundaries[:-1]
+        ends = boundaries[1:]
+        avg_ranks = (starts + ends - 1) * 0.5 + 1.0
+        ranks_sorted = np.repeat(avg_ranks, counts)
+        ranks = np.empty_like(ranks_sorted, dtype=np.float32)
+        ranks[order] = ranks_sorted.astype(np.float32, copy=False)
+    return ranks
+
+
 def _spearman_corr(x: np.ndarray, y: np.ndarray) -> float:
-    rx = pd.Series(x).rank(method="average").to_numpy()
-    ry = pd.Series(y).rank(method="average").to_numpy()
-    return float(np.corrcoef(rx, ry)[0, 1]) if rx.size > 1 else 0.0
+    if x.size <= 1 or y.size <= 1:
+        return 0.0
+    rx = _average_ranks(np.asarray(x, dtype=np.float32))
+    ry = _average_ranks(np.asarray(y, dtype=np.float32))
+    x_centered = rx - rx.mean(dtype=np.float32)
+    y_centered = ry - ry.mean(dtype=np.float32)
+    denom = np.sqrt(np.sum(x_centered * x_centered) * np.sum(y_centered * y_centered))
+    if denom <= 1e-12:
+        return 0.0
+    return float(np.dot(x_centered, y_centered) / denom)
 
 
 def _approx_spearman_pvalue(r: float, n: int) -> float:
@@ -166,17 +193,20 @@ def _block_permutation_indices(
         method = "block"
     if method == "permutation" or block_size == 1 or block_size >= length:
         return rng.permutation(length)
-    # Build contiguous blocks then permute block order
-    blocks = [
-        np.arange(start, min(start + block_size, length))
-        for start in range(0, length, block_size)
-    ]
-    order = rng.permutation(len(blocks))
-    permuted_indices = np.concatenate([blocks[idx] for idx in order])
-    if permuted_indices.size < length:
-        remainder = np.setdiff1d(np.arange(length), permuted_indices, assume_unique=True)
-        permuted_indices = np.concatenate([permuted_indices, remainder])
-    return permuted_indices[:length]
+
+    block_starts = np.arange(0, length, block_size, dtype=np.int32)
+    block_sizes = np.minimum(block_size, length - block_starts)
+    base = np.arange(block_size, dtype=np.int32)
+    blocks = block_starts[:, None] + base[None, :]
+    mask = base[None, :] < block_sizes[:, None]
+    order = rng.permutation(block_starts.size)
+    ordered_blocks = blocks[order]
+    ordered_mask = mask[order]
+    flattened = ordered_blocks[ordered_mask]
+    if flattened.size < length:
+        remainder = np.setdiff1d(np.arange(length, dtype=np.int32), flattened, assume_unique=True)
+        flattened = np.concatenate([flattened, remainder])
+    return flattened[:length]
 
 
 def _hsic_test(
@@ -196,13 +226,14 @@ def _hsic_test(
         return statistic, 1.0
     block_size = int(bootstrap_cfg.get("block_size", max(8, x.size // 8 or 1)))
     method = str(bootstrap_cfg.get("method", "block")).lower()
-    null_stats = np.empty(samples, dtype=float)
-    for idx in range(samples):
+    exceed = 0.0
+    for _ in range(samples):
         resample_rng = default_rng(rng.integers(2**32))
         permuted_idx = _block_permutation_indices(x.size, block_size, resample_rng, method=method)
         permuted_y = y[permuted_idx]
-        null_stats[idx] = _hsic_statistic(x, permuted_y, cfg)
-    exceed = float(np.sum(null_stats >= statistic))
+        null_value = _hsic_statistic(x, permuted_y, cfg)
+        if null_value >= statistic:
+            exceed += 1.0
     pvalue = (exceed + 1.0) / (samples + 1.0)
     return statistic, float(max(0.0, min(1.0, pvalue)))
 
@@ -255,13 +286,14 @@ def _distance_correlation_test(
         return statistic, 1.0
     block_size = int(cfg.get("block_size", perm_cfg.get("block_size", max(8, x.size // 8 or 1))))
     method = str(cfg.get("method", perm_cfg.get("method", "block"))).lower()
-    null_stats = np.empty(samples, dtype=float)
-    for idx in range(samples):
+    exceed = 0.0
+    for _ in range(samples):
         resample_rng = default_rng(rng.integers(2**32))
         permuted_idx = _block_permutation_indices(x.size, block_size, resample_rng, method=method)
         permuted_y = y[permuted_idx]
-        null_stats[idx] = _distance_correlation_statistic(x, permuted_y)
-    exceed = float(np.sum(null_stats >= statistic))
+        null_value = _distance_correlation_statistic(x, permuted_y)
+        if null_value >= statistic:
+            exceed += 1.0
     pvalue = (exceed + 1.0) / (samples + 1.0)
     return statistic, float(max(0.0, min(1.0, pvalue)))
 
@@ -326,7 +358,7 @@ def _estimate_empirical_covariance(
 ) -> Optional[np.ndarray]:
     if test_count == 0:
         return None
-    rows = np.full((len(per_feature_pvals), test_count), np.nan, dtype=float)
+    rows = np.full((len(per_feature_pvals), test_count), np.nan, dtype=np.float32)
     valid_row = np.zeros(len(per_feature_pvals), dtype=bool)
     for row_idx, mapping in enumerate(per_feature_pvals.values()):
         if not mapping:
@@ -346,19 +378,19 @@ def _estimate_empirical_covariance(
 
     counts_per_test = mask.sum(axis=0)
     means = np.divide(
-        np.nansum(data, axis=0),
+        np.nansum(data, axis=0, dtype=np.float64),
         np.maximum(counts_per_test, 1),
-        out=np.zeros(test_count, dtype=float),
+        out=np.zeros(test_count, dtype=np.float32),
         where=counts_per_test > 0,
     )
-    centered = np.where(mask, data - means, 0.0)
+    centered = np.where(mask, data - means, 0.0).astype(np.float32, copy=False)
     counts = mask.T @ mask
-    covariance = centered.T @ centered
+    covariance = (centered.T @ centered).astype(np.float32, copy=False)
     with np.errstate(divide="ignore", invalid="ignore"):
         covariance = np.divide(
             covariance,
             np.maximum(counts - 1, 1),
-            out=np.zeros_like(covariance),
+            out=np.zeros_like(covariance, dtype=np.float32),
             where=counts > 1,
         )
 
@@ -450,12 +482,13 @@ def _evaluate_screening_methods(
     supervision: str,
 ) -> Dict[str, Tuple[float, float, Dict[str, float]]]:
     results: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
-    values = series.astype(float)
+    values = np.asarray(series, dtype=np.float32)
     supervised = supervision == "supervised" and target is not None
     if supervised:
-        mask = np.isfinite(values) & np.isfinite(target)
+        target_array = np.asarray(target, dtype=np.float32)
+        mask = np.isfinite(values) & np.isfinite(target_array)
         x = values[mask]
-        y = target[mask].astype(float)
+        y = target_array[mask]
         if x.size < 8 or y.size < 8:
             return results
     else:
@@ -556,11 +589,11 @@ def screening_out_of_fold(
 
     feature_list = [col for col in feature_columns if col in df.columns]
     if feature_list:
-        feature_matrix = df[feature_list].to_numpy(copy=False)
+        feature_matrix = df[feature_list].to_numpy(dtype=np.float32, copy=False)
     else:
-        feature_matrix = np.empty((df.shape[0], 0), dtype=float)
+        feature_matrix = np.empty((df.shape[0], 0), dtype=np.float32)
     target_array = (
-        df[target_column].to_numpy(copy=False)
+        df[target_column].to_numpy(dtype=np.float32, copy=False)
         if supervised_mode and target_column and target_column in df.columns
         else None
     )

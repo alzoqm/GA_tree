@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-@dataclass
+@dataclass(slots=True)
 class IntegrityReport:
     """Records what was removed during integrity gating."""
 

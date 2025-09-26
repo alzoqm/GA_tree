@@ -11,7 +11,7 @@ import pandas as pd
 import yaml
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SelectionPaths:
     """Container with resolved filesystem paths used by the pipeline."""
 

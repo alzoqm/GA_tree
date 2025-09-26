@@ -10,7 +10,7 @@ import os
 import platform
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -49,7 +49,7 @@ from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class StageOneConfig:
     target_column: Optional[str]
     supervision: str
@@ -75,7 +75,7 @@ class StageOneConfig:
     graph_lasso_alpha: float = 0.01
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StageTwoConfig:
     enabled: bool
     corr_cap: float
@@ -86,7 +86,7 @@ class StageTwoConfig:
     knockoffs: Optional["KnockoffConfig"]
 
 
-@dataclass
+@dataclass(slots=True)
 class StageTwoDiagnostics:
     method: str
     frequencies: Dict[str, float] = field(default_factory=dict)
@@ -101,7 +101,7 @@ class StageTwoDiagnostics:
     knockoff_threshold: Optional[float] = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KnockoffConfig:
     enabled: bool
     fdr: float
@@ -112,7 +112,7 @@ class KnockoffConfig:
     fallback: Tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DiversityConfig:
     enabled: bool
     method: str
@@ -122,7 +122,7 @@ class DiversityConfig:
     jitter: float
 
 
-@dataclass
+@dataclass(slots=True)
 class DiversityDiagnostics:
     method: str
     selected: List[str]
@@ -132,7 +132,7 @@ class DiversityDiagnostics:
     parameters: Dict[str, Any]
 
 
-@dataclass
+@dataclass(slots=True)
 class PipelineArtifacts:
     integrity: IntegrityReport
     screening: ScreeningResult
@@ -598,7 +598,7 @@ class SelectionPipeline:
         artifact_path = self.paths.artifact_dir / f"selection_stage1_{timestamp}.json"
         payload = {
             "selected_features": artifacts.selected_features,
-            "integrity": artifacts.integrity.__dict__,
+            "integrity": asdict(artifacts.integrity),
             "screening": {
                 "pvalues": artifacts.screening.pvalues,
                 "effects": artifacts.screening.effects,

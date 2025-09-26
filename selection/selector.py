@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-@dataclass
+@dataclass(slots=True)
 class SelectionDiagnostics:
     vif: Dict[str, float]
     partial_r2: Dict[str, float]
@@ -18,7 +18,7 @@ class SelectionDiagnostics:
     discarded_high_corr: List[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StabilitySelectionConfig:
     """Configuration parameters for targetless stability selection."""
 
@@ -29,7 +29,7 @@ class StabilitySelectionConfig:
     random_state: Optional[int]
 
 
-@dataclass
+@dataclass(slots=True)
 class StabilitySelectionOutcome:
     """Result diagnostics for unsupervised stability selection."""
 
@@ -109,37 +109,38 @@ def greedy_representative_selection(
     )
     selected: List[str] = []
     discarded: List[str] = []
+    selected_indices: List[int] = []
     for feature in sorted_candidates:
         if max_features is not None and len(selected) >= max_features:
             break
+        idx_feature = index_map.get(feature)
+        if idx_feature is None:
+            continue
         accept = True
-        for kept in selected:
+        if selected_indices:
             if partial_matrix is not None:
-                idx_feature = index_map.get(feature)
-                idx_kept = index_map.get(kept)
-                if idx_feature is None or idx_kept is None:
-                    continue
-                similarity = partial_matrix[idx_feature, idx_kept]
+                similarities = np.abs(partial_matrix[idx_feature, selected_indices])
+                if np.nanmax(similarities, initial=0.0) >= corr_cap:
+                    accept = False
             else:
-                pair = df[[feature, kept]].dropna()
-                if pair.shape[0] == 0:
-                    continue
-                similarity = pair.corr().iloc[0, 1]
-            if np.isnan(similarity):
-                continue
-            if abs(similarity) >= corr_cap:
-                accept = False
-                discarded.append(feature)
-                break
+                pair = df[[feature] + selected].dropna()
+                if pair.shape[0] > 0:
+                    corr_values = pair.corr().iloc[0, 1:]
+                    max_corr = float(np.nanmax(np.abs(corr_values.to_numpy(dtype=float))))
+                    if max_corr >= corr_cap:
+                        accept = False
         if accept:
             selected.append(feature)
+            selected_indices.append(idx_feature)
+        else:
+            discarded.append(feature)
     return selected, discarded
 
 
 def _compute_vif(frame: pd.DataFrame) -> Dict[str, float]:
     if frame.shape[1] == 0:
         return {}
-    values = frame.to_numpy(dtype=float, copy=False)
+    values = frame.to_numpy(dtype=np.float32, copy=False)
     mask = np.all(np.isfinite(values), axis=1)
     values = values[mask]
     if values.shape[0] <= 1:

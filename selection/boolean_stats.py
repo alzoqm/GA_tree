@@ -14,7 +14,7 @@ from .math_utils import chi2_sf
 from .utils import block_bootstrap_indices, cliffs_delta
 
 
-@dataclass
+@dataclass(slots=True)
 class BooleanFeatureStats:
     feature: str
     counts: Dict[str, int]

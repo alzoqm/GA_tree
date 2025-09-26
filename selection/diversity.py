@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -11,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-@dataclass
+@dataclass(slots=True)
 class DiversitySelectionResult:
     method: str
     selected: List[str]
@@ -88,35 +87,39 @@ def facility_location_diversity(
         weights = np.ones_like(weights)
 
     limit = len(features) if top_k is None else max(1, min(int(top_k), len(features)))
+    selected_mask = np.zeros(len(features), dtype=bool)
     selected_indices: List[int] = []
     coverage = np.zeros(len(features), dtype=float)
-    family_counts: Dict[str, int] = defaultdict(int)
+    if family_cap is not None:
+        families = [_family_key(name) for name in features]
+        unique_families = {family: idx for idx, family in enumerate(sorted(set(families)))}
+        family_ids = np.array([unique_families[f] for f in families], dtype=np.int16)
+        family_counts = np.zeros(len(unique_families), dtype=np.int32)
+    else:
+        family_ids = None
+        family_counts = None
 
     for _ in range(limit):
-        best_idx = None
-        best_gain = -np.inf
-        baseline_gain = -np.inf
-        for idx in range(len(features)):
-            if idx in selected_indices:
-                continue
-            if family_cap is not None and family_counts[_family_key(features[idx])] >= family_cap:
-                continue
-            candidate_cover = np.maximum(coverage, similarity[:, idx])
-            gain = float(np.sum(weights * (candidate_cover - coverage)))
-            if gain > best_gain + 1e-12:
-                best_idx = idx
-                best_gain = gain
-            baseline_gain = max(baseline_gain, gain)
-
-        if best_idx is None:
+        available = ~selected_mask
+        if family_cap is not None and family_counts is not None and family_ids is not None:
+            available &= family_counts[family_ids] < family_cap
+        if not np.any(available):
             break
-        # Allow selecting the first candidate even if gain is non-positive (ensures non-empty set)
+        diff = np.clip(similarity - coverage[:, None], a_min=0.0, a_max=None)
+        gains = diff.T @ weights
+        gains = np.asarray(gains, dtype=float)
+        gains[~available] = -np.inf
+        best_idx = int(np.argmax(gains))
+        best_gain = gains[best_idx]
+        if not selected_indices and not np.isfinite(best_gain):
+            best_gain = 0.0
         if best_gain <= 1e-10 and selected_indices:
             break
+        selected_mask[best_idx] = True
         selected_indices.append(best_idx)
         coverage = np.maximum(coverage, similarity[:, best_idx])
-        if family_cap is not None:
-            family_counts[_family_key(features[best_idx])] += 1
+        if family_cap is not None and family_counts is not None and family_ids is not None:
+            family_counts[family_ids[best_idx]] += 1
 
     if not selected_indices:
         # Fallback: pick top feature by weight respecting family cap
@@ -126,12 +129,17 @@ def facility_location_diversity(
             reverse=True,
         )
         for idx in sorted_candidates:
-            if family_cap is None or family_counts[_family_key(features[idx])] < family_cap:
+            if family_cap is None:
                 selected_indices.append(idx)
-                if family_cap is not None:
-                    family_counts[_family_key(features[idx])] += 1
                 coverage = similarity[:, idx]
                 break
+            if family_counts is not None and family_ids is not None:
+                family_idx = family_ids[idx]
+                if family_counts[family_idx] < family_cap:
+                    selected_indices.append(idx)
+                    family_counts[family_idx] += 1
+                    coverage = similarity[:, idx]
+                    break
 
     selected = [features[idx] for idx in selected_indices]
     coverage_map = {features[i]: float(coverage[i]) for i in range(len(features))}
@@ -189,7 +197,15 @@ def determinantal_point_process_diversity(
     kernel += np.eye(len(features)) * jitter
 
     limit = len(features) if top_k is None else max(1, min(int(top_k), len(features)))
-    family_counts: Dict[str, int] = defaultdict(int)
+    families = [_family_key(name) for name in features] if family_cap is not None else None
+    if families is not None:
+        unique_families = {family: idx for idx, family in enumerate(sorted(set(families)))}
+        family_ids = np.array([unique_families[f] for f in families], dtype=np.int16)
+        family_counts_arr = np.zeros(len(unique_families), dtype=np.int32)
+    else:
+        family_ids = None
+        family_counts_arr = None
+
     selected_indices: List[int] = []
     candidates = list(range(len(features)))
 
@@ -209,8 +225,9 @@ def determinantal_point_process_diversity(
             for idx in candidates:
                 if idx in selected_indices:
                     continue
-                if family_cap is not None and family_counts[_family_key(features[idx])] >= family_cap:
-                    continue
+                if family_cap is not None and family_counts_arr is not None and family_ids is not None:
+                    if family_counts_arr[family_ids[idx]] >= family_cap:
+                        continue
                 score = _log_det(selected_indices + [idx])
                 if score > best_score + 1e-12:
                     best_idx = idx
@@ -218,8 +235,8 @@ def determinantal_point_process_diversity(
             if best_idx is None:
                 break
             selected_indices.append(best_idx)
-            if family_cap is not None:
-                family_counts[_family_key(features[best_idx])] += 1
+            if family_cap is not None and family_counts_arr is not None and family_ids is not None:
+                family_counts_arr[family_ids[best_idx]] += 1
             candidates = [i for i in candidates if i != best_idx]
     except np.linalg.LinAlgError:
         selected_indices = []

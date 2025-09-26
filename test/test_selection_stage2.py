@@ -2,9 +2,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="Stage 2 target-based selection removed; tests pending rewrite for unsupervised mode",
-)
 
 from selection.loader import SelectionPaths
 from selection.pipeline import SelectionPipeline

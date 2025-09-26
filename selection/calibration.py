@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-@dataclass
+@dataclass(slots=True)
 class CalibrationResult:
     feature_num: Dict[str, tuple[float, float]]
     feature_bool: List[str]
