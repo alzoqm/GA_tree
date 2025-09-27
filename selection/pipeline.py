@@ -73,6 +73,12 @@ class StageOneConfig:
     effect_min: float = 0.0
     cliffs_delta_min: float = 0.0
     graph_lasso_alpha: float = 0.01
+    heavy_switch_n: int = 5000
+    hsic_default_backend: str = "auto"
+    dcor_default_backend: str = "auto"
+    hsic_rff_dim: int = 128
+    dcor_sample_size: int = 1024
+    record_details: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +212,18 @@ class SelectionPipeline:
         cliffs_delta_min = float(screen_cfg.get("cliffs_delta_min", 0.0) or 0.0)
         graph_cfg = cfg.get("stage1_graph", {})
         graph_alpha = float(graph_cfg.get("alpha", graph_cfg.get("graph_lasso_alpha", 0.01)) or 0.01)
+        heavy_switch_n = max(1, int(screen_cfg.get("heavy_switch_n", 5000) or 5000))
+        hsic_backend = str(screen_cfg.get("hsic_default_backend", "auto"))
+        hsic_backend = hsic_backend.lower() if hsic_backend else "auto"
+        if hsic_backend not in {"auto", "matrix", "rff"}:
+            hsic_backend = "auto"
+        dcor_backend = str(screen_cfg.get("dcor_default_backend", "auto"))
+        dcor_backend = dcor_backend.lower() if dcor_backend else "auto"
+        if dcor_backend not in {"auto", "matrix", "sampled"}:
+            dcor_backend = "auto"
+        hsic_rff_dim = max(1, int(screen_cfg.get("hsic_rff_dim", 128) or 128))
+        dcor_sample_size = max(8, int(screen_cfg.get("dcor_sample_size", 1024) or 1024))
+        record_details = bool(screen_cfg.get("record_details", True))
         return StageOneConfig(
             target_column=target_column,
             supervision=supervision,
@@ -229,6 +247,12 @@ class SelectionPipeline:
             effect_min=effect_min,
             cliffs_delta_min=cliffs_delta_min,
             graph_lasso_alpha=graph_alpha,
+            heavy_switch_n=heavy_switch_n,
+            hsic_default_backend=hsic_backend,
+            dcor_default_backend=dcor_backend,
+            hsic_rff_dim=hsic_rff_dim,
+            dcor_sample_size=dcor_sample_size,
+            record_details=record_details,
         )
 
     @staticmethod
@@ -398,6 +422,12 @@ class SelectionPipeline:
             effect_min=self.stage1.effect_min,
             cliffs_delta_min=self.stage1.cliffs_delta_min,
             supervision=self.stage1.supervision,
+            heavy_switch_n=self.stage1.heavy_switch_n,
+            hsic_default_backend=self.stage1.hsic_default_backend,
+            dcor_default_backend=self.stage1.dcor_default_backend,
+            hsic_rff_dim=self.stage1.hsic_rff_dim,
+            dcor_sample_size=self.stage1.dcor_sample_size,
+            record_details=self.stage1.record_details,
         )
 
         passing_features = set(screening_result.passing_features)
