@@ -66,6 +66,11 @@ class StageOneConfig:
     vif_threshold: float = 10.0
     quantiles: tuple[float, float] = (0.005, 0.995)
     mad_factor: Optional[float] = 1.4826
+    mad_mode: str = "approx"
+    mad_chunk_rows: int = 20000
+    mad_col_block_size: int = 128
+    mad_scratch_dir: Optional[str] = None
+    mad_delete_scratch: bool = True
     whitelist: Sequence[str] = ()
     screening_methods: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     random_state: Optional[int] = None
@@ -188,8 +193,54 @@ class SelectionPipeline:
         min_bars = int(cfg.get("min_bars_per_split", 128))
         screen_cfg = cfg.get("stage1_screening", {})
         combine = screen_cfg.get("combine", {})
-        quantiles = tuple(cfg.get("stage4_calibration", {}).get("robust_quantiles", (0.005, 0.995)))
-        mad_factor = cfg.get("stage4_calibration", {}).get("mad_margin", {}).get("factor", 1.4826)
+        calib_cfg = cfg.get("stage4_calibration", {})
+        quantiles_raw = calib_cfg.get("robust_quantiles", (0.005, 0.995))
+        try:
+            q_low, q_high = quantiles_raw  # type: ignore[misc]
+            quantiles = (float(q_low), float(q_high))
+        except Exception:  # noqa: BLE001
+            quantiles = (0.005, 0.995)
+
+        mad_cfg = calib_cfg.get("mad_margin", {})
+        mad_enabled_cfg = mad_cfg.get("enabled")
+        raw_factor = mad_cfg.get("factor", 1.4826)
+        if mad_enabled_cfg is not None and not bool(mad_enabled_cfg):
+            mad_factor: Optional[float] = None
+        else:
+            try:
+                mad_factor = float(raw_factor)
+            except (TypeError, ValueError):
+                mad_factor = 1.4826
+        if mad_factor is not None and mad_factor <= 0:
+            mad_factor = 0.0
+
+        mad_mode = str(mad_cfg.get("mode", "approx") or "approx").lower()
+        if mad_mode not in {"approx", "exact_chunked"}:
+            mad_mode = "approx"
+
+        chunk_rows_raw = mad_cfg.get("chunk_rows", 20000)
+        try:
+            mad_chunk_rows = int(chunk_rows_raw)
+        except (TypeError, ValueError):
+            mad_chunk_rows = 20000
+        if mad_chunk_rows <= 0:
+            mad_chunk_rows = 20000
+
+        col_block_raw = mad_cfg.get("col_block_size", 128)
+        try:
+            mad_col_block_size = int(col_block_raw)
+        except (TypeError, ValueError):
+            mad_col_block_size = 128
+        if mad_col_block_size <= 0:
+            mad_col_block_size = 128
+
+        scratch_raw = mad_cfg.get("scratch_dir")
+        if scratch_raw in (None, "", False):
+            mad_scratch_dir: Optional[str] = None
+        else:
+            mad_scratch_dir = str(scratch_raw)
+
+        mad_delete_scratch = bool(mad_cfg.get("delete_scratch", True))
         whitelist = tuple(cfg.get("feature_whitelist", []))
         methods_cfg = screen_cfg.get("methods") or {"spearman": {"enabled": True}}
         normalized_methods: Dict[str, Dict[str, object]] = {}
@@ -240,6 +291,11 @@ class SelectionPipeline:
             vif_threshold=float(cfg.get("stage4_calibration", {}).get("vif_threshold", 10.0)),
             quantiles=(float(quantiles[0]), float(quantiles[1])),
             mad_factor=float(mad_factor) if mad_factor is not None else None,
+            mad_mode=mad_mode,
+            mad_chunk_rows=mad_chunk_rows,
+            mad_col_block_size=mad_col_block_size,
+            mad_scratch_dir=mad_scratch_dir,
+            mad_delete_scratch=mad_delete_scratch,
             whitelist=whitelist,
             screening_methods=normalized_methods,
             random_state=int(random_state) if random_state is not None else None,
@@ -493,6 +549,7 @@ class SelectionPipeline:
             corr_cap=self.stage1.corr_cap,
             max_features=self.stage1.max_features,
             partial_alpha=self.stage1.graph_lasso_alpha,
+            random_state=self.stage1.random_state,
         )
 
         final_features, selection_diag = enforce_vif_and_partial_r2(
@@ -521,6 +578,11 @@ class SelectionPipeline:
             quantiles=self.stage1.quantiles,
             mad_factor=self.stage1.mad_factor,
             fold_indices=fold_indices,
+            mad_mode=self.stage1.mad_mode,
+            chunk_rows=self.stage1.mad_chunk_rows,
+            col_block_size=self.stage1.mad_col_block_size,
+            scratch_dir=self.stage1.mad_scratch_dir,
+            delete_scratch=self.stage1.mad_delete_scratch,
         )
 
         bool_features = [feature for feature in calibration_result.feature_bool if feature in final_features]
@@ -750,6 +812,11 @@ class SelectionPipeline:
             "calibration": {
                 "quantiles": list(self.stage1.quantiles),
                 "mad_factor": self.stage1.mad_factor,
+                "mad_mode": self.stage1.mad_mode,
+                "chunk_rows": self.stage1.mad_chunk_rows,
+                "col_block_size": self.stage1.mad_col_block_size,
+                "scratch_dir": self.stage1.mad_scratch_dir,
+                "delete_scratch": self.stage1.mad_delete_scratch,
             },
         }
         snapshot_payload = build_snapshot_payload(

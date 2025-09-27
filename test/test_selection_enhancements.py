@@ -183,3 +183,79 @@ def test_calibrate_ranges_foldwise():
     ])
     assert np.isclose(low, expected_low)
     assert np.isclose(high, expected_high)
+
+
+def test_calibrate_ranges_exact_chunked_matches_manual(tmp_path):
+    rng = np.random.default_rng(9021)
+    df = pd.DataFrame(
+        {
+            "num_a": rng.normal(0, 1, 32),
+            "num_b": rng.normal(2, 0.5, 32),
+        }
+    )
+    df.loc[0, "num_b"] = np.nan  # ensure NaN handling
+
+    result = calibrate_ranges(
+        df,
+        ["num_a", "num_b"],
+        quantiles=(0.1, 0.9),
+        mad_factor=1.0,
+        mad_mode="exact_chunked",
+        chunk_rows=8,
+        col_block_size=1,
+        scratch_dir=str(tmp_path),
+    )
+
+    for col in ["num_a", "num_b"]:
+        series = df[col].dropna()
+        expected_low = float(series.quantile(0.1))
+        expected_high = float(series.quantile(0.9))
+        expected_median = float(np.median(series))
+        expected_mad = float(np.median(np.abs(series - expected_median)))
+        low, high = result.feature_num[col]
+        assert np.isclose(low, expected_low - expected_mad)
+        assert np.isclose(high, expected_high + expected_mad)
+        assert np.isclose(result.diagnostics[f"mad_{col}"], expected_mad)
+
+
+def test_calibrate_ranges_boolean_detection():
+    df = pd.DataFrame(
+        {
+            "bool_true": [True, False, True, False],
+            "int_bool": [0, 1, 1, 0],
+            "float_indicator": [0.0, 1.0, 0.0, 1.0],
+            "value": [0.2, 0.4, 0.6, 0.8],
+        }
+    )
+
+    result = calibrate_ranges(
+        df,
+        list(df.columns),
+        quantiles=(0.1, 0.9),
+        mad_factor=None,
+    )
+
+    assert set(result.feature_bool) == {"bool_true", "int_bool"}
+    assert "float_indicator" not in result.feature_bool
+    assert "float_indicator" in result.feature_num
+
+
+def test_calibrate_ranges_empty_fold_indices_matches_global():
+    df = pd.DataFrame({"x": np.linspace(-1, 1, 20)})
+    result_with_empty = calibrate_ranges(
+        df,
+        ["x"],
+        quantiles=(0.2, 0.8),
+        mad_factor=None,
+        fold_indices=[],
+    )
+    result_without = calibrate_ranges(
+        df,
+        ["x"],
+        quantiles=(0.2, 0.8),
+        mad_factor=None,
+        fold_indices=None,
+    )
+
+    assert np.isclose(result_with_empty.feature_num["x"][0], result_without.feature_num["x"][0])
+    assert np.isclose(result_with_empty.feature_num["x"][1], result_without.feature_num["x"][1])
