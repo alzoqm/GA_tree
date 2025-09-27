@@ -549,6 +549,7 @@ class SelectionPipeline:
             corr_cap=self.stage1.corr_cap,
             max_features=self.stage1.max_features,
             partial_alpha=self.stage1.graph_lasso_alpha,
+            random_state=self.stage1.random_state,
         )
 
         final_features, selection_diag = enforce_vif_and_partial_r2(
