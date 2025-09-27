@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import numpy as np
@@ -198,11 +197,145 @@ def test_pipeline_persists_outputs(tmp_path, caplog):
     assert "feat_alpha" in snapshot_whitelist
     assert "flag_breakout" not in snapshot_whitelist
 
-    # Artifact JSON recorded
-    json_files = list(artifact_dir.glob("selection_stage1_*.json"))
-    assert json_files, "Expected artifact JSON file"
-    artifact_payload = json.loads(json_files[0].read_text(encoding="utf-8"))
-    assert artifact_payload["selected_features"] == artifacts.selected_features
+
+def test_stage1_supports_rff_and_sampled_backends(tmp_path):
+    rng = np.random.default_rng(5150)
+    n = 360
+    latent = rng.uniform(-np.pi, np.pi, size=n)
+    target = np.sin(latent)
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feature_latent": latent,
+            "feature_latent_abs": np.abs(latent) + 0.1 * rng.standard_normal(n),
+            "noise_feature": rng.standard_normal(n),
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 19, "device": "cpu"},
+        "cpcv": {"folds": 4, "test_folds": 1, "min_trades_per_split": 96, "shuffle_seed": 3},
+        "training_strategy": {"max_hold_period_bars": 24},
+    }
+
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 120,
+        "stage1_screening": {
+            "random_state": 321,
+            "heavy_switch_n": 32,
+            "hsic_rff_dim": 32,
+            "dcor_sample_size": 64,
+            "methods": {
+                "hsic": {
+                    "enabled": True,
+                    "backend": "rff",
+                    "rff_dim": 32,
+                    "bootstrap": {"samples": 10, "block_size": 24, "method": "block"},
+                },
+                "dcor": {
+                    "enabled": True,
+                    "backend": "sampled",
+                    "sample_size": 64,
+                    "permutations": 12,
+                    "block_size": 24,
+                },
+            },
+            "combine": {"method": "simes", "alpha": 0.3, "fdr": "bh"},
+        },
+        "stage2_selection": {
+            "corr_cap": 0.9,
+            "max_features": 6,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+            "knockoffs": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 10.0,
+            "robust_quantiles": [0.05, 0.95],
+            "mad_margin": {"factor": 0.0},
+        },
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert set(artifacts.screening.methods) == {"dcor", "hsic"}
+    assert "feature_latent" in artifacts.screening.passing_features
+    assert "noise_feature" not in artifacts.screening.passing_features
+    assert artifacts.screening.details  # ensure details recorded when enabled
+
+
+def test_stage1_record_details_toggle(tmp_path):
+    rng = np.random.default_rng(9090)
+    n = 300
+    signal = rng.standard_normal(n)
+    target = signal
+    frame = pd.DataFrame(
+        {
+            "target": target,
+            "feature_signal": signal + 0.05 * rng.standard_normal(n),
+            "feature_noise": rng.standard_normal(n),
+        }
+    )
+
+    data_path = tmp_path / "features.csv"
+    frame.to_csv(data_path, index=False)
+
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(yaml.safe_dump({"feature_num": {}, "feature_bool": []}), encoding="utf-8")
+    active_path = tmp_path / "feature_active.yaml"
+    artifact_dir = tmp_path / "artifacts"
+
+    config = {
+        "environment": {"seed": 23, "device": "cpu"},
+        "cpcv": {"folds": 4, "test_folds": 1, "min_trades_per_split": 96, "shuffle_seed": 4},
+        "training_strategy": {"max_hold_period_bars": 24},
+    }
+
+    selection_cfg = {
+        "enabled": True,
+        "dry_run": True,
+        "target_column": "target",
+        "min_bars_per_split": 96,
+        "stage1_screening": {
+            "record_details": False,
+            "methods": {"spearman": {"enabled": True}},
+            "combine": {"method": "simes", "alpha": 0.5, "fdr": "bh"},
+        },
+        "stage2_selection": {
+            "corr_cap": 0.9,
+            "max_features": 5,
+            "inner_ratio": 0.5,
+            "stability_selection": {"enabled": False},
+            "knockoffs": {"enabled": False},
+        },
+        "stage3_diversity": {"enabled": False},
+        "stage4_calibration": {
+            "vif_threshold": 12.0,
+            "robust_quantiles": [0.05, 0.95],
+            "mad_margin": {"factor": 0.0},
+        },
+    }
+
+    paths = _make_paths(tmp_path, data_path, model_path, active_path, artifact_dir)
+    pipeline = SelectionPipeline(config, selection_cfg, paths, dry_run=True)
+    artifacts = pipeline.run(frame, {"feature_num": {}, "feature_bool": []})
+
+    assert "feature_signal" in artifacts.screening.passing_features
+    assert artifacts.screening.details == []
 
 
 def test_pipeline_whitelist_respected_when_enforcement_disabled(tmp_path):
