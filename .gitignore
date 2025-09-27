@@ -1,5 +1,6 @@
 AGENTS.md
 *.txt
+!requirements.txt
 *.pyc
 *.ipynb
 .DS_store
@@ -18,3 +19,4 @@ AGENTS.md
 /results/
 /dataset/
 /plots/
+
