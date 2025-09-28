@@ -139,7 +139,8 @@ selection_pipeline:
     methods:
       # Spearman 자기상관성 테스트 (계산 효율이 좋음)
       # lags: 5분, 1시간, 1일, 1주일에 해당하는 lag을 검사하여 다양한 시간척도의 안정성을 평가
-      auto_spearman: {enabled: true, lags: [1, 12, 288, 2016], cliffs_delta: false}
+      # auto_spearman: {enabled: true, lags: [1, 12, 288, 2016], cliffs_delta: false}
+      auto_spearman: {enabled: true, lags: [1, 12, 288], cliffs_delta: false}
       # HSIC (RFF 최적화) 활성화. bootstrap 샘플 수를 약간 줄여 속도 확보
       auto_hsic:     {enabled: false, bootstrap: {samples: 48, block_size: 288, method: block}}
       # dCor (샘플링 최적화) 활성화. permutation 샘플 수를 약간 줄여 속도 확보
