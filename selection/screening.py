@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from math import erf, sqrt, pi
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import logging
 import numpy as np
 import pandas as pd
 from numpy.random import Generator, default_rng
@@ -20,6 +21,37 @@ try:  # noqa: SIM105
 except Exception:  # pragma: no cover - optional
     _HAVE_SCIPY = False
     _scipy_kendalltau = None
+
+try:  # noqa: SIM105
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - optional dependency
+    tqdm = None
+
+logger = logging.getLogger(__name__)
+
+
+def _progress(
+    iterable: Iterable,
+    *,
+    desc: str,
+    total: Optional[int] = None,
+    leave: bool = True,
+    unit: Optional[str] = None,
+    position: int = 0,
+):
+    """Return tqdm iterator if available, otherwise the raw iterable."""
+    if tqdm is None:
+        return iterable
+    return tqdm(
+        iterable,
+        desc=desc,
+        total=total,
+        leave=leave,
+        unit=unit,
+        dynamic_ncols=True,
+        position=position,
+    )
+
 
 # ==================== Data classes ====================
 
@@ -907,6 +939,12 @@ def screening_out_of_fold(
 
     feature_list = [col for col in feature_columns if col in df.columns]
 
+    logger.debug(
+        "screening_out_of_fold with %d features across %d splits",
+        len(feature_list),
+        len(cross_splits),
+    )
+
     # Target as contiguous float32 (view if possible)
     target_array = (
         _as_float32(df[target_column].to_numpy(copy=False))
@@ -914,7 +952,14 @@ def screening_out_of_fold(
         else None
     )
 
-    for split in cross_splits:
+    split_iterable = _progress(
+        cross_splits,
+        desc="Stage1 screening splits",
+        total=len(cross_splits) if hasattr(cross_splits, "__len__") else None,
+        unit="split",
+        position=0,
+    )
+    for split in split_iterable:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
             if indices.size < min_bars:
                 continue
@@ -998,7 +1043,15 @@ def screening_out_of_fold(
                 continue
 
             # ---- Stream features one-by-one to avoid large matrices in memory ----
-            for feature in feature_list:
+            feature_iterable = _progress(
+                feature_list,
+                desc=f"Features {split.outer.combo_id}-{fold_label}",
+                total=len(feature_list),
+                leave=False,
+                unit="feature",
+                position=1,
+            )
+            for feature in feature_iterable:
                 series_full = _as_float32(df[feature].to_numpy(copy=False))
                 series = series_full[indices]  # copy only fold-length vector
 

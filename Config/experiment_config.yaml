@@ -126,22 +126,24 @@ selection_pipeline:
   enabled: true
   dry_run: false  # 실제 파일에 결과를 저장하려면 false로 설정
   
-  # Targetless 모드 활성화 (가장 중요한 설정)
+  # Targetless (Unsupervised) 모드 활성화 (가장 중요한 설정)
+  # target_column을 null 또는 주석 처리하고 supervision을 unsupervised로 설정합니다.
   supervision: unsupervised
-  target_column: null  # null로 설정하여 Target이 없음을 명시
+  target_column: null
 
-  artifact_dir: "results/selection_artifacts"
+  artifact_dir: "results/selection_artifacts" # 결과물이 저장될 경로
   min_bars_per_split: 5000 # 분할(fold)당 최소 데이터 수 (7년 데이터이므로 충분히 높게 설정)
 
   # Stage 1: 자기상관성 기반 스크리닝 (피처 자체의 안정성 평가)
   stage1_screening:
     methods:
       # Spearman 자기상관성 테스트 (계산 효율이 좋음)
+      # lags: 5분, 1시간, 1일, 1주일에 해당하는 lag을 검사하여 다양한 시간척도의 안정성을 평가
       auto_spearman: {enabled: true, lags: [1, 12, 288, 2016], cliffs_delta: false}
-      # HSIC/dCor는 비선형 자기상관성을 더 잘 잡아내지만, 대용량 데이터에서 매우 느릴 수 있습니다.
-      # 초기 테스트 시에는 비활성화하고, 필요 시 샘플 수를 줄여서 사용하는 것을 권장합니다.
-      auto_hsic:     {enabled: false, bootstrap: {samples: 64, block_size: 288, method: block}}
-      auto_dcor:     {enabled: false, permutations: 64, block_size: 288, method: block}
+      # HSIC (RFF 최적화) 활성화. bootstrap 샘플 수를 약간 줄여 속도 확보
+      auto_hsic:     {enabled: false, bootstrap: {samples: 48, block_size: 288, method: block}}
+      # dCor (샘플링 최적화) 활성화. permutation 샘플 수를 약간 줄여 속도 확보
+      auto_dcor:     {enabled: false, permutations: 48, block_size: 288, method: block}
     
     # 여러 lag에서 계산된 p-value들을 Simes 규칙으로 결합하고, BY 규칙으로 전체 피처에 대한 FDR 제어
     combine: {method: simes, alpha: 0.1, fdr: by}

@@ -6,14 +6,14 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
 import platform
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from importlib import metadata
-from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -47,6 +47,18 @@ from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _log_stage(name: str, *, details: Optional[str] = None) -> None:
+    message = name if details is None else f"{name} ({details})"
+    logger.info("Starting %s", message)
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = perf_counter() - start
+        logger.info("Finished %s in %.2fs", message, elapsed)
 
 
 @dataclass(slots=True)
@@ -436,6 +448,11 @@ class SelectionPipeline:
         return chain
 
     def run(self, df: pd.DataFrame, model_config: Mapping[str, object]) -> PipelineArtifacts:
+        logger.info(
+            "Running selection pipeline with frame shape rows=%d cols=%d",
+            df.shape[0],
+            df.shape[1],
+        )
         target = self.stage1.target_column
         if self.stage1.supervision == "supervised":
             if not target or target not in df.columns:
@@ -444,46 +461,65 @@ class SelectionPipeline:
             target = None
 
         feature_columns = self._resolve_feature_columns(df)
+        logger.info("Resolved %d candidate features after dtype filtering", len(feature_columns))
         if not feature_columns:
             raise ValueError("No usable features found after dtype filtering")
 
-        cleaned_df, integrity_report = apply_integrity_gates(
-            df,
-            feature_columns,
-            max_missing_ratio=self.stage1.max_missing_ratio,
-            min_unique_fraction=self.stage1.min_unique_fraction,
-            max_zero_fraction=self.stage1.max_zero_fraction,
-            correlation_threshold=self.stage1.correlation_threshold,
-        )
+        with _log_stage(
+            "integrity checks",
+            details=f"{len(feature_columns)} features",
+        ):
+            cleaned_df, integrity_report = apply_integrity_gates(
+                df,
+                feature_columns,
+                max_missing_ratio=self.stage1.max_missing_ratio,
+                min_unique_fraction=self.stage1.min_unique_fraction,
+                max_zero_fraction=self.stage1.max_zero_fraction,
+                correlation_threshold=self.stage1.correlation_threshold,
+            )
         self._latest_df_shape = cleaned_df.shape
         clean_features = [f for f in feature_columns if f in cleaned_df.columns]
+        logger.info(
+            "Integrity stage retained %d features (%.2f%% of candidates)",
+            len(clean_features),
+            (100.0 * len(clean_features) / max(1, len(feature_columns))),
+        )
 
-        cross_splits = self._make_cross_splits(cleaned_df)
+        with _log_stage("cpcv split construction"):
+            cross_splits = self._make_cross_splits(cleaned_df)
         if not cross_splits:
             raise RuntimeError("No valid CPCV splits available for screening")
 
-        screening_result = screening_out_of_fold(
-            cleaned_df,
-            clean_features,
-            target_column=target,
-            cross_splits=cross_splits,
-            combine_cfg={
-                "method": self.stage1.combine_method,
-                "alpha": self.stage1.combine_alpha,
-                "fdr": self.stage1.fdr_method,
-            },
-            min_bars=self.stage1.min_bars_per_split,
-            methods=self.stage1.screening_methods,
-            random_state=self.stage1.random_state,
-            effect_min=self.stage1.effect_min,
-            cliffs_delta_min=self.stage1.cliffs_delta_min,
-            supervision=self.stage1.supervision,
-            heavy_switch_n=self.stage1.heavy_switch_n,
-            hsic_default_backend=self.stage1.hsic_default_backend,
-            dcor_default_backend=self.stage1.dcor_default_backend,
-            hsic_rff_dim=self.stage1.hsic_rff_dim,
-            dcor_sample_size=self.stage1.dcor_sample_size,
-            record_details=self.stage1.record_details,
+        with _log_stage(
+            "stage1 screening",
+            details=f"{len(cross_splits)} splits x {len(clean_features)} features",
+        ):
+            screening_result = screening_out_of_fold(
+                cleaned_df,
+                clean_features,
+                target_column=target,
+                cross_splits=cross_splits,
+                combine_cfg={
+                    "method": self.stage1.combine_method,
+                    "alpha": self.stage1.combine_alpha,
+                    "fdr": self.stage1.fdr_method,
+                },
+                min_bars=self.stage1.min_bars_per_split,
+                methods=self.stage1.screening_methods,
+                random_state=self.stage1.random_state,
+                effect_min=self.stage1.effect_min,
+                cliffs_delta_min=self.stage1.cliffs_delta_min,
+                supervision=self.stage1.supervision,
+                heavy_switch_n=self.stage1.heavy_switch_n,
+                hsic_default_backend=self.stage1.hsic_default_backend,
+                dcor_default_backend=self.stage1.dcor_default_backend,
+                hsic_rff_dim=self.stage1.hsic_rff_dim,
+                dcor_sample_size=self.stage1.dcor_sample_size,
+                record_details=self.stage1.record_details,
+            )
+        logger.info(
+            "Stage1 screening produced %d passing features",
+            len(screening_result.passing_features),
         )
 
         passing_features = set(screening_result.passing_features)
@@ -519,21 +555,35 @@ class SelectionPipeline:
         stage2_diag: Optional[StageTwoDiagnostics] = None
         stage2_candidates = ranked_candidates
         if self.stage2.enabled and ranked_candidates:
-            stage2_diag, stage2_candidates = self._run_stage2_selection(
-                cleaned_df,
-                ranked_candidates,
-                screening_result.effects,
-                target,
+            with _log_stage(
+                "stage2 selection",
+                details=f"{len(ranked_candidates)} candidates",
+            ):
+                stage2_diag, stage2_candidates = self._run_stage2_selection(
+                    cleaned_df,
+                    ranked_candidates,
+                    screening_result.effects,
+                    target,
+                )
+            logger.info(
+                "Stage2 selected %d features", len(stage2_candidates)
             )
 
         diversity_diag: Optional[DiversityDiagnostics] = None
         diversity_candidates = stage2_candidates
         if self.stage3.enabled and diversity_candidates:
-            diversity_diag, diversity_candidates = self._apply_diversity(
-                cleaned_df,
-                diversity_candidates,
-                screening_result.effects,
-                stage2_diag,
+            with _log_stage(
+                "stage3 diversity",
+                details=f"{len(diversity_candidates)} candidates",
+            ):
+                diversity_diag, diversity_candidates = self._apply_diversity(
+                    cleaned_df,
+                    diversity_candidates,
+                    screening_result.effects,
+                    stage2_diag,
+                )
+            logger.info(
+                "Stage3 diversity kept %d features", len(diversity_candidates)
             )
 
         representative_pool = diversity_candidates or stage2_candidates or ranked_candidates
@@ -542,29 +592,43 @@ class SelectionPipeline:
             for feature, value in stage2_diag.frequencies.items():
                 selection_scores[feature] = max(selection_scores.get(feature, 0.0), value)
 
-        selected_features, discarded_corr = greedy_representative_selection(
-            cleaned_df,
-            representative_pool,
-            selection_scores,
-            corr_cap=self.stage1.corr_cap,
-            max_features=self.stage1.max_features,
-            partial_alpha=self.stage1.graph_lasso_alpha,
-            random_state=self.stage1.random_state,
+        with _log_stage(
+            "representative selection",
+            details=f"pool={len(representative_pool)}",
+        ):
+            selected_features, discarded_corr = greedy_representative_selection(
+                cleaned_df,
+                representative_pool,
+                selection_scores,
+                corr_cap=self.stage1.corr_cap,
+                max_features=self.stage1.max_features,
+                partial_alpha=self.stage1.graph_lasso_alpha,
+                random_state=self.stage1.random_state,
+            )
+        logger.info(
+            "Representative selection chose %d features", len(selected_features)
         )
 
-        final_features, selection_diag = enforce_vif_and_partial_r2(
-            cleaned_df,
-            target,
-            selected_features,
-            vif_threshold=self.stage1.vif_threshold,
-            use_target_for_partial=(
-                self.stage1.supervision == "supervised"
-                and target is not None
-                and target in cleaned_df.columns
-            ),
-        )
+        with _log_stage(
+            "collinearity diagnostics",
+            details=f"input={len(selected_features)}",
+        ):
+            final_features, selection_diag = enforce_vif_and_partial_r2(
+                cleaned_df,
+                target,
+                selected_features,
+                vif_threshold=self.stage1.vif_threshold,
+                use_target_for_partial=(
+                    self.stage1.supervision == "supervised"
+                    and target is not None
+                    and target in cleaned_df.columns
+                ),
+            )
         selection_diag.discarded_high_corr = sorted(
             set(selection_diag.discarded_high_corr).union(discarded_corr)
+        )
+        logger.info(
+            "Collinearity diagnostics retained %d features", len(final_features)
         )
 
         fold_map: Dict[str, np.ndarray] = {}
@@ -572,18 +636,22 @@ class SelectionPipeline:
             fold_map.setdefault(split.outer.combo_id, split.outer.train_indices)
         fold_indices = list(fold_map.values())
 
-        calibration_result = calibrate_ranges(
-            cleaned_df,
-            final_features,
-            quantiles=self.stage1.quantiles,
-            mad_factor=self.stage1.mad_factor,
-            fold_indices=fold_indices,
-            mad_mode=self.stage1.mad_mode,
-            chunk_rows=self.stage1.mad_chunk_rows,
-            col_block_size=self.stage1.mad_col_block_size,
-            scratch_dir=self.stage1.mad_scratch_dir,
-            delete_scratch=self.stage1.mad_delete_scratch,
-        )
+        with _log_stage(
+            "calibration",
+            details=f"features={len(final_features)}",
+        ):
+            calibration_result = calibrate_ranges(
+                cleaned_df,
+                final_features,
+                quantiles=self.stage1.quantiles,
+                mad_factor=self.stage1.mad_factor,
+                fold_indices=fold_indices,
+                mad_mode=self.stage1.mad_mode,
+                chunk_rows=self.stage1.mad_chunk_rows,
+                col_block_size=self.stage1.mad_col_block_size,
+                scratch_dir=self.stage1.mad_scratch_dir,
+                delete_scratch=self.stage1.mad_delete_scratch,
+            )
 
         bool_features = [feature for feature in calibration_result.feature_bool if feature in final_features]
         bool_cfg = self.selection_cfg.get("stage4_calibration", {}).get("boolean_stats", {})
@@ -595,14 +663,18 @@ class SelectionPipeline:
             and target is not None
             and target in cleaned_df.columns
         ):
-            bool_stats = compute_boolean_feature_stats(
-                cleaned_df,
-                cleaned_df[target],
-                bool_features,
-                bootstrap=bool_cfg,
-                event_threshold=float(bool_cfg.get("event_threshold", 0.0)),
-                rng=np.random.default_rng(self.stage1.random_state),
-            )
+            with _log_stage(
+                "boolean stats",
+                details=f"features={len(bool_features)}",
+            ):
+                bool_stats = compute_boolean_feature_stats(
+                    cleaned_df,
+                    cleaned_df[target],
+                    bool_features,
+                    bootstrap=bool_cfg,
+                    event_threshold=float(bool_cfg.get("event_threshold", 0.0)),
+                    rng=np.random.default_rng(self.stage1.random_state),
+                )
             calibration_result.diagnostics["boolean_stats"] = {
                 name: {
                     "counts": stats.counts,
@@ -639,7 +711,9 @@ class SelectionPipeline:
             updated_model_config=updated_model_cfg,
         )
 
+        logger.info("Persisting pipeline artifacts")
         self._persist_outputs(artifacts)
+        logger.info("Pipeline finished with %d final features", len(final_feature_set))
         return artifacts
 
     def _update_model_config(
