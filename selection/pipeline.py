@@ -99,6 +99,8 @@ class StageOneConfig:
     hsic_rff_dim: int = 128
     dcor_sample_size: int = 1024
     record_details: bool = True
+    hsic_rff_memory_mb: float = 512.0
+    hsic_rff_min_dim: int = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +303,16 @@ class SelectionPipeline:
             dcor_backend = "auto"
         hsic_rff_dim = max(1, int(screen_cfg.get("hsic_rff_dim", 128) or 128))
         dcor_sample_size = max(8, int(screen_cfg.get("dcor_sample_size", 1024) or 1024))
+        try:
+            hsic_rff_memory_mb = float(screen_cfg.get("hsic_rff_memory_mb", 512.0) or 512.0)
+        except (TypeError, ValueError):
+            hsic_rff_memory_mb = 512.0
+        hsic_rff_memory_mb = max(64.0, hsic_rff_memory_mb)
+        try:
+            hsic_rff_min_dim = int(screen_cfg.get("hsic_rff_min_dim", 32) or 32)
+        except (TypeError, ValueError):
+            hsic_rff_min_dim = 32
+        hsic_rff_min_dim = max(4, hsic_rff_min_dim)
         record_details = bool(screen_cfg.get("record_details", True))
         return StageOneConfig(
             target_column=target_column,
@@ -336,6 +348,8 @@ class SelectionPipeline:
             hsic_rff_dim=hsic_rff_dim,
             dcor_sample_size=dcor_sample_size,
             record_details=record_details,
+            hsic_rff_memory_mb=hsic_rff_memory_mb,
+            hsic_rff_min_dim=hsic_rff_min_dim,
         )
 
     @staticmethod
@@ -595,6 +609,8 @@ class SelectionPipeline:
                 hsic_rff_dim=self.stage1.hsic_rff_dim,
                 dcor_sample_size=self.stage1.dcor_sample_size,
                 record_details=self.stage1.record_details,
+                hsic_rff_memory_mb=self.stage1.hsic_rff_memory_mb,
+                hsic_rff_min_dim=self.stage1.hsic_rff_min_dim,
             )
         logger.info(
             "Stage1 screening produced %d passing features",

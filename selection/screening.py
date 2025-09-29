@@ -202,6 +202,76 @@ def _dot_y_per_col_nb(Xc: np.ndarray, y_centered: np.ndarray) -> np.ndarray:
     return out
 
 
+def _center_matrix_inplace(M: np.ndarray) -> np.ndarray:
+    """Center columns of a float32 matrix in place."""
+    if M.size == 0:
+        return M
+    means = M.mean(axis=0, dtype=np.float64).astype(np.float32)
+    M -= means
+    return M
+
+
+def _hsic_rff_stat_centered(Xc: np.ndarray, Yc: np.ndarray) -> float:
+    """Compute HSIC statistic given centered feature matrices."""
+    n = Xc.shape[0]
+    if n <= 1 or Yc.shape[0] != n:
+        return 0.0
+    denom = float(n - 1.0)
+    if denom <= 0.0:
+        return 0.0
+    cov = np.asarray(Xc.T @ Yc, dtype=np.float64)
+    cov /= denom
+    return float(max(0.0, np.sum(cov * cov, dtype=np.float64)))
+
+
+def _hsic_rff_stat_permuted(
+    Xc: np.ndarray,
+    Yc: np.ndarray,
+    perm: np.ndarray,
+    work_vec: np.ndarray,
+    work_cov: np.ndarray,
+    denom: float,
+) -> float:
+    """Compute HSIC statistic for a permuted Y without allocating large matrices."""
+    if Xc.shape[0] == 0 or Yc.shape[0] != Xc.shape[0]:
+        return 0.0
+    Xt = Xc.T
+    for col_idx in range(Yc.shape[1]):
+        np.take(Yc[:, col_idx], perm, out=work_vec)
+        work_cov[:, col_idx] = Xt @ work_vec
+    scale = denom * denom
+    if scale <= 0.0:
+        return 0.0
+    return float(max(0.0, np.sum(work_cov * work_cov, dtype=np.float64) / scale))
+
+
+def _apply_hsic_memory_guard(
+    methods: Dict[str, Dict[str, object]],
+    n_rows: int,
+    default_dim: int,
+    memory_budget_bytes: float,
+    min_dim: int,
+) -> None:
+    """Clamp HSIC RFF dimension so allocations stay within budget."""
+    if n_rows <= 0 or memory_budget_bytes <= 0.0:
+        return
+    # Approximate that we need three n*D float32 buffers (Xc, Yc, working copy).
+    bytes_per_dim = float(n_rows) * 4.0 * 3.0
+    max_dim = int(memory_budget_bytes // max(bytes_per_dim, 1.0))
+    if max_dim <= 0:
+        max_dim = min_dim
+    max_dim = max(min_dim, max_dim)
+    for name, cfg in methods.items():
+        if not str(name).lower().startswith("hsic"):
+            continue
+        raw_dim = cfg.get("rff_dim", default_dim)
+        try:
+            base_dim = int(raw_dim)
+        except (TypeError, ValueError):
+            base_dim = default_dim
+        cfg["rff_dim"] = max(min_dim, min(base_dim, max_dim))
+
+
 @njit(cache=True, fastmath=False)
 def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -394,14 +464,9 @@ def _hsic_rff_stat(phi_x: np.ndarray, phi_y: np.ndarray) -> float:
     """HSIC ≈ || Cov(phi_x, phi_y) ||_F^2; center each column then compute Frobenius norm of cross-cov."""
     if phi_x.size == 0 or phi_y.size == 0:
         return 0.0
-    X = phi_x - phi_x.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-    Y = phi_y - phi_y.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-    n = float(X.shape[0])
-    if n <= 1:
-        return 0.0
-    C = (X.T @ Y) / (n - 1.0)
-    val = float(np.sum(C * C, dtype=np.float64))
-    return max(val, 0.0)
+    Xc = _center_matrix_inplace(np.array(phi_x, dtype=np.float32, copy=True))
+    Yc = _center_matrix_inplace(np.array(phi_y, dtype=np.float32, copy=True))
+    return _hsic_rff_stat_centered(Xc, Yc)
 
 
 def _hsic_rff_test(
@@ -424,15 +489,17 @@ def _hsic_rff_test(
     target_bw = cfg.get("target_bandwidth", None) or bw
 
     sigma_sq_x = _rbf_bandwidth(x, bw)
-    phi_x = _rff_features(x, sigma_sq_x, D, rng)
+    phi_x = np.ascontiguousarray(_rff_features(x, sigma_sq_x, D, rng))
+    Xc = _center_matrix_inplace(phi_x)
 
-    if precomputed_phi_y is not None and precomputed_phi_y.shape[0] == n:
-        phi_y = precomputed_phi_y
+    if precomputed_phi_y is not None and precomputed_phi_y.shape == (n, D):
+        Yc = precomputed_phi_y
     else:
         sigma_sq_y = _rbf_bandwidth(y, target_bw)
-        phi_y = _rff_features(y, sigma_sq_y, D, rng)
+        phi_y = np.ascontiguousarray(_rff_features(y, sigma_sq_y, D, rng))
+        Yc = _center_matrix_inplace(phi_y)
 
-    stat = _hsic_rff_stat(phi_x, phi_y)
+    stat = _hsic_rff_stat_centered(Xc, Yc)
 
     boot = cfg.get("bootstrap", {}) if isinstance(cfg, Mapping) else {}
     samples = int(boot.get("samples", 64))
@@ -440,12 +507,12 @@ def _hsic_rff_test(
         return stat, 1.0
 
     exceed = 0.0
-    # Pre-center phi_x, phi_y once; permutation doesn't change column means
-    Xc = phi_x - phi_x.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-    Yc = phi_y - phi_y.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
+    denom = float(max(1.0, n - 1.0))
+    perm_buffer = np.empty(n, dtype=np.float32)
+    cov_buffer = np.empty((Xc.shape[1], Yc.shape[1]), dtype=np.float64)
     for _ in range(samples):
         perm = rng.permutation(n)
-        null = _hsic_rff_stat(Xc, Yc[perm])
+        null = _hsic_rff_stat_permuted(Xc, Yc, perm, perm_buffer, cov_buffer, denom)
         if null >= stat:
             exceed += 1.0
     pvalue = (exceed + 1.0) / (samples + 1.0)
@@ -1044,6 +1111,8 @@ def screening_out_of_fold(
     hsic_default_backend: str = "auto",      # "auto"|"matrix"|"rff"
     dcor_default_backend: str = "auto",      # "auto"|"matrix"|"sampled"
     hsic_rff_dim: int = 128,
+    hsic_rff_memory_mb: float = 512.0,
+    hsic_rff_min_dim: int = 32,
     dcor_sample_size: int = 1024,
     record_details: bool = True,
 ) -> ScreeningResult:
@@ -1067,6 +1136,8 @@ def screening_out_of_fold(
 
     supervision = supervision.lower()
     supervised_mode = supervision == "supervised"
+    hsic_memory_bytes = max(0.0, float(hsic_rff_memory_mb)) * 1024.0 * 1024.0
+    hsic_min_dim = max(4, int(hsic_rff_min_dim))
 
     feature_list = [col for col in feature_columns if col in df.columns]
     if not feature_list:
@@ -1099,29 +1170,45 @@ def screening_out_of_fold(
             if indices.size < min_bars:
                 continue
 
-            # ---- Fold-level precomputations reused across features ----
+            # ---- Fold-level method configuration and precomputations ----
+            fold_methods: Dict[str, Dict[str, object]] = {}
+            if isinstance(method_spec, Mapping):
+                for raw_name, spec in method_spec.items():
+                    name = str(raw_name).lower()
+                    if isinstance(spec, Mapping):
+                        cfg = dict(spec)
+                    else:
+                        cfg = {"enabled": bool(spec)}
+                    if not bool(cfg.get("enabled", True)):
+                        continue
+                    fold_methods[name] = cfg
+            if not fold_methods:
+                fold_methods = {"spearman": {"enabled": True}}
+
+            if hsic_memory_bytes > 0.0:
+                _apply_hsic_memory_guard(
+                    fold_methods,
+                    int(indices.size),
+                    hsic_rff_dim,
+                    hsic_memory_bytes,
+                    hsic_min_dim,
+                )
+
             if supervised_mode and target_array is not None:
                 target_values = _as_float32(target_array[indices])  # copy minimal slice
-                # Spearman target ranks context (float32)
                 ry = _rankdata_average_1d_nb(target_values)
                 ry_centered = ry - ry.mean(dtype=np.float32)
                 denom_y = float(np.sqrt(np.sum(ry_centered * ry_centered, dtype=np.float64)))
 
-                # HSIC: precompute centered L (small-n matrix backend), and/or RFF phi_y (large-n backend)
                 hsic_bw_keys: set = set()
                 hsic_rff_keys: set = set()
-                for mname, spec in method_spec.items():
-                    mname = str(mname).lower()
+                for mname, spec in fold_methods.items():
                     if not mname.startswith("hsic"):
                         continue
-                    if isinstance(spec, Mapping):
-                        y_bw = spec.get("target_bandwidth") or spec.get("bandwidth", "median")
-                        backend = str(spec.get("backend", "auto")).lower()
-                        D = int(spec.get("rff_dim", hsic_rff_dim))
-                    else:
-                        y_bw = "median"
-                        backend = "auto"
-                        D = hsic_rff_dim
+                    cfg = spec if isinstance(spec, Mapping) else {}
+                    y_bw = cfg.get("target_bandwidth") or cfg.get("bandwidth", "median")
+                    backend = str(cfg.get("backend", "auto")).lower()
+                    D = int(cfg.get("rff_dim", hsic_rff_dim))
                     bw_key = float(y_bw) if isinstance(y_bw, (int, float)) else str(y_bw)
                     if backend in {"auto", "matrix"}:
                         hsic_bw_keys.add(bw_key)
@@ -1136,23 +1223,26 @@ def screening_out_of_fold(
 
                 hsic_rff_ctx: Dict[tuple, np.ndarray] = {}
                 if hsic_rff_keys:
-                    for (bw_key, D) in hsic_rff_keys:
-                        sigma_sq = _rbf_bandwidth(target_values, "median" if isinstance(bw_key, str) else float(bw_key))
-                        phi_y = _rff_features(target_values, sigma_sq, D, rng)
-                        phi_yc = phi_y - phi_y.mean(axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
-                        hsic_rff_ctx[(bw_key, D)] = phi_yc
+                    for bw_key, D in hsic_rff_keys:
+                        sigma_sq = _rbf_bandwidth(target_values, bw_key)
+                        phi_y = np.ascontiguousarray(_rff_features(target_values, sigma_sq, D, rng))
+                        hsic_rff_ctx[(bw_key, D)] = _center_matrix_inplace(phi_y)
 
-                # dCor: precompute centered B for target (small-n) or sampled subset (large-n)
-                dcor_ctx = {}
-                if len(target_values) < heavy_switch_n:
+                dcor_ctx: Dict[str, np.ndarray] = {}
+                dcor_methods = [
+                    (name, spec)
+                    for name, spec in fold_methods.items()
+                    if name in {"dcor", "dcor_t", "distance_correlation", "dcor_sampled"}
+                ]
+                if len(target_values) < heavy_switch_n and dcor_methods:
                     By = _center_distance_matrix(_distance_matrix(target_values))
                     dcor_ctx["B"] = By
-                else:
-                    s = int(next((spec.get("sample_size", dcor_sample_size)
-                                  for name, spec in method_spec.items()
-                                  if str(name).lower() in {"dcor", "dcor_t", "distance_correlation", "dcor_sampled"}
-                                  and isinstance(spec, Mapping)), dcor_sample_size))
-                    s = max(32, min(s, len(target_values)))
+                elif dcor_methods:
+                    sample_sizes = []
+                    for _, spec in dcor_methods:
+                        cfg = spec if isinstance(spec, Mapping) else {}
+                        sample_sizes.append(int(cfg.get("sample_size", dcor_sample_size)))
+                    s = max(32, min(len(target_values), max(sample_sizes) if sample_sizes else dcor_sample_size))
                     idx_s = rng.choice(len(target_values), size=s, replace=False)
                     ys = target_values[idx_s]
                     B_sample = _center_distance_matrix(_distance_matrix(ys))
@@ -1214,12 +1304,11 @@ def screening_out_of_fold(
                 # Apply default backends per method (do not change user configs)
                 adjust_start = perf_counter()
                 adjusted_methods: Dict[str, Mapping[str, object]] = {}
-                for mname, spec in (method_spec.items() if isinstance(method_spec, Mapping) else []):
+                for mname, spec in fold_methods.items():
                     mname_l = str(mname).lower()
-                    if isinstance(spec, Mapping):
-                        cfg = dict(spec)
-                    else:
-                        cfg = {"enabled": bool(spec)}
+                    cfg = dict(spec) if isinstance(spec, Mapping) else {"enabled": bool(spec)}
+                    if not bool(cfg.get("enabled", True)):
+                        continue
                     if mname_l.startswith("hsic") and "backend" not in cfg:
                         cfg["backend"] = hsic_default_backend
                     if mname_l in {"dcor", "dcor_t", "distance_correlation"} and "backend" not in cfg:
