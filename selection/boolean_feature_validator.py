@@ -26,10 +26,20 @@ from training.cpcv import CPCVSplit
 
 logger = logging.getLogger(__name__)
 
+try:  # Optional SciPy acceleration for tail probabilities
+    from scipy.stats import chi2 as _scipy_chi2  # type: ignore
+    from scipy.stats import norm as _scipy_norm  # type: ignore
+except Exception:  # pragma: no cover - SciPy is optional
+    _scipy_chi2 = None
+    _scipy_norm = None
+
+EXPOSURE_RATE_LOWER_BOUND = 0.02
+EXPOSURE_RATE_UPPER_BOUND = 0.98
+
 
 DEFAULT_SUPERVISED_METHODS: Mapping[str, Mapping[str, object]] = {
     "fisher_exact": {"enabled": True, "event_threshold": 0.0},
-    "prop_ztest": {"enabled": True, "event_threshold": 0.0, "use_mid_p": True},
+    "prop_ztest": {"enabled": True, "event_threshold": 0.0},
     "mutual_information": {"enabled": True, "event_threshold": 0.0, "permutations": 256},
 }
 
@@ -135,10 +145,9 @@ def validate_boolean_feature(
     supervision: Optional[str] = None,
     alpha: float = 0.05,
     combine_method: str = "simes",
-    fdr_method: str = "by",
     screening_methods: Optional[Mapping[str, Mapping[str, object]]] = None,
     unsupervised_methods: Optional[Mapping[str, Mapping[str, object]]] = None,
-    min_bars_per_split: int = 256,
+    min_bars_per_split: Optional[int] = None,
     cpcv_cfg: Optional[Mapping[str, object]] = None,
     training_cfg: Optional[Mapping[str, object]] = None,
     inner_ratio: float = 0.5,
@@ -160,18 +169,17 @@ def validate_boolean_feature(
     if supervision == "supervised" and target is None:
         raise ValueError("Supervised validation requires a target column")
 
-    methods_cfg = screening_methods or (
-        DEFAULT_SUPERVISED_METHODS if supervision == "supervised" else DEFAULT_UNSUPERVISED_METHODS
-    )
-
-    combine_cfg = {"method": combine_method, "alpha": alpha, "fdr": fdr_method}
+    if supervision == "supervised":
+        methods_cfg = screening_methods or DEFAULT_SUPERVISED_METHODS
+    else:
+        methods_cfg = screening_methods or unsupervised_methods or DEFAULT_UNSUPERVISED_METHODS
 
     cleaned_df, integrity_report = apply_integrity_gates(
         df,
         [feature],
         max_missing_ratio=0.2,
         min_unique_fraction=0.0,
-        max_zero_fraction=0.999,
+        max_zero_fraction=0.98,
         correlation_threshold=0.999,
     )
 
@@ -197,13 +205,29 @@ def validate_boolean_feature(
             )
         return result
 
+    dataset_len = len(cleaned_df)
+    adaptive_min_bars = 0
+    if dataset_len:
+        raw_adaptive = max(1, int(round(dataset_len * 0.1)))
+        adaptive_min_bars = min(dataset_len, max(64, raw_adaptive))
+    user_min = min_bars_per_split if (min_bars_per_split is not None and min_bars_per_split > 0) else None
+    if user_min is None:
+        effective_min_bars = adaptive_min_bars
+    elif adaptive_min_bars:
+        effective_min_bars = min(user_min, adaptive_min_bars)
+    else:
+        effective_min_bars = user_min
+    effective_min_bars = max(16, effective_min_bars or 0)
+    if dataset_len:
+        effective_min_bars = min(effective_min_bars, dataset_len)
+
     scheduler_cfg = {
         "folds": 5,
         "test_folds": 1,
         "shuffle_seed": random_state,
         "purge_bars": None,
         "embargo_bars": None,
-        "min_bars_per_split": min_bars_per_split,
+        "min_bars_per_split": effective_min_bars,
         "max_combinations": None,
         "parallel_chunks": 1,
     }
@@ -211,7 +235,7 @@ def validate_boolean_feature(
         scheduler_cfg.update({k: v for k, v in cpcv_cfg.items() if v is not None})
 
     train_cfg = {
-        "min_trades_per_split": min_bars_per_split,
+        "min_trades_per_split": effective_min_bars,
         "max_hold_period_bars": 0,
     }
     if training_cfg:
@@ -231,14 +255,14 @@ def validate_boolean_feature(
     if not cross_splits:
         cross_splits = _build_fallback_split(
             df_length=len(cleaned_df),
-            min_bars=min_bars_per_split,
+            min_bars=effective_min_bars,
             inner_ratio=inner_ratio,
         )
 
     if not cross_splits:
         raise RuntimeError(
             "Unable to construct valid CPCV splits for validation. "
-            "Increase dataset length or lower min_bars_per_split."
+            "Increase dataset length or pass a smaller min_bars_per_split."
         )
 
     rng = np.random.default_rng(random_state)
@@ -250,7 +274,7 @@ def validate_boolean_feature(
             (f"{split.outer.combo_id}_B", split.inner_train_b),
         ]
         for fold_id, indices in fold_pairs:
-            if indices.size < min_bars_per_split:
+            if indices.size < effective_min_bars:
                 continue
             fold_df = cleaned_df.iloc[indices]
             if fold_df.empty:
@@ -297,14 +321,33 @@ def validate_boolean_feature(
         return result
 
     pvalues = [max(min(res.pvalue, 1.0), 1e-320) for res in fold_results]
-    combined_pvalue = _combine_pvalues(pvalues, combine_cfg["method"])
+    combined_pvalue = _combine_pvalues(pvalues, combine_method)
     combined_pvalue = float(np.clip(combined_pvalue, 0.0, 1.0))
 
-    significant = _apply_fdr([combined_pvalue], alpha, fdr_method)[0]
+    significant = combined_pvalue <= alpha
 
     method_stats, pooled_effects, pooled_pvalues, extra_summary = _aggregate_method_stats(fold_results)
 
-    effect_size = float(np.mean(np.abs(pooled_effects))) if pooled_effects else 0.0
+    if supervision == "supervised":
+        primary_effect_candidates = (
+            extra_summary.get("prop_diff_abs_mean"),
+            extra_summary.get("cliffs_delta_abs_mean"),
+        )
+    else:
+        primary_effect_candidates = (
+            extra_summary.get("lag_phi_max_mean"),
+            extra_summary.get("imbalance_abs_mean"),
+        )
+    effect_size = 0.0
+    for candidate in primary_effect_candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, float) and math.isnan(candidate):
+            continue
+        effect_size = float(candidate)
+        break
+    if effect_size == 0.0 and pooled_effects:
+        effect_size = float(np.mean(np.abs(pooled_effects)))
     cliffs_delta = float(extra_summary.get("cliffs_delta_abs_mean", 0.0))
 
     fitness_objectives, fitness_goals, fitness_metrics, constraints = _compose_boolean_fitness(
@@ -512,11 +555,7 @@ def _run_prop_ztest(
             extras={"n1": float(n1), "n0": float(n0)},
         )
     z = diff / math.sqrt(variance)
-    use_mid_p = bool(cfg.get("use_mid_p", True))
     pvalue = _two_sided_normal_pvalue(z)
-    if use_mid_p:
-        mid_adj = 0.5 * _normal_pdf(z) * math.sqrt(variance)
-        pvalue = max(0.0, min(1.0, pvalue - mid_adj))
     extras = {
         "z_score": float(z),
         "prop_diff": float(diff),
@@ -943,8 +982,12 @@ def _compose_boolean_fitness(
         "alpha": alpha,
         "combined_pvalue": combined_pvalue,
     }
-    if "exposure_rate_mean" in extra_summary:
-        constraints["exposure_rate_mean"] = extra_summary["exposure_rate_mean"]
+    exposure_rate = extra_summary.get("exposure_rate_mean")
+    if exposure_rate is not None and not math.isnan(exposure_rate):
+        constraints["exposure_rate_mean"] = exposure_rate
+        constraints["exposure_rate_within_bounds"] = (
+            EXPOSURE_RATE_LOWER_BOUND <= exposure_rate <= EXPOSURE_RATE_UPPER_BOUND
+        )
 
     return fitness_objectives, fitness_goals, fitness_metrics, constraints
 
@@ -954,12 +997,17 @@ def _combine_pvalues(pvalues: Sequence[float], method: str) -> float:
     if not pvals:
         return 1.0
     method = method.lower()
-    pvals = [min(max(p, 1e-320), 1.0) for p in pvals]
+    pvals = [min(max(p, 1e-320), 1.0 - 1e-16) for p in pvals]
     if method in {"simes", "simes_hc"}:
         ordered = np.sort(pvals)
         n = len(ordered)
         adjusted = ordered * (n / np.arange(1, n + 1))
         return float(np.clip(np.minimum(adjusted, 1.0).min(), 0.0, 1.0))
+    if method in {"cauchy", "acat"}:
+        angles = (0.5 - np.asarray(pvals)) * math.pi
+        t_stat = float(np.tan(angles).mean())
+        combined = 0.5 - math.atan(t_stat) / math.pi
+        return float(np.clip(combined, 0.0, 1.0))
     if method in {"fisher", "chi2"}:
         statistic = -2.0 * np.sum(np.log(pvals))
         df = 2 * len(pvals)
@@ -1045,6 +1093,11 @@ def _binary_mutual_information(x: np.ndarray, y: np.ndarray) -> float:
 def _chi2_sf_df1(value: float) -> float:
     if value <= 0:
         return 1.0
+    if _scipy_chi2 is not None:
+        try:
+            return float(_scipy_chi2.sf(value, df=1))
+        except Exception:  # pragma: no cover - SciPy edge case fallback
+            pass
     return float(math.erfc(math.sqrt(value / 2.0)))
 
 
@@ -1053,6 +1106,11 @@ def _chi2_sf(value: float, df: int) -> float:
         return 1.0
     if df <= 0:
         return 1.0
+    if _scipy_chi2 is not None:
+        try:
+            return float(_scipy_chi2.sf(value, df=df))
+        except Exception:  # pragma: no cover - SciPy edge case fallback
+            pass
     if df == 2:
         return math.exp(-value / 2.0)
     # Wilson-Hilferty approximation for general df
@@ -1065,11 +1123,13 @@ def _two_sided_normal_pvalue(z: float) -> float:
 
 
 def _normal_sf(z: float) -> float:
+    if _scipy_norm is not None:
+        try:
+            return float(_scipy_norm.sf(z))
+        except Exception:  # pragma: no cover - SciPy edge case fallback
+            pass
     return 0.5 * math.erfc(z / math.sqrt(2.0))
 
-
-def _normal_pdf(z: float) -> float:
-    return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * z * z)
 
 
 def _normal_isf(p: float) -> float:
@@ -1078,6 +1138,11 @@ def _normal_isf(p: float) -> float:
         return math.inf
     if p >= 1.0:
         return -math.inf
+    if _scipy_norm is not None:
+        try:
+            return float(_scipy_norm.isf(p))
+        except Exception:  # pragma: no cover - SciPy edge case fallback
+            pass
     return math.sqrt(2.0) * _erfc_inv(2.0 * p)
 
 
