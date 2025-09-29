@@ -13,6 +13,8 @@ AGENTS.md
 *.pt
 *.csv
 *.so
+*.nbc
+*.nbi
 /build/
 /test/
 /docs/
