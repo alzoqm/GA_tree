@@ -248,48 +248,90 @@ def apply_integrity_gates(
         if dropped_duplicates:
             sub = sub.drop(columns=dropped_duplicates, errors="ignore")
 
-    # ---- 5) 고상관(=완전/준완전 상관) 컬럼 제거 (수치형만, float32 + 행렬곱)
-    # 분산이 큰 대표를 남기는 그리디 방식 (O(p^2) 상관계산은 불가피하나 벡터화로 가속)
+    # ---- 5) 고상관(=완전/준완전 상관) 컬럼 제거 (수치형만, 행/열 청크 기반)
+    # 메모리 사용을 줄이기 위해 두 단계로 통계를 누적해 상관행렬을 구성합니다.
     if sub.shape[1]:
-        num_cols = sub.select_dtypes(include=[np.number]).columns
-        if len(num_cols):
-            X = sub[num_cols].to_numpy(dtype=np.float32, copy=True)
+        num_cols = list(sub.select_dtypes(include=[np.number]).columns)
+        if num_cols:
+            numeric_df = sub[num_cols]
+            p = len(num_cols)
+            n_total = len(numeric_df)
 
-            # NaN 열 평균 대체 (pairwise 상관과 값을 약간 달리할 수 있으나,
-            # 임계값이 0.999로 매우 높아 영향이 미미하며 속도는 크게 개선됩니다)
-            col_means = np.nanmean(X, axis=0)
-            # 모두 NaN인 열은 0으로 채움
-            col_means = np.where(np.isnan(col_means), 0.0, col_means).astype(np.float32)
-            nan_mask = np.isnan(X)
-            if nan_mask.any():
-                X[nan_mask] = col_means[np.where(nan_mask)[1]]
+            # 1차 패스: 각 열의 합, 제곱합, 개수를 추정 (NaN 제외)
+            sums = np.zeros(p, dtype=np.float64)
+            sumsqs = np.zeros(p, dtype=np.float64)
+            counts = np.zeros(p, dtype=np.int64)
 
-            # 표준화
-            X -= X.mean(axis=0, dtype=np.float32)
-            std = X.std(axis=0, dtype=np.float32)
-            std[std == 0] = 1.0
-            X /= std
+            # 64MB 이하로 유지되도록 행 청크 크기 계산
+            target_mem = 64 * 1024 * 1024  # 64 MiB
+            denom = max(1, p * 4)  # float32 바이트
+            chunk_rows = int(target_mem // denom)
+            chunk_rows = max(512, min(n_total, chunk_rows)) if n_total else 0
+            if chunk_rows == 0:
+                chunk_rows = n_total or 1
 
-            # 상관행렬 (절댓값)
-            # C = (X^T X) / n
-            n_eff = X.shape[0]
-            C = (X.T @ X) / float(n_eff)
-            np.fill_diagonal(C, 0.0)
-            absC = np.abs(C)
+            for start in range(0, n_total, chunk_rows):
+                stop = min(start + chunk_rows, n_total)
+                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float32, copy=False)
+                if chunk.size == 0:
+                    continue
+                sums += np.nansum(chunk, axis=0, dtype=np.float64)
+                sumsqs += np.nansum(chunk * chunk, axis=0, dtype=np.float64)
+                counts += np.sum(~np.isnan(chunk), axis=0, dtype=np.int64)
 
-            # 분산(원본 기준) 미리 계산하여 큰 것 우선 보존
-            variances = np.nanvar(sub[num_cols].to_numpy(dtype=np.float32, copy=False), axis=0)
-            order = np.argsort(-variances)  # 내림차순
+            means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
 
-            keep = np.ones(len(num_cols), dtype=bool)
+            sq_term = np.zeros_like(sumsqs)
+            valid_counts = counts > 0
+            sq_term[valid_counts] = (sums[valid_counts] ** 2) / counts[valid_counts]
+
+            var = np.zeros_like(sumsqs)
+            if n_total > 0:
+                var[valid_counts] = (sumsqs[valid_counts] - sq_term[valid_counts]) / float(n_total)
+            var = np.maximum(var, 0.0)
+
+            std = np.sqrt(var, dtype=np.float64)
+            inv_std = np.zeros_like(std)
+            nonzero_std = std > 0.0
+            inv_std[nonzero_std] = 1.0 / std[nonzero_std]
+
+            means32 = means.astype(np.float32, copy=False)
+            inv_std32 = inv_std.astype(np.float32, copy=False)
+
+            # 2차 패스: 표준화된 누적 내적을 통해 상관 행렬 계산
+            corr_accum = np.zeros((p, p), dtype=np.float32)
+
+            for start in range(0, n_total, chunk_rows):
+                stop = min(start + chunk_rows, n_total)
+                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float32, copy=True)
+                if chunk.size == 0:
+                    continue
+                nan_mask = np.isnan(chunk)
+                if nan_mask.any():
+                    col_index = np.where(nan_mask)[1]
+                    chunk[nan_mask] = means32[col_index]
+                chunk -= means32
+                chunk *= inv_std32
+                corr_accum += chunk.T @ chunk
+
+            if n_total:
+                corr_matrix = corr_accum / float(n_total)
+            else:
+                corr_matrix = corr_accum
+
+            np.fill_diagonal(corr_matrix, 0.0)
+            abs_corr = np.abs(corr_matrix)
+
+            variances = var.astype(np.float32, copy=False)
+            order = np.argsort(-variances)  # 분산 큰 것부터 유지
+
+            keep = np.ones(p, dtype=bool)
             thr = float(correlation_threshold)
             for idx in order:
                 if not keep[idx]:
                     continue
-                # idx와 상관이 높은 모든 열을 드롭 (자기 자신은 제외)
-                high = absC[idx] >= thr
+                high = abs_corr[idx] >= thr
                 if high.any():
-                    # 이미 keep인 것들만 제거
                     remove = high & keep
                     remove[idx] = False
                     keep[remove] = False

@@ -1,0 +1,12 @@
+2025-09-29 04:45:56,416 INFO [__main__] Loading experiment config from Config/experiment_config.yaml
+2025-09-29 04:45:56,438 INFO [__main__] Loading final feature frame from /root/workspace/GA_tree/dataset/final_test_features.pkl
+2025-09-29 04:46:04,586 INFO [__main__] Loaded frame with shape rows=735016 cols=1747
+2025-09-29 04:46:04,588 INFO [__main__] Starting selection pipeline (dry_run=False)
+2025-09-29 04:46:04,588 INFO [selection.pipeline] Running selection pipeline with frame shape rows=735016 cols=1747
+2025-09-29 04:46:25,677 INFO [selection.pipeline] Resolved 1746 candidate features after dtype filtering
+2025-09-29 04:46:25,679 INFO [selection.pipeline] Starting integrity checks (1746 features)
+2025-09-29 04:47:58,447 INFO [selection.pipeline] Finished integrity checks (1746 features) in 89.18s
+2025-09-29 04:47:58,472 INFO [selection.pipeline] Integrity stage retained 859 features (49.20% of candidates)
+2025-09-29 04:47:58,474 INFO [selection.pipeline] Starting cpcv split construction
+2025-09-29 04:47:59,606 INFO [selection.pipeline] Finished cpcv split construction in 1.13s
+2025-09-29 04:47:59,606 INFO [selection.pipeline] Starting stage1 screening (45 splits x 859 features)

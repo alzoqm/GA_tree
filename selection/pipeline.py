@@ -16,6 +16,8 @@ from importlib import metadata
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from types import MappingProxyType
+
 import numpy as np
 import pandas as pd
 
@@ -44,6 +46,7 @@ from .snapshot import (
     atomic_write_yaml,
 )
 from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
+from .target import compute_target, available_modes as target_available_modes
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +99,13 @@ class StageOneConfig:
     hsic_rff_dim: int = 128
     dcor_sample_size: int = 1024
     record_details: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class TargetConfig:
+    mode: Optional[str]
+    params: Mapping[str, object]
+    column: Optional[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,14 +192,19 @@ class SelectionPipeline:
         self.selection_cfg = selection_cfg
         self.paths = paths
         self.dry_run = dry_run or bool(selection_cfg.get("dry_run", False))
-        self.stage1 = self._build_stage1_config(selection_cfg)
+        self.target = self._build_target_config(selection_cfg)
+        self.stage1 = self._build_stage1_config(selection_cfg, target_override=self.target.column)
         self.stage2 = self._build_stage2_config(selection_cfg)
         self.stage3 = self._build_stage3_config(selection_cfg)
         self._latest_df_shape: Optional[tuple[int, int]] = None
 
     @staticmethod
-    def _build_stage1_config(cfg: Mapping[str, object]) -> StageOneConfig:
-        raw_target = cfg.get("target_column")
+    def _build_stage1_config(
+        cfg: Mapping[str, object],
+        *,
+        target_override: Optional[str] = None,
+    ) -> StageOneConfig:
+        raw_target = target_override if target_override is not None else cfg.get("target_column")
         if raw_target is None:
             target_column: Optional[str] = None
         else:
@@ -324,6 +339,54 @@ class SelectionPipeline:
         )
 
     @staticmethod
+    def _build_target_config(cfg: Mapping[str, object]) -> TargetConfig:
+        target_section = cfg.get("target")
+        empty_params = MappingProxyType({})
+
+        if isinstance(target_section, Mapping):
+            mode_raw = target_section.get("mode")
+            mode = str(mode_raw).strip() if mode_raw is not None else ""
+            mode = mode or None
+
+            column_raw = (
+                target_section.get("output_column")
+                or target_section.get("column")
+                or target_section.get("target_column")
+            )
+            column = str(column_raw).strip() if isinstance(column_raw, str) else column_raw
+            column = column or None
+
+            params_raw = target_section.get("params") or {}
+            if not isinstance(params_raw, Mapping):
+                raise TypeError("selection_pipeline.target.params must be a mapping")
+            params_dict: Dict[str, object] = dict(params_raw)
+
+            if mode:
+                available = target_available_modes()
+                if mode not in available:
+                    available_text = ", ".join(available) or "<none>"
+                    raise ValueError(
+                        f"Target mode '{mode}' is not registered. Available modes: {available_text}"
+                    )
+                if column is None:
+                    column = f"target_{mode}"
+                params_dict.setdefault("output_column", column)
+
+            return TargetConfig(
+                mode=mode,
+                params=MappingProxyType(params_dict),
+                column=column,
+            )
+
+        raw_target = cfg.get("target_column")
+        if raw_target is None:
+            return TargetConfig(mode=None, params=empty_params, column=None)
+        target_str = str(raw_target).strip()
+        if target_str.lower() in {"", "none", "null"}:
+            return TargetConfig(mode=None, params=empty_params, column=None)
+        return TargetConfig(mode=None, params=empty_params, column=target_str)
+
+    @staticmethod
     def _build_stage2_config(cfg: Mapping[str, object]) -> StageTwoConfig:
         stage2_cfg = cfg.get("stage2_selection", {})
         corr_cap = float(stage2_cfg.get("corr_cap", 0.9))
@@ -454,6 +517,22 @@ class SelectionPipeline:
             df.shape[1],
         )
         target = self.stage1.target_column
+        if self.target.mode:
+            column_name, target_series = compute_target(
+                df,
+                mode=self.target.mode,
+                params=self.target.params,
+            )
+            expected_name = self.target.column or column_name
+            column_name = expected_name or column_name
+            if column_name != target_series.name:
+                target_series = target_series.rename(column_name)
+            if not target_series.index.equals(df.index):
+                target_series = target_series.reindex(df.index)
+            df = df.copy()
+            df[column_name] = target_series
+            target = column_name
+            self.stage1.target_column = column_name
         if self.stage1.supervision == "supervised":
             if not target or target not in df.columns:
                 raise KeyError("Target column required in supervised mode")
