@@ -1,4 +1,4 @@
-# math_utils.py
+# /selection/math_utils.py
 """
 Vectorised regularised gamma and chi-square helpers with optional accelerators.
 

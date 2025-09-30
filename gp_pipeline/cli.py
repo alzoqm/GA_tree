@@ -1,3 +1,4 @@
+# /gp_pipeline/cli.py
 """Command line interface for the GP feature pipeline."""
 
 from __future__ import annotations

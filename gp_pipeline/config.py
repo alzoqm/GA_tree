@@ -1,3 +1,4 @@
+# /gp_pipeline/config.py
 """Configuration models for the GP feature pipeline."""
 
 from __future__ import annotations

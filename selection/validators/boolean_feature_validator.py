@@ -1,3 +1,4 @@
+# /selection/validators/boolean_feature_validator.py
 """Boolean-feature validation utilities for GA fitness evaluation.
 
 This module mirrors ``selection.single_feature_validator`` but tailors the

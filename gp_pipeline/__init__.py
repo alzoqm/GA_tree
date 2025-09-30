@@ -1,3 +1,4 @@
+# /gp_pipeline/__init__.py
 """Genetic programming feature pipeline package."""
 
 from .config import GPConfig, FeatureConfig, ModeFitnessConfig, load_gp_config

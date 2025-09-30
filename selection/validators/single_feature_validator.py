@@ -1,3 +1,4 @@
+# /selection/validators/single_feature_validator.py
 """Single-feature validation utilities leveraging the selection toolkit.
 
 This module reuses the integrity checks, CPCV splitting strategy, and
