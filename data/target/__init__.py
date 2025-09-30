@@ -1,4 +1,4 @@
-# screening.py/target/__init__.py
+# /data/target/__init__.py
 
 """Target generation registry for supervised selection modes."""
 from __future__ import annotations

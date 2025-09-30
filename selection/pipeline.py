@@ -46,7 +46,7 @@ from .snapshot import (
     atomic_write_yaml,
 )
 from .splits import CrossFitSplit, build_cross_fit_splits, make_cpcv_scheduler
-from .target import compute_target, available_modes as target_available_modes
+from data.target import compute_target, available_modes as target_available_modes
 
 
 logger = logging.getLogger(__name__)

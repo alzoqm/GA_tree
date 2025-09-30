@@ -30,12 +30,8 @@ except ImportError:  # pragma: no cover - optional dependency for the demo
     pl = None
 
 try:
-    from selection.validators.boolean_feature_validator import (
-        validate_boolean_feature,
-    )
-    from selection.validators.single_feature_validator import (
-        validate_numeric_feature,
-    )
+    from gp_pipeline.boolean_feature_validator import validate_boolean_feature
+    from gp_pipeline.single_feature_validator import validate_numeric_feature
 except ImportError:  # pragma: no cover - allow running without validators
     validate_boolean_feature = None
     validate_numeric_feature = None

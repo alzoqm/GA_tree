@@ -8,8 +8,8 @@ from typing import Dict, Optional
 import pandas as pd
 
 try:
-    from selection.validators.boolean_feature_validator import validate_boolean_feature
-    from selection.validators.single_feature_validator import validate_numeric_feature
+    from .boolean_feature_validator import validate_boolean_feature
+    from .single_feature_validator import validate_numeric_feature
 except ImportError:  # pragma: no cover
     validate_boolean_feature = None
     validate_numeric_feature = None

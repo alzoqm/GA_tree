@@ -1,4 +1,4 @@
-# screening.py/target/multi_horizon_risk_adjusted.py
+# /data/target/multi_horizon_risk_adjusted.py
 """Multi-horizon risk-adjusted return target generation."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# /selection/validators/single_feature_validator.py
+# /gp_pipeline/single_feature_validator.py
 """Single-feature validation utilities leveraging the selection toolkit.
 
 This module reuses the integrity checks, CPCV splitting strategy, and
@@ -17,9 +17,9 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .integrity import IntegrityReport, apply_integrity_gates
-from .splits import CrossFitSplit, build_cross_fit_splits, inner_time_split, make_cpcv_scheduler
-from .screening import ScreeningDetail, screening_out_of_fold
+from selection.integrity import IntegrityReport, apply_integrity_gates
+from selection.splits import CrossFitSplit, build_cross_fit_splits, inner_time_split, make_cpcv_scheduler
+from selection.screening import ScreeningDetail, screening_out_of_fold
 from training.cpcv import CPCVSplit
 
 logger = logging.getLogger(__name__)

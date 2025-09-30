@@ -1,4 +1,4 @@
-# /selection/validators/boolean_feature_validator.py
+# /gp_pipeline/boolean_feature_validator.py
 """Boolean-feature validation utilities for GA fitness evaluation.
 
 This module mirrors ``selection.single_feature_validator`` but tailors the
@@ -19,10 +19,10 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .boolean_stats import BooleanFeatureStats, compute_boolean_feature_stats
-from .integrity import IntegrityReport, apply_integrity_gates
-from .screening import ScreeningDetail
-from .splits import CrossFitSplit, build_cross_fit_splits, inner_time_split, make_cpcv_scheduler
+from selection.boolean_stats import BooleanFeatureStats, compute_boolean_feature_stats
+from selection.integrity import IntegrityReport, apply_integrity_gates
+from selection.screening import ScreeningDetail
+from selection.splits import CrossFitSplit, build_cross_fit_splits, inner_time_split, make_cpcv_scheduler
 from training.cpcv import CPCVSplit
 
 logger = logging.getLogger(__name__)
