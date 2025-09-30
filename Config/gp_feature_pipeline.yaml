@@ -1,0 +1,88 @@
+# Configuration for the GP feature generation pipeline
+
+data:
+  path: ../data/gp_sample.csv
+  target_column: target
+  feature_columns:
+    - price
+    - volume
+    - spread
+
+feature:
+  mode: numeric
+
+population:
+  size: 32
+  generations: 8
+  min_depth: 1
+  max_depth: 4
+  tournament_size: 5
+  elitism: 2
+  mutation_prob: 0.2
+  crossover_prob: 0.8
+  seed: 42
+
+backend:
+  primary: numexpr
+  fallbacks: [numpy]
+  cache_subtrees: true
+  low_fidelity_ratio: 0.25
+  full_eval_top_k: 0.25
+
+fitness:
+  numeric:
+    metrics: [neg_log_pvalue, effect_size, cliffs_delta, significance_margin, mean_method_effect, effect_stability, pvalue_consistency, min_pvalue]
+    weights: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 1.0]
+    maximize: [true, true, true, true, true, true, true, false]
+    thresholds:
+      neg_log_pvalue: 1.0
+      effect_size: 0.0
+      cliffs_delta: 0.0
+      significance_margin: 0.0
+      mean_method_effect: 0.0
+      effect_stability: 0.5
+      pvalue_consistency: 0.5
+      min_pvalue: 0.05
+  boolean:
+    metrics: [neg_log_pvalue, effect_strength, effect_stability, pvalue_consistency, significance_margin, prop_diff_abs, odds_ratio_abs, cliffs_delta_abs, mutual_information, min_pvalue]
+    weights: [1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0]
+    maximize: [true, true, true, true, true, true, true, true, true, false]
+    thresholds:
+      neg_log_pvalue: 1.0
+      effect_strength: 0.0
+      effect_stability: 0.5
+      pvalue_consistency: 0.5
+      significance_margin: 0.0
+      prop_diff_abs: 0.0
+      odds_ratio_abs: 1.0
+      cliffs_delta_abs: 0.0
+      mutual_information: 0.0
+      min_pvalue: 0.05
+
+validator:
+  enabled: true
+  numeric_kwargs:
+    combine_method: simes
+    min_bars_per_split: 64
+    screening_methods:
+      spearman:
+        enabled: true
+        cliffs_delta: false
+    verbose: false
+  boolean_kwargs:
+    combine_method: simes
+    min_bars_per_split: 64
+    screening_methods:
+      fisher_exact:
+        enabled: true
+        event_threshold: 0.0
+      prop_ztest:
+        enabled: false
+      mutual_information:
+        enabled: false
+    verbose: false
+
+output:
+  artifacts_dir: ../results/gp_pipeline
+  save_best: 5
+  save_population: false
