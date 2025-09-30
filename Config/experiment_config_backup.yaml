@@ -137,6 +137,11 @@ cpcv:
   parallel_chunks: 4
   reuse_population: true
   evaluation_cache_dir: "results/cpcv_cache"
+  holdout:
+    bars: 0
+    ratio: null
+    min_bars: 512
+    max_bars: null
 
 # 5. Walk-Forward Optimization 설정
 walk_forward:

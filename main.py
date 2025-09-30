@@ -404,6 +404,46 @@ def _main_impl():
             'objective_minimize': fitness_objectives_cfg.get('cpcv_objectives', {}).get('minimize', []),
             'robustness': getattr(cpcv_manager, 'last_robustness', []),
         })
+
+        holdout_obj = getattr(cpcv_manager, 'holdout_objectives', None)
+        if getattr(cpcv_manager, 'holdout_length', 0) > 0 and isinstance(holdout_obj, np.ndarray) and holdout_obj.size:
+            holdout_summary = getattr(cpcv_manager, 'holdout_summary', {}) or {}
+            holdout_indices = getattr(cpcv_manager, 'holdout_indices', None)
+            holdout_timestamps = getattr(cpcv_manager, 'holdout_timestamps', (None, None)) or (None, None)
+
+            ts_serialized: List[Optional[str]] = []
+            for ts in holdout_timestamps:
+                if isinstance(ts, (pd.Timestamp, datetime)):
+                    ts_serialized.append(ts.isoformat())
+                elif ts is None:
+                    ts_serialized.append(None)
+                else:
+                    ts_serialized.append(str(ts))
+
+            holdout_payload = {
+                'length': cpcv_manager.holdout_length,
+                'indices': list(holdout_indices) if holdout_indices else None,
+                'timestamps': ts_serialized,
+                'objective_names': strategy_context.get('objective_names', []),
+                'objectives': holdout_obj.tolist(),
+                'summary': {
+                    key: value.tolist() if isinstance(value, np.ndarray) else value
+                    for key, value in holdout_summary.items()
+                },
+            }
+            strategy_context['holdout'] = holdout_payload
+
+            try:
+                holdout_natural = to_natural_space(holdout_obj, strategy_context.get('objective_minimize', []))
+                if isinstance(holdout_natural, np.ndarray) and holdout_natural.size:
+                    top1_holdout = holdout_natural[0]
+                    logging.info("Holdout top-1 metrics: %s", {
+                        name: float(top1_holdout[idx])
+                        for idx, name in enumerate(strategy_context.get('objective_names', []))
+                    })
+            except Exception:
+                pass
+
         logging.info("CPCV mode completed with %d combinations.", len(combo_ids))
     else:
         logging.info("=== Walk-Forward Optimization Mode Enabled ===")
@@ -654,6 +694,7 @@ def _main_impl():
             'summary': summary_serializable,
             'cpcv_config': cpcv_cfg,
             'robustness': robustness_serializable,
+            'holdout': strategy_context.get('holdout'),
         }
         with open(cpcv_results_path, 'w', encoding='utf-8') as f:
             json.dump(cpcv_results, f, indent=2)

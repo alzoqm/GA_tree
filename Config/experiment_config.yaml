@@ -121,6 +121,11 @@ cpcv:
   parallel_chunks: 4
   reuse_population: true
   evaluation_cache_dir: "results/cpcv_cache"
+  holdout:
+    bars: 0               # 마지막 N개 바를 holdout으로 사용 (0이면 비활성)
+    ratio: null           # bars가 설정되지 않았을 때 사용할 비율 (0~1)
+    min_bars: 512         # holdout으로 최소 확보하고 싶은 바 수
+    max_bars: null        # 설정 시 holdout 상한
 
 selection_pipeline:
   enabled: true

@@ -6,8 +6,11 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
+import math
+
 import numpy as np
 import torch
+import pandas as pd
 
 from models.model import GATreePop
 from training.cpcv import CPCVScheduler
@@ -15,6 +18,7 @@ from training.runner import generation_training, GenerationRunner
 from fitness.cpcv_objectives import CPCVObjectiveAggregator, CPCVAggregationResult
 from analysis.robustness import run_robustness_checks, RobustnessReport
 from training.pruner import PopulationPruner
+from training.simulator import FitnessSimulator
 
 
 class CPCVManager:
@@ -41,6 +45,14 @@ class CPCVManager:
         self.last_raw_returns = None
         self.last_robustness: List[RobustnessReport] = []
 
+        # Holdout evaluation state
+        self.holdout_length: int = 0
+        self.holdout_summary: Dict[str, np.ndarray] = {}
+        self.holdout_objectives: Optional[np.ndarray] = None
+        self.holdout_returns = None
+        self.holdout_indices: Optional[Tuple[int, int]] = None
+        self.holdout_timestamps: Optional[Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]] = None
+
     def _build_scheduler(self, total_length: int) -> CPCVScheduler:
         folds = int(self.cpcv_cfg.get('folds', 10))
         test_folds = int(self.cpcv_cfg.get('test_folds', 2))
@@ -63,6 +75,64 @@ class CPCVManager:
             parallel_chunks=self.cpcv_cfg.get('parallel_chunks'),
         )
         return scheduler
+
+    def _resolve_holdout_length(self, total_length: int) -> int:
+        """Determine how many trailing bars to reserve as holdout."""
+
+        if total_length <= 0:
+            return 0
+
+        cfg_raw = self.cpcv_cfg.get('holdout', {})
+        holdout_cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+
+        bars = holdout_cfg.get('bars', self.cpcv_cfg.get('holdout_bars'))
+        ratio = holdout_cfg.get('ratio', self.cpcv_cfg.get('holdout_ratio'))
+        min_bars = holdout_cfg.get('min_bars', self.cpcv_cfg.get('holdout_min_bars', 0))
+        max_bars = holdout_cfg.get('max_bars', self.cpcv_cfg.get('holdout_max_bars'))
+
+        length = 0
+        holdout_requested = False
+        if bars is not None:
+            try:
+                length = max(0, int(bars))
+            except (TypeError, ValueError):
+                length = 0
+            else:
+                holdout_requested = length > 0
+        elif ratio is not None:
+            try:
+                ratio_f = float(ratio)
+            except (TypeError, ValueError):
+                ratio_f = 0.0
+            if ratio_f > 0.0:
+                length = int(math.ceil(total_length * min(1.0, max(0.0, ratio_f))))
+                holdout_requested = True
+
+        if not holdout_requested:
+            length = 0
+        elif min_bars:
+            try:
+                length = max(length, int(min_bars))
+            except (TypeError, ValueError):
+                pass
+
+        if max_bars is not None:
+            try:
+                length = min(length, int(max_bars))
+            except (TypeError, ValueError):
+                pass
+
+        min_training = max(2 * int(self.cpcv_cfg.get('min_trades_per_split', 32)), 64)
+        if length >= total_length - min_training:
+            # Not enough data left for training; disable holdout.
+            logging.warning(
+                "Requested holdout of %s bars leaves insufficient data (%s) for CPCV. Skipping holdout.",
+                length,
+                total_length - length,
+            )
+            return 0
+
+        return min(length, total_length)
 
     def _build_eval_config(self, scheduler: CPCVScheduler, cpcv_objectives: dict) -> dict:
         eval_cfg = dict(self.evaluation_cfg)
@@ -93,7 +163,34 @@ class CPCVManager:
             logging.error("Dataset too small for CPCV training.")
             return None, None, []
 
-        scheduler = self._build_scheduler(total_length)
+        holdout_len = self._resolve_holdout_length(total_length)
+        if holdout_len > 0:
+            train_df = final_df.iloc[:-holdout_len].copy()
+            holdout_df = final_df.iloc[-holdout_len:].copy()
+        else:
+            train_df = final_df
+            holdout_df = final_df.iloc[0:0]
+
+        train_length = len(train_df)
+        if train_length < 2:
+            logging.error(
+                "Training dataset too small after holdout split (train=%s, holdout=%s).",
+                train_length,
+                holdout_len,
+            )
+            return None, None, []
+
+        self.holdout_length = holdout_len
+        if holdout_len > 0 and not holdout_df.empty:
+            self.holdout_indices = (train_length, total_length - 1)
+            start_ts = holdout_df.index[0] if len(holdout_df.index) else None
+            end_ts = holdout_df.index[-1] if len(holdout_df.index) else None
+            self.holdout_timestamps = (start_ts, end_ts)
+        else:
+            self.holdout_indices = None
+            self.holdout_timestamps = None
+
+        scheduler = self._build_scheduler(train_length)
         self.scheduler = scheduler
 
         cpcv_objectives_cfg = self.fitness_cfg.get('cpcv_objectives')
@@ -153,10 +250,10 @@ class CPCVManager:
                     )
 
         best_chromosomes, best_objectives, best_node_stats = generation_training(
-            data_1m=final_df,
+            data_1m=train_df,
             evolution=evolution_engine,
             skip_data_cnt=0,
-            valid_skip_data_cnt=total_length,
+            valid_skip_data_cnt=train_length,
             chromosomes_size=ga_cfg['population']['size'],
             gen_loop=ga_cfg['evolution_loop']['generations'],
             best_size=ga_cfg['evolution_loop']['best_chromosome_pool_size'],
@@ -213,7 +310,7 @@ class CPCVManager:
         )
         result = aggregator.evaluate(
             population=best_population,
-            data=final_df,
+            data=train_df,
             all_feature_names=model_config.get('all_features', []),
         )
 
@@ -229,13 +326,75 @@ class CPCVManager:
                     best_chromosomes = best_population.population_tensor.detach().clone()
                     result = aggregator.evaluate(
                         population=best_population,
-                        data=final_df,
+                        data=train_df,
                         all_feature_names=model_config.get('all_features', []),
                     )
                 except Exception as exc:
                     logging.warning("CPCV pruning failed: %s", exc)
             else:
                 logging.warning("Pruning enabled but CPCV node statistics were unavailable; skipping pruning.")
+
+        if self.holdout_length > 0 and len(holdout_df) > 1:
+            holdout_eval_cfg = dict(aggregation_eval_cfg)
+            holdout_eval_cfg.pop('cpcv_scheduler', None)
+            holdout_eval_cfg.pop('cpcv_objectives', None)
+            holdout_eval_cfg['mode'] = 'holdout'
+            holdout_eval_cfg['objectives'] = aggregator.oos_objectives
+            holdout_eval_cfg['multi_objectives'] = aggregator.oos_objectives
+
+            holdout_min_trades = int(self.cpcv_cfg.get('holdout_min_trades', self.cpcv_cfg.get('min_trades_per_split', 32)))
+
+            try:
+                holdout_evaluation = aggregator._evaluate_segment_group(
+                    simulator=FitnessSimulator(),
+                    population=best_population,
+                    segments=[holdout_df],
+                    eval_cfg=holdout_eval_cfg,
+                    objective_cfg=aggregator.oos_objectives,
+                    all_feature_names=model_config.get('all_features', []),
+                    min_trades=holdout_min_trades,
+                    collect_returns=True,
+                    collect_node_stats=aggregator.want_node_stats,
+                )
+            except Exception as exc:
+                logging.warning("Holdout evaluation failed: %s", exc)
+                holdout_evaluation = None
+
+            if holdout_evaluation is not None:
+                natural_metrics, _, holdout_returns, _, _ = holdout_evaluation
+                oos_stack = natural_metrics[np.newaxis, ...]
+                train_stack = np.zeros((0, best_population.pop_size, 0), dtype=np.float32)
+                returns_stack = [holdout_returns] if holdout_returns.size else []
+
+                holdout_summary = aggregator._aggregate_metrics(
+                    oos_stack=oos_stack,
+                    train_stack=train_stack,
+                    returns_stack=returns_stack,
+                    population=best_population,
+                )
+                holdout_objectives = aggregator._build_objective_matrix(holdout_summary, best_population.pop_size)
+
+                self.holdout_summary = holdout_summary
+                self.holdout_objectives = holdout_objectives
+                self.holdout_returns = holdout_returns if holdout_returns.size else None
+            else:
+                logging.warning("Holdout segment did not produce valid metrics (length=%s).", len(holdout_df))
+                self.holdout_summary = {}
+                self.holdout_objectives = None
+                self.holdout_returns = None
+        else:
+            self.holdout_summary = {}
+            self.holdout_objectives = None
+            self.holdout_returns = None
+
+        if self.holdout_objectives is not None and self.holdout_objectives.size:
+            start_idx, end_idx = self.holdout_indices if self.holdout_indices else (None, None)
+            logging.info(
+                "Holdout evaluation completed on %s bars (indices %s-%s).",
+                self.holdout_length,
+                start_idx,
+                end_idx,
+            )
 
         self.last_summary = result.summary
         self.last_combo_ids = result.combo_ids
