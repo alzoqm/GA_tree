@@ -18,14 +18,13 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from math import erf, sqrt, pi
-from typing import DefaultDict, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import logging
 import numpy as np
 import pandas as pd
 from numpy.random import Generator, default_rng
 
-from time import perf_counter
 
 from numba import njit
 
@@ -1165,6 +1164,7 @@ def screening_out_of_fold(
         total=len(cross_splits) if hasattr(cross_splits, "__len__") else None,
         unit="split",
         position=0,
+        leave=False,
     )
     for split in split_iterable:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
@@ -1271,13 +1271,6 @@ def screening_out_of_fold(
             # but also avoid tiny batches; target ~512 columns if possible
             batch_size = max(16, min(max_cols, 1024))
 
-            timing_totals: DefaultDict[str, float] = defaultdict(float)
-            timing_counts: DefaultDict[str, int] = defaultdict(int)
-
-            def _record_timing(name: str, duration: float) -> None:
-                timing_totals[name] += duration
-                timing_counts[name] += 1
-
             # Pre-extract a column-major 2D view (avoid reindexing per feature repeatedly)
             # Note: pandas advanced indexing copies anyway; here we slice per-batch for locality.
             feat_iter = _progress(
@@ -1290,20 +1283,12 @@ def screening_out_of_fold(
             )
 
             for start in feat_iter:
-                iteration_start = perf_counter()
-                accounted_time = 0.0
-
-                batch_start = perf_counter()
                 end = min(start + batch_size, len(feature_list))
                 cols = feature_list[start:end]
                 # (n_rows, k)
                 Xb = _as_float32(df[cols].to_numpy(copy=False))[indices, :]
-                batch_duration = perf_counter() - batch_start
-                accounted_time += batch_duration
-                _record_timing("batch_load", batch_duration)
 
                 # Apply default backends per method (do not change user configs)
-                adjust_start = perf_counter()
                 adjusted_methods: Dict[str, Mapping[str, object]] = {}
                 for mname, spec in fold_methods.items():
                     mname_l = str(mname).lower()
@@ -1319,10 +1304,6 @@ def screening_out_of_fold(
                     if mname_l in {"dcor", "dcor_t", "distance_correlation", "dcor_sampled"} and "sample_size" not in cfg:
                         cfg["sample_size"] = dcor_sample_size
                     adjusted_methods[mname_l] = cfg
-                adjust_duration = perf_counter() - adjust_start
-                accounted_time += adjust_duration
-                _record_timing("adjust_methods", adjust_duration)
-
                 # ---- Fast path for Spearman across the whole batch ----
                 spearman_methods: List[Tuple[str, Mapping[str, object]]] = [
                     (name, adjusted_methods[name])
@@ -1332,30 +1313,21 @@ def screening_out_of_fold(
                 if supervised_mode and target_values is not None and spearman_methods:
                     ry_centered, denom_y = fold_ctx["spearman"]
                     # 1) fast batch computation of |rho| and p-values (shared across aliases)
-                    eval_start = perf_counter()
                     effects_vec, pvals_vec = _evaluate_spearman_batch(
                         Xb,
                         ry_centered,
                         denom_y,
                         spearman_methods[0][1],
                     )
-                    eval_duration = perf_counter() - eval_start
-                    accounted_time += eval_duration
-                    _record_timing("spearman_eval", eval_duration)
                     # 2) optional cliffs_delta per-feature (computed once if any alias needs it)
                     need_any_delta = any(bool(cfg.get("cliffs_delta", True)) for _, cfg in spearman_methods)
                     delta_vec: Optional[np.ndarray] = None
                     if need_any_delta:
-                        delta_start = perf_counter()
                         delta_vec = np.empty(Xb.shape[1], dtype=np.float32)
                         for j in range(Xb.shape[1]):  # Python loop only for delta (utils impl)
                             delta_vec[j] = float(abs(cliffs_delta(Xb[:, j], target_values)))
-                        delta_duration = perf_counter() - delta_start
-                        accounted_time += delta_duration
-                        _record_timing("spearman_delta", delta_duration)
 
                     # 3) write results per alias (spearman / spearman_rho)
-                    write_start = perf_counter()
                     for method_name, cfg in spearman_methods:
                         need_delta = bool(cfg.get("cliffs_delta", True))
                         test_key = (split.outer.combo_id, fold_label, method_name)
@@ -1384,16 +1356,12 @@ def screening_out_of_fold(
                                         extras={k: float(v) for k, v in extras.items()},
                                     )
                                 )
-                    write_duration = perf_counter() - write_start
-                    accounted_time += write_duration
-                    _record_timing("spearman_write", write_duration)
 
                 # ---- Other methods (hsic/kendall/dcor...) handled per-feature (unchanged semantics)
                 other_methods = [m for m in adjusted_methods.keys() if m not in {"spearman", "spearman_rho"}]
                 if other_methods:
                     for j, feat in enumerate(cols):
                         series = Xb[:, j]
-                        eval_start = perf_counter()
                         results = _evaluate_screening_methods(
                             series,
                             target_values,
@@ -1403,12 +1371,8 @@ def screening_out_of_fold(
                             fold_ctx=fold_ctx,
                             heavy_switch_n=heavy_switch_n,
                         )
-                        eval_duration = perf_counter() - eval_start
-                        accounted_time += eval_duration
-                        _record_timing("other_methods_eval", eval_duration)
                         if not results:
                             continue
-                        write_start = perf_counter()
                         for method_name, (effect, pval, extras) in results.items():
                             test_key = (split.outer.combo_id, fold_label, method_name)
                             test_idx = test_positions.setdefault(test_key, len(test_positions))
@@ -1428,30 +1392,6 @@ def screening_out_of_fold(
                                         extras={k: float(v) for k, v in extras.items()},
                                     )
                                 )
-                        write_duration = perf_counter() - write_start
-                        accounted_time += write_duration
-                        _record_timing("other_methods_write", write_duration)
-
-                iteration_duration = perf_counter() - iteration_start
-                _record_timing("iteration_total", iteration_duration)
-                residual = iteration_duration - accounted_time
-                if residual > 1e-9:
-                    _record_timing("iteration_other", residual)
-
-            if timing_totals:
-                summary_parts: List[str] = []
-                for name, total in sorted(timing_totals.items(), key=lambda kv: kv[1], reverse=True):
-                    count = timing_counts.get(name, 0)
-                    avg = total / count if count else 0.0
-                    summary_parts.append(
-                        f"{name}: total={total:.3f}s avg={avg:.3f}s count={count}"
-                    )
-                timing_msg = (
-                    f"Screening timing breakdown for {split.outer.combo_id} / {fold_label}: "
-                    + "; ".join(summary_parts)
-                )
-                logger.info(timing_msg)
-                print(timing_msg)
 
     # ===== Combine across tests/splits per feature (unchanged semantics) =====
     test_count = len(test_positions)

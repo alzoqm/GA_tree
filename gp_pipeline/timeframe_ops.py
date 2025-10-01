@@ -91,7 +91,10 @@ def _minutes_to_window(minutes: float, base_interval: float) -> int:
     window = int(round(ratio))
     if window < 1:
         window = 1
-    if not math.isclose(ratio, window, rel_tol=1e-6, abs_tol=1e-6):
+    # Dynamic parameters can come from floating point math, so tolerate small
+    # rounding mismatches (e.g. 65614 minutes on a 5 minute base interval).
+    tolerance = max(base_interval * 0.5, 1e-6)
+    if abs(minutes - window * base_interval) > tolerance:
         raise TimeframeOperatorError(
             f"Timeframe of {minutes} minutes is incompatible with base interval {base_interval}"
         )
