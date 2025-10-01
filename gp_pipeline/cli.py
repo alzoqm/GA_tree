@@ -10,6 +10,12 @@ from .config import GPConfig, GPConfigError, load_gp_config
 from .runner import GPFeatureTrainer
 
 
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the GP feature generation pipeline")
     parser.add_argument(
