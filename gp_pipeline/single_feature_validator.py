@@ -324,6 +324,7 @@ def validate_numeric_feature(
         hsic_rff_min_dim=hsic_rff_min_dim,
         dcor_sample_size=dcor_sample_size,
         record_details=True,
+        show_progress=bool(verbose),
     )
 
     combined_pvalue = screening_result.pvalues.get(feature, 1.0)

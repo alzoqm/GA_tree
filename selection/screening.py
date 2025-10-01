@@ -58,9 +58,10 @@ def _progress(
     leave: bool = True,
     unit: Optional[str] = None,
     position: int = 0,
+    enabled: bool = True,
 ):
     """Return tqdm iterator if available, otherwise the raw iterable."""
-    if tqdm is None:
+    if not enabled or tqdm is None:
         return iterable
     return tqdm(
         iterable,
@@ -1115,6 +1116,7 @@ def screening_out_of_fold(
     hsic_rff_min_dim: int = 32,
     dcor_sample_size: int = 1024,
     record_details: bool = True,
+    show_progress: bool = True,
 ) -> ScreeningResult:
     """Out-of-fold feature screening with scalable dependence tests (optimized)."""
 
@@ -1165,6 +1167,7 @@ def screening_out_of_fold(
         unit="split",
         position=0,
         leave=False,
+        enabled=show_progress,
     )
     for split in split_iterable:
         for fold_label, indices in (("A", split.inner_train_a), ("B", split.inner_train_b)):
@@ -1280,6 +1283,7 @@ def screening_out_of_fold(
                 leave=False,
                 unit="batch",
                 position=1,
+                enabled=show_progress,
             )
 
             for start in feat_iter:

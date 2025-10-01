@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from itertools import count
@@ -14,6 +15,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from deap import gp, tools
+from tqdm.auto import tqdm
 
 from .config import GPConfig, GPConfigError
 from .evaluation import BACKENDS, EvaluationCache, choose_backend
@@ -217,7 +219,15 @@ class GPFeatureTrainer:
         provisional: List[
             Tuple[gp.PrimitiveTree, Dict[str, float], Dict[str, str], IRNode, np.ndarray]
         ] = []
-        for individual in population:
+        progress = tqdm(
+            population,
+            total=len(population),
+            desc=f"Gen {generation + 1} validations",
+            leave=False,
+            dynamic_ncols=True,
+            file=sys.stdout,
+        )
+        for individual in progress:
             if individual.fitness.valid:
                 continue
             ir = tree_to_ir(individual, self.feature_columns)
@@ -232,6 +242,8 @@ class GPFeatureTrainer:
             self._maybe_register_best(individual)
             provisional.append((individual, metrics, goals, ir, values))
             evaluations += 1
+
+        progress.close()
 
         if self.df_subset is not None and self.full_eval_top_k > 0 and provisional:
             k = max(1, int(len(provisional) * self.full_eval_top_k))
@@ -293,7 +305,16 @@ class GPFeatureTrainer:
         feature_name = f"__gp_feature_{next(self._feature_counter)}__"
         df_temp = df.copy()
         if self.feature_mode == "numeric":
-            df_temp[feature_name] = values.astype(np.float32)
+            cleaned_values = np.asarray(values, dtype=np.float64)
+            if not np.isfinite(cleaned_values).all():
+                finite_mask = np.isfinite(cleaned_values)
+                if finite_mask.any():
+                    cleaned_values = cleaned_values.copy()
+                    cleaned_values[~finite_mask] = 0.0
+                else:
+                    cleaned_values = np.zeros_like(cleaned_values, dtype=np.float64)
+            cleaned_values = self._clip_to_float32_bounds(cleaned_values)
+            df_temp[feature_name] = cleaned_values.astype(np.float32, copy=False)
             result = run_numeric_validator(
                 df_temp,
                 feature_name,
@@ -452,3 +473,15 @@ class GPFeatureTrainer:
             "population": population_path,
             "best": best_path,
         }
+
+    @staticmethod
+    def _clip_to_float32_bounds(values: np.ndarray) -> np.ndarray:
+        """Clamp values to the finite range representable by float32 to avoid overflow casts."""
+
+        float32_max = np.finfo(np.float32).max
+        overflow_mask = np.abs(values) > float32_max
+        if not overflow_mask.any():
+            return values
+        clipped = values.copy()
+        clipped[overflow_mask] = np.sign(clipped[overflow_mask]) * float32_max
+        return clipped
