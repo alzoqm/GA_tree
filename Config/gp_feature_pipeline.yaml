@@ -17,6 +17,7 @@ data:
     - markPrice_est
     - markLow_est
     - markHigh_est
+  max_target_corr: 0.995
 
 feature:
   mode: numeric
@@ -105,7 +106,7 @@ validator:
     screening_methods:
       spearman:
         enabled: true
-        cliffs_delta: false
+        cliffs_delta: true
     verbose: false
   boolean_kwargs:
     combine_method: simes

@@ -131,6 +131,7 @@ class DataConfig:
     target_column: str
     feature_columns: Sequence[str]
     usecols: Optional[Sequence[str]] = None
+    max_target_corr: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -269,6 +270,11 @@ def load_gp_config(path: str | Path) -> GPConfig:
                 target_column=data["data"]["target_column"],
                 feature_columns=tuple(data["data"]["feature_columns"]),
                 usecols=tuple(data["data"].get("usecols", [])) or None,
+                max_target_corr=(
+                    float(data["data"]["max_target_corr"])
+                    if data["data"].get("max_target_corr") is not None
+                    else None
+                ),
             ),
             feature=FeatureConfig(**data.get("feature", {})),
             timeframe_primitives=timeframe_cfg,

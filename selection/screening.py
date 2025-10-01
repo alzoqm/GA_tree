@@ -1343,8 +1343,6 @@ def screening_out_of_fold(
                             if need_delta and delta_vec is not None:
                                 d = float(delta_vec[j])
                                 extras["cliffs_delta"] = d
-                                if d > effect:
-                                    effect = d
                                 per_feature_deltas[feat][test_idx] = abs(d)
                             per_feature_effects[feat][test_idx] = effect
                             per_feature_pvals[feat][test_idx] = pval
