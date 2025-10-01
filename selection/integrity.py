@@ -272,11 +272,11 @@ def apply_integrity_gates(
 
             for start in range(0, n_total, chunk_rows):
                 stop = min(start + chunk_rows, n_total)
-                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float32, copy=False)
+                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float64, copy=False)
                 if chunk.size == 0:
                     continue
                 sums += np.nansum(chunk, axis=0, dtype=np.float64)
-                sumsqs += np.nansum(chunk * chunk, axis=0, dtype=np.float64)
+                sumsqs += np.nansum(np.square(chunk, dtype=np.float64), axis=0, dtype=np.float64)
                 counts += np.sum(~np.isnan(chunk), axis=0, dtype=np.int64)
 
             means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
@@ -295,23 +295,23 @@ def apply_integrity_gates(
             nonzero_std = std > 0.0
             inv_std[nonzero_std] = 1.0 / std[nonzero_std]
 
-            means32 = means.astype(np.float32, copy=False)
-            inv_std32 = inv_std.astype(np.float32, copy=False)
+            means64 = means.astype(np.float64, copy=False)
+            inv_std64 = inv_std.astype(np.float64, copy=False)
 
             # 2차 패스: 표준화된 누적 내적을 통해 상관 행렬 계산
-            corr_accum = np.zeros((p, p), dtype=np.float32)
+            corr_accum = np.zeros((p, p), dtype=np.float64)
 
             for start in range(0, n_total, chunk_rows):
                 stop = min(start + chunk_rows, n_total)
-                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float32, copy=True)
+                chunk = numeric_df.iloc[start:stop].to_numpy(dtype=np.float64, copy=True)
                 if chunk.size == 0:
                     continue
                 nan_mask = np.isnan(chunk)
                 if nan_mask.any():
                     col_index = np.where(nan_mask)[1]
-                    chunk[nan_mask] = means32[col_index]
-                chunk -= means32
-                chunk *= inv_std32
+                    chunk[nan_mask] = means64[col_index]
+                chunk -= means64
+                chunk *= inv_std64
                 corr_accum += chunk.T @ chunk
 
             if n_total:
@@ -322,7 +322,7 @@ def apply_integrity_gates(
             np.fill_diagonal(corr_matrix, 0.0)
             abs_corr = np.abs(corr_matrix)
 
-            variances = var.astype(np.float32, copy=False)
+            variances = var.astype(np.float64, copy=False)
             order = np.argsort(-variances)  # 분산 큰 것부터 유지
 
             keep = np.ones(p, dtype=bool)

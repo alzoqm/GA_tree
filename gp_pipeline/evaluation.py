@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover
     pl = None
 
 from .ir import IRNode, hash_ir
+from .timeframe_ops import apply_timeframe_operator, is_timeframe_operator
 
 
 @dataclass(slots=True)
@@ -47,6 +48,27 @@ class EvaluatorError(RuntimeError):
 SAFE_EPS = 1e-6
 
 
+def _safe_log1p(x: np.ndarray) -> np.ndarray:
+    """Compute log1p while guarding against domain errors and propagating NaNs."""
+    if not isinstance(x, np.ndarray):
+        x = np.asarray(x, dtype=np.float64)
+    else:
+        x = x.astype(np.float64, copy=False)
+
+    out = np.empty_like(x, dtype=np.float64)
+    invalid_mask = ~np.isfinite(x)
+    domain_violation = x <= -1.0
+    valid_mask = ~(invalid_mask | domain_violation)
+
+    if np.any(valid_mask):
+        out[valid_mask] = np.log1p(x[valid_mask])
+    out[domain_violation] = np.nan
+    if np.any(invalid_mask):
+        out[invalid_mask] = x[invalid_mask]
+
+    return out
+
+
 def evaluate_numpy(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationCache] = None) -> np.ndarray:
     key = hash_ir(node)
     if cache is not None:
@@ -55,9 +77,9 @@ def evaluate_numpy(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationCac
             return cached
 
     if node.kind == "var":
-        arr = df[node.value].to_numpy(dtype=np.float32, copy=False)
+        arr = df[node.value].to_numpy(dtype=np.float64, copy=False)
     elif node.kind == "const":
-        arr = np.full(len(df), float(node.value), dtype=np.float32)
+        arr = np.full(len(df), float(node.value), dtype=np.float64)
     elif node.kind == "op":
         args = [evaluate_numpy(child, df, cache) for child in node.args]
         arr = _apply_numpy(node.value, args)
@@ -83,15 +105,17 @@ NUMPY_OPERATORS: Mapping[str, callable] = {
     "min": np.minimum,
     "max": np.maximum,
     "abs": np.abs,
-    "log1p": np.log1p,
+    "log1p": _safe_log1p,
     "clip": lambda x, lo, hi: np.clip(x, lo, hi),
 }
 
 
 def _apply_numpy(op: str, args: Sequence[np.ndarray]) -> np.ndarray:
-    if op not in NUMPY_OPERATORS:
-        raise EvaluatorError(f"Unsupported numpy operator: {op}")
-    return NUMPY_OPERATORS[op](*args)
+    if op in NUMPY_OPERATORS:
+        return NUMPY_OPERATORS[op](*args)
+    if is_timeframe_operator(op):
+        return apply_timeframe_operator(op, args)
+    raise EvaluatorError(f"Unsupported numpy operator: {op}")
 
 
 NUMEXPR_RENDER = {
@@ -114,6 +138,10 @@ def ir_to_numexpr(node: IRNode) -> str:
         return node.value
     if node.kind == "const":
         return repr(float(node.value))
+    if is_timeframe_operator(node.value):
+        raise EvaluatorError(
+            f"Operator '{node.value}' is not supported by the numexpr backend"
+        )
     renderer = NUMEXPR_RENDER.get(node.value)
     if renderer is None:
         raise EvaluatorError(f"Operator not supported for numexpr: {node.value}")
@@ -129,14 +157,25 @@ def evaluate_numexpr(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationC
         cached = cache.get_array(key)
         if cached is not None:
             return cached
+    if node.kind == "op" and is_timeframe_operator(node.value):
+        arr = _apply_numpy(node.value, [evaluate_numexpr(child, df, cache) for child in node.args])
+        if cache is not None:
+            cache.set_array(key, arr)
+        return arr
+    # Fallback to numpy evaluation if any descendant requires timeframe operators.
+    if node.kind == "op" and any(is_timeframe_operator(child.value) for child in _collect_ops(node)):
+        arr = evaluate_numpy(node, df, cache)
+        if cache is not None:
+            cache.set_array(key, arr)
+        return arr
     expr = ir_to_numexpr(node)
     local_dict = {
-        col: df[col].to_numpy(dtype=np.float32, copy=False)
+        col: df[col].to_numpy(dtype=np.float64, copy=False)
         for col in _collect_vars(node)
     }
     arr = ne.evaluate(expr, local_dict=local_dict)
     if np.isscalar(arr):
-        arr = np.full(len(df), float(arr), dtype=np.float32)
+        arr = np.full(len(df), float(arr), dtype=np.float64)
     if cache is not None:
         cache.set_array(key, arr)
     return arr
@@ -149,6 +188,15 @@ def _collect_vars(node: IRNode) -> Sequence[str]:
     for child in node.args:
         vars_found.update(_collect_vars(child))
     return sorted(vars_found)
+
+
+def _collect_ops(node: IRNode) -> Sequence[IRNode]:
+    if node.kind != "op":
+        return []
+    nodes = [node]
+    for child in node.args:
+        nodes.extend(_collect_ops(child))
+    return nodes
 
 
 def ir_to_polars(node: IRNode):  # type: ignore[return-type]
@@ -173,6 +221,12 @@ def evaluate_polars(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationCa
         cached = cache.get_array(key)
         if cached is not None:
             return cached
+    if node.kind == "op" and is_timeframe_operator(node.value):
+        args = [evaluate_polars(child, df, cache) for child in node.args]
+        arr = apply_timeframe_operator(node.value, args)
+        if cache is not None:
+            cache.set_array(key, arr)
+        return arr
     expr = ir_to_polars(node).alias("gp_feature")
     lazy = pl.from_pandas(df).lazy()
     result = lazy.with_columns(expr).collect(streaming=True)

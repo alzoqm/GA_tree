@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import yaml
 
@@ -146,9 +146,46 @@ class FeatureConfig:
 
 
 @dataclass(slots=True)
+class TimeframePrimitiveConfig:
+    enabled: bool = False
+    base_interval_minutes: Optional[float] = None
+    timestamp_column: Optional[str] = None
+    timeframes: Sequence[Union[str, int]] = field(
+        default_factory=lambda: ("30m", "1h", "4h", "1d")
+    )
+    custom_timeframes: Sequence[Union[str, int]] = field(default_factory=tuple)
+    operators: Sequence[str] = field(
+        default_factory=lambda: (
+            "high",
+            "low",
+            "mean",
+            "median",
+            "std",
+            "var",
+            "sum",
+            "range",
+            "ema",
+            "lag",
+            "diff",
+            "pct_change",
+            "zscore",
+            "skew",
+            "kurtosis",
+        )
+    )
+    extra_operators: Sequence[str] = field(default_factory=tuple)
+    dynamic_operators: Sequence[Dict[str, Any]] = field(default_factory=tuple)
+    min_periods: Optional[int] = None
+    allow_partial_windows: bool = True
+    integers_as_rows: bool = False
+    lag_fill_strategy: str = "edge"
+
+
+@dataclass(slots=True)
 class GPConfig:
     data: DataConfig
     feature: FeatureConfig = field(default_factory=FeatureConfig)
+    timeframe_primitives: TimeframePrimitiveConfig = field(default_factory=TimeframePrimitiveConfig)
     population: PopulationConfig = field(default_factory=PopulationConfig)
     backend: BackendConfig = field(default_factory=BackendConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
@@ -201,6 +238,30 @@ def load_gp_config(path: str | Path) -> GPConfig:
     numeric_cfg = _merge_mode(fitness_raw.get("numeric"), _default_numeric_fitness())
     boolean_cfg = _merge_mode(fitness_raw.get("boolean"), _default_boolean_fitness())
 
+    timeframe_raw = data.get("timeframe_primitives", {}) or {}
+    timeframe_cfg = TimeframePrimitiveConfig(
+        enabled=bool(timeframe_raw.get("enabled", False)),
+        base_interval_minutes=(
+            float(timeframe_raw["base_interval_minutes"])
+            if timeframe_raw.get("base_interval_minutes") is not None
+            else None
+        ),
+        timestamp_column=timeframe_raw.get("timestamp_column"),
+        timeframes=tuple(timeframe_raw.get("timeframes", TimeframePrimitiveConfig().timeframes)),
+        custom_timeframes=tuple(timeframe_raw.get("custom_timeframes", ())),
+        operators=tuple(timeframe_raw.get("operators", TimeframePrimitiveConfig().operators)),
+        extra_operators=tuple(timeframe_raw.get("extra_operators", ())),
+        dynamic_operators=tuple(dict(entry) for entry in timeframe_raw.get("dynamic_operators", ())),
+        min_periods=(
+            int(timeframe_raw["min_periods"])
+            if timeframe_raw.get("min_periods") is not None
+            else None
+        ),
+        allow_partial_windows=bool(timeframe_raw.get("allow_partial_windows", True)),
+        integers_as_rows=bool(timeframe_raw.get("integers_as_rows", False)),
+        lag_fill_strategy=str(timeframe_raw.get("lag_fill_strategy", "edge")),
+    )
+
     try:
         cfg = GPConfig(
             data=DataConfig(
@@ -210,6 +271,7 @@ def load_gp_config(path: str | Path) -> GPConfig:
                 usecols=tuple(data["data"].get("usecols", [])) or None,
             ),
             feature=FeatureConfig(**data.get("feature", {})),
+            timeframe_primitives=timeframe_cfg,
             population=PopulationConfig(**data.get("population", {})),
             backend=BackendConfig(**data.get("backend", {})),
             fitness=FitnessConfig(numeric=numeric_cfg, boolean=boolean_cfg),

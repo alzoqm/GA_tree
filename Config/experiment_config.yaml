@@ -9,7 +9,7 @@ environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 42
   output_dir: "results/exp_cpcv_test" # 결과 파일이 저장될 디렉터리
-  data_dir: "/root/workspace/GA_tree/dataset"
+  data_dir: "/root/workspace/GA_tree/dataset/dataset_test"
 
 # 1.0. Training Resumption 설정
 resumption:
@@ -44,13 +44,13 @@ wandb:
 data:
   symbol: "BTCUSDT"
   interval: "5m"
-  days_to_fetch: 2555
+  days_to_fetch: 365
   train_ratio: 0.8 # 학습 데이터 비율
   merged_csv_path: "BTCUSDT_5m_30d.csv"
   final_features_path: "final_test_features.csv"
   model_config_path: "model_test_config.yaml"
   feature_engineering:
-    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
+    target_timeframes: ['5m', '30m']
     config_yaml_path: "Config/feature_config.yaml"
 
 # 3. GA 핵심 파라미터
