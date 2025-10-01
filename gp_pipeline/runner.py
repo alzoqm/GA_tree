@@ -223,7 +223,7 @@ class GPFeatureTrainer:
             population,
             total=len(population),
             desc=f"Gen {generation + 1} validations",
-            leave=False,
+            leave=True,
             dynamic_ncols=True,
             file=sys.stdout,
         )
