@@ -1,23 +1,61 @@
 # Configuration for the GP feature generation pipeline
 
 data:
-  path: ../data/gp_sample.csv
-  target_column: target
+  path: ../dataset/dataset_test/BTCUSDT_5m_30d.csv
+  target_column: Close
   feature_columns:
-    - price
-    - volume
-    - spread
+    - Open
+    - High
+    - Low
+    - Volume
+    - Quote asset volume
+    - Number of trades
+    - Taker buy base asset volume
+    - Taker buy quote asset volume
+    - fundingRate
+    - fundingRate_est
+    - markPrice_est
+    - markLow_est
+    - markHigh_est
 
 feature:
   mode: numeric
 
+timeframe_primitives:
+  enabled: true
+  base_interval_minutes: 5
+  timeframes: [30m, 1h, 4h, 1d]
+  operators: [high, low, mean, median, std, var, sum, range, ema, lag, diff, pct_change, zscore, skew, kurtosis]
+  dynamic_operators:
+    - name: custom_mean
+      operator: mean
+      param_kind: bars
+      min_window: 2
+      max_window: 288  # up to 24 hours on 5m data
+      allow_partial: true
+    - name: custom_high
+      operator: high
+      param_kind: minutes
+      min_window: 15
+      max_window: 720  # up to 60 hours
+      allow_partial: false
+    - name: custom_std
+      operator: std
+      param_kind: bars
+      min_window: 3
+      max_window: 96
+      allow_partial: true
+  allow_partial_windows: true
+  integers_as_rows: false
+  lag_fill_strategy: edge
+
 population:
-  size: 32
-  generations: 8
+  size: 1000
+  generations: 20
   min_depth: 1
-  max_depth: 4
+  max_depth: 8
   tournament_size: 5
-  elitism: 2
+  elitism: 100
   mutation_prob: 0.2
   crossover_prob: 0.8
   seed: 42

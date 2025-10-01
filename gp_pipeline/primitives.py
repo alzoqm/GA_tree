@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from functools import partial
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import numpy as np
 from deap import base, creator, gp, tools
 
 from .config import PopulationConfig
-from .ir import IRNode
+
 
 
 SAFE_EPS = 1e-6
@@ -20,7 +19,24 @@ def _rand_const(low: float = -2.0, high: float = 2.0) -> float:
     return float(np.random.uniform(low, high))
 
 
-def build_primitive_set(feature_columns: Sequence[str]) -> gp.PrimitiveSet:
+def _make_passthrough(arity: int):
+    if arity <= 0:
+        return lambda: 0.0
+    if arity == 1:
+        return lambda x: x
+    if arity == 2:
+        return lambda x, y: x
+
+    def _fn(*args):  # pragma: no cover - defensive fallback
+        return args[0]
+
+    return _fn
+
+
+def build_primitive_set(
+    feature_columns: Sequence[str],
+    extra_primitives: Sequence[Tuple[str, int]] | None = None,
+) -> gp.PrimitiveSet:
     pset = gp.PrimitiveSet("MAIN", arity=0)
     for col in feature_columns:
         pset.addTerminal(col, name=f"COL_{col}")
@@ -34,6 +50,9 @@ def build_primitive_set(feature_columns: Sequence[str]) -> gp.PrimitiveSet:
     pset.addPrimitive(lambda x: ("log1p", x), 1, name="log1p")
     pset.addPrimitive(lambda x, lo, hi: ("clip", x, lo, hi), 3, name="clip")
     pset.addEphemeralConstant("const", _rand_const)
+    if extra_primitives:
+        for name, arity in extra_primitives:
+            pset.addPrimitive(_make_passthrough(arity), arity, name=name)
     return pset
 
 
@@ -44,8 +63,13 @@ def ensure_creators(num_metrics: int, weights: Sequence[float]):
         creator.create("GPIndividual", gp.PrimitiveTree, fitness=creator.GPFitness)
 
 
-def build_toolbox(feature_columns: Sequence[str], pop_cfg: PopulationConfig, weights: Sequence[float]):
-    pset = build_primitive_set(feature_columns)
+def build_toolbox(
+    feature_columns: Sequence[str],
+    pop_cfg: PopulationConfig,
+    weights: Sequence[float],
+    extra_primitives: Sequence[Tuple[str, int]] | None = None,
+):
+    pset = build_primitive_set(feature_columns, extra_primitives=extra_primitives)
     ensure_creators(len(weights), weights)
     toolbox = base.Toolbox()
     toolbox.register("expr", gp.genHalfAndHalf, pset=pset, min_=pop_cfg.min_depth, max_=pop_cfg.max_depth)

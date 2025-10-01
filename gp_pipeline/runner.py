@@ -15,10 +15,15 @@ import numpy as np
 import pandas as pd
 from deap import gp, tools
 
-from .config import GPConfig
+from .config import GPConfig, GPConfigError
 from .evaluation import BACKENDS, EvaluationCache, choose_backend
 from .ir import IRNode, tree_to_ir
 from .primitives import build_toolbox
+from .timeframe_ops import (
+    TimeframeOperatorError,
+    build_timeframe_operator_specs,
+    register_timeframe_operators,
+)
 from .validators import run_boolean_validator, run_numeric_validator
 
 
@@ -68,8 +73,30 @@ class GPFeatureTrainer:
             for weight, maximize in zip(self.mode_weights, self.mode_maximize)
         ]
 
-        self.toolbox = build_toolbox(self.feature_columns, cfg.population, creator_weights)
-        self.backend_name = choose_backend(cfg.backend.primary, cfg.backend.fallbacks)
+        try:
+            timeframe_specs = build_timeframe_operator_specs(cfg.timeframe_primitives, self.df_full)
+        except TimeframeOperatorError as exc:
+            raise GPConfigError(str(exc)) from exc
+        register_timeframe_operators(timeframe_specs)
+        self.timeframe_specs = timeframe_specs
+        extra_primitives = [(name, spec.arity) for name, spec in timeframe_specs.items()]
+
+        self.toolbox = build_toolbox(
+            self.feature_columns,
+            cfg.population,
+            creator_weights,
+            extra_primitives=extra_primitives or None,
+        )
+
+        backend_candidates = (cfg.backend.primary,) + tuple(cfg.backend.fallbacks)
+        if timeframe_specs:
+            if "numpy" not in backend_candidates:
+                raise GPConfigError(
+                    "Timeframe primitives require the numpy backend; add 'numpy' to backend.primary or fallbacks."
+                )
+            self.backend_name = "numpy"
+        else:
+            self.backend_name = choose_backend(cfg.backend.primary, cfg.backend.fallbacks)
         self.backend_fn = BACKENDS[self.backend_name]
         self.low_ratio = max(0.0, min(cfg.backend.low_fidelity_ratio, 1.0))
         self.full_eval_top_k = max(0.0, min(cfg.backend.full_eval_top_k, 1.0))
