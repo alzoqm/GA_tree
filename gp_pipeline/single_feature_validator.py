@@ -424,7 +424,7 @@ def _compose_fitness(
     pooled_pvalues: Sequence[float],
     significant: bool,
 ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float], Dict[str, float | bool]]:
-    min_pvalue_clip = 1e-16
+    min_pvalue_clip = 1e-300
     p_clipped = float(np.clip(combined_pvalue, min_pvalue_clip, 1.0))
     neg_log_p = float(-np.log10(p_clipped))
     significance_margin = max(0.0, alpha - combined_pvalue)

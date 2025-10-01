@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from math import erf, sqrt, pi
+from math import erf, erfc, sqrt, pi
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import logging
@@ -273,6 +273,43 @@ def _apply_hsic_memory_guard(
         cfg["rff_dim"] = max(min_dim, min(base_dim, max_dim))
 
 
+MIN_PVALUE = 1e-300
+LOG_MIN_PVALUE = np.log(MIN_PVALUE)
+LOG_TWO = np.log(2.0)
+SQRT_TWO = np.sqrt(2.0)
+LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
+
+
+@njit(cache=True, fastmath=False)
+def _normal_sf_asymptotic(z: float) -> float:
+    inv = 1.0 / z
+    inv_sq = inv * inv
+    corr = 1.0 - inv_sq + 3.0 * inv_sq * inv_sq
+    if corr < 1e-12:
+        corr = 1e-12
+    log_sf = -0.5 * z * z - np.log(z) - LOG_SQRT_2PI + np.log(corr)
+    if log_sf < LOG_MIN_PVALUE - LOG_TWO:
+        return MIN_PVALUE * 0.5
+    return float(np.exp(log_sf))
+
+
+@njit(cache=True, fastmath=False)
+def _two_sided_pvalue_from_z(z: float) -> float:
+    az = abs(z)
+    if az <= 0.0:
+        return 1.0
+    if az < 8.0:
+        sf = 0.5 * erfc(az / SQRT_TWO)
+    else:
+        sf = _normal_sf_asymptotic(az)
+    p = 2.0 * sf
+    if p < MIN_PVALUE:
+        p = MIN_PVALUE
+    if p > 1.0:
+        p = 1.0
+    return p
+
+
 @njit(cache=True, fastmath=False)
 def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -288,7 +325,7 @@ def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) ->
     # 4) rho and p-values
     p = Rc.shape[1]
     rhos = np.empty(p, dtype=np.float32)
-    pvals = np.empty(p, dtype=np.float32)
+    pvals = np.empty(p, dtype=np.float64)
     n = Rc.shape[0]
     for j in range(p):
         den = denom_x[j] * denom_y
@@ -305,9 +342,8 @@ def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) ->
         if n <= 3:
             pvals[j] = 1.0
         else:
-            z = r * np.sqrt(n - 1.0)
-            # 2 * (1 - Phi(|z|))
-            pvals[j] = max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / np.sqrt(2.0))))))
+            z = float(r) * np.sqrt(float(n - 1.0))
+            pvals[j] = _two_sided_pvalue_from_z(z)
     return rhos, pvals
 
 
@@ -735,7 +771,7 @@ def _combine_simes(pvalues: Sequence[float]) -> float:
 
 
 def _combine_fisher(pvalues: Sequence[float]) -> float:
-    stat = -2.0 * sum(np.log(p if p > 1e-16 else 1e-16) for p in pvalues)
+    stat = -2.0 * sum(np.log(p if p > MIN_PVALUE else MIN_PVALUE) for p in pvalues)
     df = 2.0 * len(pvalues)
     return float(max(0.0, min(1.0, chi2_sf(stat, df))))
 
@@ -761,7 +797,7 @@ def _empirical_brown(pvalues: Sequence[float], covariance: Optional[np.ndarray])
         return 1.0
     if k == 1 or covariance is None:
         return _combine_simes(pvals)
-    clipped = np.clip(pvals, 1e-16, 1.0)
+    clipped = np.clip(pvals, MIN_PVALUE, 1.0)
     x = -2.0 * np.log(clipped)
     cov = np.asarray(covariance, dtype=float)
     if cov.shape != (k, k):
@@ -793,7 +829,7 @@ def _estimate_empirical_covariance(
             continue
         for idx, value in mapping.items():
             if 0 <= idx < test_count:
-                rows[row_idx, idx] = -2.0 * np.log(max(float(value), 1e-16))
+                rows[row_idx, idx] = -2.0 * np.log(max(float(value), MIN_PVALUE))
         valid_row[row_idx] = not np.isnan(rows[row_idx]).all()
 
     if valid_row.sum() < 2:
@@ -997,7 +1033,7 @@ def _evaluate_spearman_batch(
     rhos, pvals = _spearman_batch_nb(X_batch, y_centered, float(denom_y))
     effects = np.abs(rhos).astype(np.float32, copy=False)
     # cliffs_delta is applied later per-feature (to preserve exact behavior & utils impl)
-    return effects, pvals.astype(np.float32, copy=False)
+    return effects, pvals.astype(np.float64, copy=False)
 
 
 # ==================== Method collection (per feature, but batched outer) ====================

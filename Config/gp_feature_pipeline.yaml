@@ -2,11 +2,12 @@
 
 data:
   path: ../dataset/dataset_test/BTCUSDT_5m_30d.csv
-  target_column: Close
+  target_column: None
   feature_columns:
     - Open
     - High
     - Low
+    - Close
     - Volume
     - Quote asset volume
     - Number of trades
@@ -17,7 +18,7 @@ data:
     - markPrice_est
     - markLow_est
     - markHigh_est
-  max_target_corr: 0.995
+  max_target_corr: 1.
 
 feature:
   mode: numeric
