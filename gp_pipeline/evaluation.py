@@ -48,6 +48,27 @@ class EvaluatorError(RuntimeError):
 SAFE_EPS = 1e-6
 
 
+def _safe_log1p(x: np.ndarray) -> np.ndarray:
+    """Compute log1p while guarding against domain errors and propagating NaNs."""
+    if not isinstance(x, np.ndarray):
+        x = np.asarray(x, dtype=np.float64)
+    else:
+        x = x.astype(np.float64, copy=False)
+
+    out = np.empty_like(x, dtype=np.float64)
+    invalid_mask = ~np.isfinite(x)
+    domain_violation = x <= -1.0
+    valid_mask = ~(invalid_mask | domain_violation)
+
+    if np.any(valid_mask):
+        out[valid_mask] = np.log1p(x[valid_mask])
+    out[domain_violation] = np.nan
+    if np.any(invalid_mask):
+        out[invalid_mask] = x[invalid_mask]
+
+    return out
+
+
 def evaluate_numpy(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationCache] = None) -> np.ndarray:
     key = hash_ir(node)
     if cache is not None:
@@ -56,9 +77,9 @@ def evaluate_numpy(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationCac
             return cached
 
     if node.kind == "var":
-        arr = df[node.value].to_numpy(dtype=np.float32, copy=False)
+        arr = df[node.value].to_numpy(dtype=np.float64, copy=False)
     elif node.kind == "const":
-        arr = np.full(len(df), float(node.value), dtype=np.float32)
+        arr = np.full(len(df), float(node.value), dtype=np.float64)
     elif node.kind == "op":
         args = [evaluate_numpy(child, df, cache) for child in node.args]
         arr = _apply_numpy(node.value, args)
@@ -84,7 +105,7 @@ NUMPY_OPERATORS: Mapping[str, callable] = {
     "min": np.minimum,
     "max": np.maximum,
     "abs": np.abs,
-    "log1p": np.log1p,
+    "log1p": _safe_log1p,
     "clip": lambda x, lo, hi: np.clip(x, lo, hi),
 }
 
@@ -149,12 +170,12 @@ def evaluate_numexpr(node: IRNode, df: pd.DataFrame, cache: Optional[EvaluationC
         return arr
     expr = ir_to_numexpr(node)
     local_dict = {
-        col: df[col].to_numpy(dtype=np.float32, copy=False)
+        col: df[col].to_numpy(dtype=np.float64, copy=False)
         for col in _collect_vars(node)
     }
     arr = ne.evaluate(expr, local_dict=local_dict)
     if np.isscalar(arr):
-        arr = np.full(len(df), float(arr), dtype=np.float32)
+        arr = np.full(len(df), float(arr), dtype=np.float64)
     if cache is not None:
         cache.set_array(key, arr)
     return arr
