@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import operator
 import os
 import random
 import sys
@@ -139,8 +140,18 @@ class GPFeatureTrainer:
             tools.selTournament,
             tournsize=cfg.population.tournament_size,
         )
-        self.toolbox.decorate("mate", gp.staticLimit(key=len, max_value=cfg.population.max_depth * 2))
-        self.toolbox.decorate("mutate", gp.staticLimit(key=len, max_value=cfg.population.max_depth * 2))
+        height_limit = gp.staticLimit(
+            key=operator.attrgetter("height"),
+            max_value=cfg.population.max_depth,
+        )
+        size_limit = gp.staticLimit(
+            key=len,
+            max_value=cfg.population.max_depth * 2,
+        )
+        self.toolbox.decorate("mate", height_limit)
+        self.toolbox.decorate("mate", size_limit)
+        self.toolbox.decorate("mutate", height_limit)
+        self.toolbox.decorate("mutate", size_limit)
 
     def _seed(self, seed: Optional[int]) -> None:
         # Initialize the generator used for low-fidelity sampling first so it always exists.
