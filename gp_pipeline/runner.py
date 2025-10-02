@@ -18,6 +18,8 @@ import pandas as pd
 from deap import gp, tools
 from tqdm.auto import tqdm
 
+from data.target import compute_target
+
 from .config import GPConfig, GPConfigError
 from .evaluation import BACKENDS, EvaluationCache, choose_backend
 from .ir import IRNode, tree_to_ir
@@ -59,6 +61,10 @@ class GPFeatureTrainer:
         self.cfg = cfg
         self._seed(cfg.population.seed)
         self.df_full, feature_columns, dropped_features = self._load_dataframe(cfg)
+        if cfg.data.target_column is None:
+            raise GPConfigError(
+                "Target column could not be resolved from config and automatic generation"
+            )
         self.feature_columns = feature_columns
         self.target_column = cfg.data.target_column
         self.feature_mode = cfg.feature.mode.lower()
@@ -145,9 +151,15 @@ class GPFeatureTrainer:
         np.random.seed(seed)
 
     def _load_dataframe(self, cfg: GPConfig) -> Tuple[pd.DataFrame, List[str], List[str]]:
-        usecols = list(cfg.data.feature_columns) + [cfg.data.target_column]
+        feature_columns = [str(col) for col in cfg.data.feature_columns]
+        target_column = cfg.data.target_column
+
         if cfg.data.usecols:
-            usecols = list(cfg.data.usecols)
+            usecols = [col for col in cfg.data.usecols if col is not None]
+        else:
+            usecols = list(feature_columns)
+            if target_column:
+                usecols.append(target_column)
         path = cfg.data.path
         suffix = path.suffix.lower()
         if suffix == ".parquet":
@@ -159,21 +171,43 @@ class GPFeatureTrainer:
             df = df[usecols]
         else:
             raise ValueError(f"Unsupported data extension: {suffix}")
-        missing = set(cfg.data.feature_columns + (cfg.data.target_column,)) - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing required columns in dataset: {missing}")
         df = df.reset_index(drop=True)
 
-        feature_columns = [str(col) for col in cfg.data.feature_columns]
+        missing_features = set(feature_columns) - set(df.columns)
+        if missing_features:
+            raise ValueError(f"Missing required feature columns in dataset: {missing_features}")
+
+        if target_column and target_column not in df.columns:
+            raise ValueError(f"Target column '{target_column}' not found in dataset")
+
+        if target_column is None:
+            print('make target')
+            column_name, target_series = compute_target(
+                df,
+                mode="multi_horizon_risk_adjusted",
+                params={},
+            )
+            if column_name != target_series.name:
+                target_series = target_series.rename(column_name)
+            if not target_series.index.equals(df.index):
+                target_series = target_series.reindex(df.index)
+            df[column_name] = target_series
+            cfg.data.target_column = column_name
+            target_column = column_name
+            logger.info(
+                "Generated target column '%s' using multi_horizon_risk_adjusted mode",
+                column_name,
+            )
+
         dropped_features: List[str] = []
         corr_threshold = cfg.data.max_target_corr
-        if corr_threshold is not None:
+        if corr_threshold is not None and target_column is not None:
             if not 0.0 <= corr_threshold <= 1.0:
                 raise GPConfigError(
                     "data.max_target_corr must be between 0 and 1 inclusive"
                 )
-            numeric_cols = df[[c for c in feature_columns + [cfg.data.target_column] if c in df.columns]].select_dtypes(include="number")
-            target_series = numeric_cols.get(cfg.data.target_column)
+            numeric_cols = df[[c for c in feature_columns + [target_column] if c in df.columns]].select_dtypes(include="number")
+            target_series = numeric_cols.get(target_column)
             if target_series is not None:
                 candidate_cols = [col for col in feature_columns if col in numeric_cols.columns]
                 if candidate_cols:

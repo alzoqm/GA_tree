@@ -329,7 +329,9 @@ def _finalize_result(
     if operator in {"skew", "kurtosis"}:
         return result.fillna(0.0)
     if allow_partial:
-        return result.bfill().ffill()
+        # Only use past information to impute partial windows to avoid future leaks.
+        forward_filled = result.ffill()
+        return forward_filled.fillna(0.0)
     return result.fillna(0.0)
 
 
