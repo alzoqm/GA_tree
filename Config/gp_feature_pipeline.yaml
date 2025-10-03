@@ -13,20 +13,21 @@ data:
     - Number of trades
     - Taker buy base asset volume
     - Taker buy quote asset volume
-    - fundingRate
-    - fundingRate_est
-    - markPrice_est
-    - markLow_est
-    - markHigh_est
+    # - fundingRate
+    # - fundingRate_est
+    # - markPrice_est
+    # - markLow_est
+    # - markHigh_est
   max_target_corr: 1.
 
 feature:
-  mode: numeric
+  mode: boolean # boolean, numeric
 
 timeframe_primitives:
   enabled: true
   base_interval_minutes: 5
-  timeframes: [30m, 1h, 4h, 1d]
+  # timeframes: [30m, 1h, 4h, 1d]
+  timeframes: [30m, 1h, 4h]
   operators: [high, low, mean, median, std, var, sum, range, ema, lag, diff, pct_change, zscore, skew, kurtosis]
   dynamic_operators:
     - name: custom_mean
