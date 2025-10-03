@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from math import erf, sqrt, pi
+from math import erf, erfc, sqrt, pi
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import logging
@@ -113,6 +113,73 @@ def _approx_spearman_pvalue(r: float, n: int) -> float:
     z = r * sqrt(n - 1)
     # two-sided using normal CDF via error function
     return float(max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / sqrt(2)))))))
+
+
+# ==================== Effect size helpers ====================
+
+def _median_or_zero(values: Iterable[float]) -> float:
+    data = list(values)
+    if not data:
+        return 0.0
+    return float(np.median(np.asarray(data, dtype=np.float64)))
+
+
+def _build_delta_group_masks(target: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Create boolean masks that split the target into two disjoint groups."""
+
+    values = np.asarray(target, dtype=np.float64)
+    finite_mask = np.isfinite(values)
+    if not finite_mask.any():
+        return None
+
+    valid = values[finite_mask]
+    if valid.size < 2:
+        return None
+
+    unique = np.unique(valid)
+    group_a: Optional[np.ndarray]
+    group_b: Optional[np.ndarray]
+
+    if unique.size == 2:
+        group_a = valid == unique[0]
+        group_b = valid == unique[1]
+    else:
+        pos_mask = valid > 0
+        neg_mask = valid < 0
+        if pos_mask.any() and neg_mask.any():
+            group_a = neg_mask
+            group_b = pos_mask
+        else:
+            q25, q75 = np.quantile(valid, [0.25, 0.75])
+            group_a = None
+            group_b = None
+            if q75 > q25:
+                low = valid <= q25
+                high = valid >= q75
+                overlap = low & high
+                if overlap.any():
+                    low = low & ~overlap
+                    high = high & ~overlap
+                if low.any() and high.any():
+                    group_a = low
+                    group_b = high
+            if group_a is None or group_b is None or not group_a.any() or not group_b.any():
+                median = float(np.median(valid))
+                low = valid < median
+                high = valid > median
+                if low.any() and high.any():
+                    group_a = low
+                    group_b = high
+                else:
+                    return None
+
+    idx_a = np.zeros_like(values, dtype=bool)
+    idx_b = np.zeros_like(values, dtype=bool)
+    idx_a[finite_mask] = group_a
+    idx_b[finite_mask] = group_b
+    if not idx_a.any() or not idx_b.any():
+        return None
+    return idx_a, idx_b
 
 
 # ==================== Numba-accelerated rank helpers ====================
@@ -273,6 +340,43 @@ def _apply_hsic_memory_guard(
         cfg["rff_dim"] = max(min_dim, min(base_dim, max_dim))
 
 
+MIN_PVALUE = 1e-300
+LOG_MIN_PVALUE = np.log(MIN_PVALUE)
+LOG_TWO = np.log(2.0)
+SQRT_TWO = np.sqrt(2.0)
+LOG_SQRT_2PI = 0.5 * np.log(2.0 * np.pi)
+
+
+@njit(cache=True, fastmath=False)
+def _normal_sf_asymptotic(z: float) -> float:
+    inv = 1.0 / z
+    inv_sq = inv * inv
+    corr = 1.0 - inv_sq + 3.0 * inv_sq * inv_sq
+    if corr < 1e-12:
+        corr = 1e-12
+    log_sf = -0.5 * z * z - np.log(z) - LOG_SQRT_2PI + np.log(corr)
+    if log_sf < LOG_MIN_PVALUE - LOG_TWO:
+        return MIN_PVALUE * 0.5
+    return float(np.exp(log_sf))
+
+
+@njit(cache=True, fastmath=False)
+def _two_sided_pvalue_from_z(z: float) -> float:
+    az = abs(z)
+    if az <= 0.0:
+        return 1.0
+    if az < 8.0:
+        sf = 0.5 * erfc(az / SQRT_TWO)
+    else:
+        sf = _normal_sf_asymptotic(az)
+    p = 2.0 * sf
+    if p < MIN_PVALUE:
+        p = MIN_PVALUE
+    if p > 1.0:
+        p = 1.0
+    return p
+
+
 @njit(cache=True, fastmath=False)
 def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -288,7 +392,7 @@ def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) ->
     # 4) rho and p-values
     p = Rc.shape[1]
     rhos = np.empty(p, dtype=np.float32)
-    pvals = np.empty(p, dtype=np.float32)
+    pvals = np.empty(p, dtype=np.float64)
     n = Rc.shape[0]
     for j in range(p):
         den = denom_x[j] * denom_y
@@ -305,9 +409,8 @@ def _spearman_batch_nb(X: np.ndarray, y_centered: np.ndarray, denom_y: float) ->
         if n <= 3:
             pvals[j] = 1.0
         else:
-            z = r * np.sqrt(n - 1.0)
-            # 2 * (1 - Phi(|z|))
-            pvals[j] = max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / np.sqrt(2.0))))))
+            z = float(r) * np.sqrt(float(n - 1.0))
+            pvals[j] = _two_sided_pvalue_from_z(z)
     return rhos, pvals
 
 
@@ -735,7 +838,7 @@ def _combine_simes(pvalues: Sequence[float]) -> float:
 
 
 def _combine_fisher(pvalues: Sequence[float]) -> float:
-    stat = -2.0 * sum(np.log(p if p > 1e-16 else 1e-16) for p in pvalues)
+    stat = -2.0 * sum(np.log(p if p > MIN_PVALUE else MIN_PVALUE) for p in pvalues)
     df = 2.0 * len(pvalues)
     return float(max(0.0, min(1.0, chi2_sf(stat, df))))
 
@@ -761,7 +864,7 @@ def _empirical_brown(pvalues: Sequence[float], covariance: Optional[np.ndarray])
         return 1.0
     if k == 1 or covariance is None:
         return _combine_simes(pvals)
-    clipped = np.clip(pvals, 1e-16, 1.0)
+    clipped = np.clip(pvals, MIN_PVALUE, 1.0)
     x = -2.0 * np.log(clipped)
     cov = np.asarray(covariance, dtype=float)
     if cov.shape != (k, k):
@@ -793,7 +896,7 @@ def _estimate_empirical_covariance(
             continue
         for idx, value in mapping.items():
             if 0 <= idx < test_count:
-                rows[row_idx, idx] = -2.0 * np.log(max(float(value), 1e-16))
+                rows[row_idx, idx] = -2.0 * np.log(max(float(value), MIN_PVALUE))
         valid_row[row_idx] = not np.isnan(rows[row_idx]).all()
 
     if valid_row.sum() < 2:
@@ -997,7 +1100,7 @@ def _evaluate_spearman_batch(
     rhos, pvals = _spearman_batch_nb(X_batch, y_centered, float(denom_y))
     effects = np.abs(rhos).astype(np.float32, copy=False)
     # cliffs_delta is applied later per-feature (to preserve exact behavior & utils impl)
-    return effects, pvals.astype(np.float32, copy=False)
+    return effects, pvals.astype(np.float64, copy=False)
 
 
 # ==================== Method collection (per feature, but batched outer) ====================
@@ -1198,11 +1301,13 @@ def screening_out_of_fold(
                     hsic_min_dim,
                 )
 
+            delta_masks: Optional[Tuple[np.ndarray, np.ndarray]] = None
             if supervised_mode and target_array is not None:
                 target_values = _as_float32(target_array[indices])  # copy minimal slice
                 ry = _rankdata_average_1d_nb(target_values)
                 ry_centered = ry - ry.mean(dtype=np.float32)
                 denom_y = float(np.sqrt(np.sum(ry_centered * ry_centered, dtype=np.float64)))
+                delta_masks = _build_delta_group_masks(target_values)
 
                 hsic_bw_keys: set = set()
                 hsic_rff_keys: set = set()
@@ -1263,6 +1368,7 @@ def screening_out_of_fold(
             else:
                 target_values = None
                 fold_ctx = None
+                delta_masks = None
 
             if not feature_list:
                 continue
@@ -1329,7 +1435,20 @@ def screening_out_of_fold(
                     if need_any_delta:
                         delta_vec = np.empty(Xb.shape[1], dtype=np.float32)
                         for j in range(Xb.shape[1]):  # Python loop only for delta (utils impl)
-                            delta_vec[j] = float(abs(cliffs_delta(Xb[:, j], target_values)))
+                            if delta_masks is None:
+                                delta_vec[j] = 0.0
+                                continue
+                            column = Xb[:, j]
+                            finite_mask = np.isfinite(column)
+                            if not finite_mask.any():
+                                delta_vec[j] = 0.0
+                                continue
+                            group_a_mask = finite_mask & delta_masks[0]
+                            group_b_mask = finite_mask & delta_masks[1]
+                            if not group_a_mask.any() or not group_b_mask.any():
+                                delta_vec[j] = 0.0
+                                continue
+                            delta_vec[j] = float(abs(cliffs_delta(column[group_a_mask], column[group_b_mask])))
 
                     # 3) write results per alias (spearman / spearman_rho)
                     for method_name, cfg in spearman_methods:
@@ -1343,8 +1462,6 @@ def screening_out_of_fold(
                             if need_delta and delta_vec is not None:
                                 d = float(delta_vec[j])
                                 extras["cliffs_delta"] = d
-                                if d > effect:
-                                    effect = d
                                 per_feature_deltas[feat][test_idx] = abs(d)
                             per_feature_effects[feat][test_idx] = effect
                             per_feature_pvals[feat][test_idx] = pval
@@ -1423,9 +1540,9 @@ def screening_out_of_fold(
             combined = _combine_pvalues(pvals, method=combine_method)
         combined_pvalues[feature] = combined
         effects_map = per_feature_effects.get(feature, {})
-        effect_summary[feature] = float(max(effects_map.values())) if effects_map else 0.0
+        effect_summary[feature] = _median_or_zero(effects_map.values())
         delta_map = per_feature_deltas.get(feature, {})
-        delta_summary[feature] = float(max(delta_map.values())) if delta_map else 0.0
+        delta_summary[feature] = _median_or_zero(delta_map.values())
 
     selected = _apply_fdr(combined_pvalues, alpha=fdr_alpha, method=fdr_method)
     if effect_min > 0.0 or cliffs_delta_min > 0.0:

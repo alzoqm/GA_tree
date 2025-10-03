@@ -128,9 +128,10 @@ class ValidatorConfig:
 @dataclass(slots=True)
 class DataConfig:
     path: Path
-    target_column: str
+    target_column: Optional[str]
     feature_columns: Sequence[str]
     usecols: Optional[Sequence[str]] = None
+    max_target_corr: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -176,7 +177,7 @@ class TimeframePrimitiveConfig:
     extra_operators: Sequence[str] = field(default_factory=tuple)
     dynamic_operators: Sequence[Dict[str, Any]] = field(default_factory=tuple)
     min_periods: Optional[int] = None
-    allow_partial_windows: bool = True
+    allow_partial_windows: bool = False
     integers_as_rows: bool = False
     lag_fill_strategy: str = "edge"
 
@@ -263,12 +264,28 @@ def load_gp_config(path: str | Path) -> GPConfig:
     )
 
     try:
+        raw_target = data["data"].get("target_column")
+        if raw_target is None:
+            target_column = None
+        else:
+            target_str = str(raw_target).strip()
+            target_column = (
+                None
+                if target_str.lower() in {"", "none", "null", "~"}
+                else target_str
+            )
+
         cfg = GPConfig(
             data=DataConfig(
                 path=Path(data["data"]["path"]),
-                target_column=data["data"]["target_column"],
+                target_column=target_column,
                 feature_columns=tuple(data["data"]["feature_columns"]),
                 usecols=tuple(data["data"].get("usecols", [])) or None,
+                max_target_corr=(
+                    float(data["data"]["max_target_corr"])
+                    if data["data"].get("max_target_corr") is not None
+                    else None
+                ),
             ),
             feature=FeatureConfig(**data.get("feature", {})),
             timeframe_primitives=timeframe_cfg,

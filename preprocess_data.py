@@ -1,6 +1,7 @@
 # /preprocess_data.py
 import os
 import sys
+import argparse
 import yaml
 import pandas as pd
 import logging
@@ -38,9 +39,13 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         sys.exit(1)
 
 
-def run_preprocessing():
+def run_preprocessing(generate_features=True):
     """
-    데이터 다운로드, 피처 생성 및 저장을 위한 전체 전처리 파이프라인을 실행합니다.
+    데이터 다운로드, 피처 생성 및 저장을 위한 전처리 파이프라인을 실행합니다.
+
+    Args:
+        generate_features (bool): True면 전체 파이프라인을 실행하고, False면
+            원본 데이터 저장까지 수행한 뒤 종료합니다.
     """
     logging.info("==============================================")
     logging.info("=== Starting Data Preprocessing Pipeline ===")
@@ -213,6 +218,11 @@ def run_preprocessing():
         os.makedirs(env_cfg['data_dir'], exist_ok=True)
         source_df.to_csv(data_csv_path, index=False)
 
+    if not generate_features:
+        logging.info("Raw dataset prepared successfully. Skipping feature generation per argument.")
+        logging.info("Preprocessing (raw only) finished.")
+        return
+
     # --- 2. Multi-Timeframe 피처 생성 ---
     logging.info("Generating multi-timeframe features from YAML config...")
     final_df, model_config = run_feature_generation_from_yaml(
@@ -259,4 +269,12 @@ def run_preprocessing():
 
 
 if __name__ == "__main__":
-    run_preprocessing()
+    parser = argparse.ArgumentParser(description="Run data preprocessing pipeline.")
+    parser.add_argument(
+        "--raw-only",
+        action="store_true",
+        help="Download/load raw data and stop before feature generation.",
+    )
+    args = parser.parse_args()
+
+    run_preprocessing(generate_features=not args.raw_only)

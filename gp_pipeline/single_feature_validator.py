@@ -424,32 +424,35 @@ def _compose_fitness(
     pooled_pvalues: Sequence[float],
     significant: bool,
 ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float], Dict[str, float | bool]]:
-    eps = 1e-300
-    p_clipped = max(combined_pvalue, eps)
+    min_pvalue_clip = 1e-300
+    p_clipped = float(np.clip(combined_pvalue, min_pvalue_clip, 1.0))
     neg_log_p = float(-np.log10(p_clipped))
     significance_margin = max(0.0, alpha - combined_pvalue)
 
-    if pooled_effects:
-        effect_mean = float(np.mean(pooled_effects))
-        effect_std = float(np.std(pooled_effects))
-    else:
-        effect_mean = effect_size
-        effect_std = 0.0
-    if pooled_pvalues:
-        pvalue_mean = float(np.mean(pooled_pvalues))
-        pvalue_std = float(np.std(pooled_pvalues))
-    else:
-        pvalue_mean = combined_pvalue
-        pvalue_std = 0.0
+    def _finite_array(values: Sequence[float]) -> np.ndarray:
+        arr = np.asarray(values, dtype=float)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+        return arr[np.isfinite(arr)]
 
-    effect_stability = 1.0 / (1.0 + effect_std)
-    pvalue_consistency = 1.0 / (1.0 + pvalue_std)
+    finite_effects = _finite_array(pooled_effects)
+    finite_pvalues = _finite_array(pooled_pvalues)
+
+    base_effect = float(effect_size) if np.isfinite(effect_size) else 0.0
+    base_delta = float(cliffs_delta) if np.isfinite(cliffs_delta) else 0.0
+    effect_mean = float(finite_effects.mean()) if finite_effects.size else base_effect
+    effect_std = float(finite_effects.std()) if finite_effects.size else 0.0
+    pvalue_mean = float(finite_pvalues.mean()) if finite_pvalues.size else float(np.clip(combined_pvalue, 0.0, 1.0))
+    pvalue_std = float(finite_pvalues.std()) if finite_pvalues.size else 0.0
+
+    effect_stability = float(np.clip(1.0 / (1.0 + effect_std), 0.0, 1.0))
+    pvalue_consistency = float(np.clip(1.0 / (1.0 + pvalue_std), 0.0, 1.0))
 
     fitness_objectives: Dict[str, float] = {
-        "min_pvalue": combined_pvalue,
+        "min_pvalue": p_clipped,
         "neg_log_pvalue": neg_log_p,
-        "effect_size": effect_size,
-        "cliffs_delta": cliffs_delta,
+        "effect_size": base_effect,
+        "cliffs_delta": base_delta,
         "significance_margin": significance_margin,
         "mean_method_effect": effect_mean,
         "effect_stability": effect_stability,

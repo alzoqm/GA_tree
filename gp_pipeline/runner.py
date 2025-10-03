@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import operator
 import os
 import random
 import sys
@@ -17,6 +19,8 @@ import pandas as pd
 from deap import gp, tools
 from tqdm.auto import tqdm
 
+from data.target import compute_target
+
 from .config import GPConfig, GPConfigError
 from .evaluation import BACKENDS, EvaluationCache, choose_backend
 from .ir import IRNode, tree_to_ir
@@ -27,6 +31,9 @@ from .timeframe_ops import (
     register_timeframe_operators,
 )
 from .validators import run_boolean_validator, run_numeric_validator
+
+
+logger = logging.getLogger(__name__)
 
 
 PathLike = os.PathLike[str] | str
@@ -45,8 +52,8 @@ class IndividualRecord:
 @dataclass(slots=True)
 class GenerationSummary:
     generation: int
-    best_metrics: Dict[str, float]
-    mean_metrics: Dict[str, float]
+    best_metrics: Dict[str, Optional[float]]
+    mean_metrics: Dict[str, Optional[float]]
     best_expression: str
 
 
@@ -54,8 +61,12 @@ class GPFeatureTrainer:
     def __init__(self, cfg: GPConfig) -> None:
         self.cfg = cfg
         self._seed(cfg.population.seed)
-        self.df_full = self._load_dataframe(cfg)
-        self.feature_columns = list(cfg.data.feature_columns)
+        self.df_full, feature_columns, dropped_features = self._load_dataframe(cfg)
+        if cfg.data.target_column is None:
+            raise GPConfigError(
+                "Target column could not be resolved from config and automatic generation"
+            )
+        self.feature_columns = feature_columns
         self.target_column = cfg.data.target_column
         self.feature_mode = cfg.feature.mode.lower()
         if self.feature_mode not in {"numeric", "boolean"}:
@@ -108,6 +119,13 @@ class GPFeatureTrainer:
         self.history: List[GenerationSummary] = []
         self.best_records: Dict[str, IndividualRecord] = {}
         self.metric_goals: Dict[str, bool] = {}
+        if dropped_features:
+            logger.warning(
+                "Dropped %d feature(s) highly correlated with target %s: %s",
+                len(dropped_features),
+                self.target_column,
+                ", ".join(dropped_features),
+            )
         self._feature_counter = count(1)
 
         self.toolbox.register("mate", gp.cxOnePoint)
@@ -122,8 +140,18 @@ class GPFeatureTrainer:
             tools.selTournament,
             tournsize=cfg.population.tournament_size,
         )
-        self.toolbox.decorate("mate", gp.staticLimit(key=len, max_value=cfg.population.max_depth * 2))
-        self.toolbox.decorate("mutate", gp.staticLimit(key=len, max_value=cfg.population.max_depth * 2))
+        height_limit = gp.staticLimit(
+            key=operator.attrgetter("height"),
+            max_value=cfg.population.max_depth,
+        )
+        size_limit = gp.staticLimit(
+            key=len,
+            max_value=cfg.population.max_depth * 2,
+        )
+        self.toolbox.decorate("mate", height_limit)
+        self.toolbox.decorate("mate", size_limit)
+        self.toolbox.decorate("mutate", height_limit)
+        self.toolbox.decorate("mutate", size_limit)
 
     def _seed(self, seed: Optional[int]) -> None:
         # Initialize the generator used for low-fidelity sampling first so it always exists.
@@ -133,10 +161,16 @@ class GPFeatureTrainer:
         random.seed(seed)
         np.random.seed(seed)
 
-    def _load_dataframe(self, cfg: GPConfig) -> pd.DataFrame:
-        usecols = list(cfg.data.feature_columns) + [cfg.data.target_column]
+    def _load_dataframe(self, cfg: GPConfig) -> Tuple[pd.DataFrame, List[str], List[str]]:
+        feature_columns = [str(col) for col in cfg.data.feature_columns]
+        target_column = cfg.data.target_column
+
         if cfg.data.usecols:
-            usecols = list(cfg.data.usecols)
+            usecols = [col for col in cfg.data.usecols if col is not None]
+        else:
+            usecols = list(feature_columns)
+            if target_column:
+                usecols.append(target_column)
         path = cfg.data.path
         suffix = path.suffix.lower()
         if suffix == ".parquet":
@@ -148,10 +182,60 @@ class GPFeatureTrainer:
             df = df[usecols]
         else:
             raise ValueError(f"Unsupported data extension: {suffix}")
-        missing = set(cfg.data.feature_columns + (cfg.data.target_column,)) - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing required columns in dataset: {missing}")
-        return df.reset_index(drop=True)
+        df = df.reset_index(drop=True)
+
+        missing_features = set(feature_columns) - set(df.columns)
+        if missing_features:
+            raise ValueError(f"Missing required feature columns in dataset: {missing_features}")
+
+        if target_column and target_column not in df.columns:
+            raise ValueError(f"Target column '{target_column}' not found in dataset")
+
+        if target_column is None:
+            print('make target')
+            column_name, target_series = compute_target(
+                df,
+                mode="multi_horizon_risk_adjusted",
+                params={},
+            )
+            if column_name != target_series.name:
+                target_series = target_series.rename(column_name)
+            if not target_series.index.equals(df.index):
+                target_series = target_series.reindex(df.index)
+            df[column_name] = target_series
+            cfg.data.target_column = column_name
+            target_column = column_name
+            logger.info(
+                "Generated target column '%s' using multi_horizon_risk_adjusted mode",
+                column_name,
+            )
+
+        dropped_features: List[str] = []
+        corr_threshold = cfg.data.max_target_corr
+        if corr_threshold is not None and target_column is not None:
+            if not 0.0 <= corr_threshold <= 1.0:
+                raise GPConfigError(
+                    "data.max_target_corr must be between 0 and 1 inclusive"
+                )
+            numeric_cols = df[[c for c in feature_columns + [target_column] if c in df.columns]].select_dtypes(include="number")
+            target_series = numeric_cols.get(target_column)
+            if target_series is not None:
+                candidate_cols = [col for col in feature_columns if col in numeric_cols.columns]
+                if candidate_cols:
+                    correlations = numeric_cols[candidate_cols].corrwith(target_series).abs()
+                    dropped_features = [
+                        col
+                        for col, value in correlations.items()
+                        if np.isfinite(value) and value >= corr_threshold
+                    ]
+                    if dropped_features:
+                        feature_columns = [col for col in feature_columns if col not in dropped_features]
+                        df = df.drop(columns=dropped_features)
+
+        if not feature_columns:
+            raise GPConfigError("No feature columns remain after applying correlation filter")
+
+        return df, feature_columns, dropped_features
 
     def _build_subset(self) -> Optional[pd.DataFrame]:
         if self.low_ratio <= 0.0 or self.low_ratio >= 1.0:
@@ -223,7 +307,7 @@ class GPFeatureTrainer:
             population,
             total=len(population),
             desc=f"Gen {generation + 1} validations",
-            leave=False,
+            leave=True,
             dynamic_ncols=True,
             file=sys.stdout,
         )
@@ -270,6 +354,8 @@ class GPFeatureTrainer:
         objectives: Dict[str, float],
         goals: Dict[str, str],
     ) -> None:
+        objectives = dict(objectives)
+        goals = dict(goals)
         selected: Dict[str, float] = {}
         values: List[float] = []
         for idx, name in enumerate(self.mode_metrics):
@@ -382,14 +468,26 @@ class GPFeatureTrainer:
         metrics_matrix = np.array([
             [getattr(ind, "metrics", {}).get(name, float("nan")) for name in metric_names]
             for ind in population
-        ])
+        ], dtype=float)
         scores = [self._aggregate_for_ranking(getattr(ind, "metrics", {})) for ind in population]
-        best_idx = int(np.argmax(scores))
+        best_idx = int(np.argmax(scores)) if scores else 0
         best_individual = population[best_idx]
+
+        best_metrics: Dict[str, Optional[float]] = {}
+        mean_metrics: Dict[str, Optional[float]] = {}
+        for idx, name in enumerate(metric_names):
+            col = metrics_matrix[:, idx]
+            col_finite = col[np.isfinite(col)]
+            best_val = metrics_matrix[best_idx, idx]
+            best_metrics[name] = float(best_val) if np.isfinite(best_val) else None
+            mean_metrics[name] = (
+                float(col_finite.mean()) if col_finite.size else None
+            )
+
         summary = GenerationSummary(
             generation=generation,
-            best_metrics={name: metrics_matrix[best_idx, idx] for idx, name in enumerate(metric_names)},
-            mean_metrics={name: float(metrics_matrix[:, idx].mean()) for idx, name in enumerate(metric_names)},
+            best_metrics=best_metrics,
+            mean_metrics=mean_metrics,
             best_expression=self._expression_from_individual(best_individual),
         )
         self.history.append(summary)

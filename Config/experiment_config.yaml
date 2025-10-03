@@ -8,8 +8,8 @@
 environment:
   device: 'cuda:0' # 학습에 사용할 장치 ('cuda:0', 'cpu' 등)
   seed: 42
-  output_dir: "results/exp_cpcv_test" # 결과 파일이 저장될 디렉터리
-  data_dir: "/root/workspace/GA_tree/dataset/dataset_test"
+  output_dir: "/Users/yoon-seunggyu/Documents/GA_Tree/GA_tree/results/exp_cpcv_test" # 결과 파일이 저장될 디렉터리
+  data_dir: "/Users/yoon-seunggyu/Documents/GA_Tree/GA_tree/dataset/dataset_test"
 
 # 1.0. Training Resumption 설정
 resumption:

@@ -329,7 +329,9 @@ def _finalize_result(
     if operator in {"skew", "kurtosis"}:
         return result.fillna(0.0)
     if allow_partial:
-        return result.bfill().ffill()
+        # Only use past information to impute partial windows to avoid future leaks.
+        forward_filled = result.ffill()
+        return forward_filled.fillna(0.0)
     return result.fillna(0.0)
 
 
@@ -347,6 +349,9 @@ def _resolve_dynamic_window(spec: TimeframeOperatorSpec, arg: np.ndarray) -> int
         raw_value = float(spec.min_window)
     if spec.param_kind == "minutes":
         minutes = max(raw_value, spec.min_window * spec.base_interval_minutes)
+        max_minutes = spec.max_window * spec.base_interval_minutes
+        if minutes > max_minutes:
+            minutes = max_minutes
         window = _minutes_to_window(minutes, spec.base_interval_minutes)
     else:
         window = int(round(raw_value))

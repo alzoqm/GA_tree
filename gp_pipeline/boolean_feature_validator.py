@@ -910,22 +910,24 @@ def _compose_boolean_fitness(
     extra_summary: Mapping[str, float],
     significant: bool,
 ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float], Dict[str, float | bool]]:
-    eps = 1e-320
-    p_clipped = max(combined_pvalue, eps)
+    min_pvalue_clip = 1e-16
+    p_clipped = float(np.clip(combined_pvalue, min_pvalue_clip, 1.0))
     neg_log_p = float(-math.log10(p_clipped))
     significance_margin = max(0.0, alpha - combined_pvalue)
 
     effect_arr = np.asarray([abs(val) for val in effects], dtype=float)
+    effect_arr = effect_arr[np.isfinite(effect_arr)]
     effect_mean = float(effect_arr.mean()) if effect_arr.size else 0.0
     effect_std = float(effect_arr.std()) if effect_arr.size else 0.0
     pvals_arr = np.asarray(pvalues, dtype=float)
+    pvals_arr = pvals_arr[np.isfinite(pvals_arr)]
     pvalue_std = float(pvals_arr.std()) if pvals_arr.size else 0.0
 
-    effect_stability = 1.0 / (1.0 + effect_std)
-    pvalue_consistency = 1.0 / (1.0 + pvalue_std)
+    effect_stability = float(np.clip(1.0 / (1.0 + effect_std), 0.0, 1.0))
+    pvalue_consistency = float(np.clip(1.0 / (1.0 + pvalue_std), 0.0, 1.0))
 
     fitness_objectives: Dict[str, float] = {
-        "min_pvalue": combined_pvalue,
+        "min_pvalue": p_clipped,
         "neg_log_pvalue": neg_log_p,
         "effect_strength": effect_mean,
         "effect_stability": effect_stability,
