@@ -71,21 +71,43 @@ def _fisher_exact(a: int, b: int, c: int, d: int) -> float:
     total = a + b + c + d
     if total == 0:
         return 1.0
+
     row1 = a + b
     col1 = a + c
-    min_x = max(0, col1 - (total - row1))
+    min_x = max(0, row1 + col1 - total)
     max_x = min(row1, col1)
+    if min_x == max_x:
+        return 1.0
 
-    def hypergeom(x: int) -> float:
-        return math.comb(row1, x) * math.comb(total - row1, col1 - x) / math.comb(total, col1)
+    def _log_comb(n: int, k: int) -> float:
+        return math.lgamma(n + 1.0) - math.lgamma(k + 1.0) - math.lgamma(n - k + 1.0)
 
-    observed = hypergeom(a)
-    p_value = 0.0
-    for x in range(min_x, max_x + 1):
-        prob = hypergeom(x)
-        if prob <= observed + 1e-15:
-            p_value += prob
-    return min(1.0, p_value)
+    log_den = _log_comb(total, row1)
+    log_base = _log_comb(col1, a) + _log_comb(total - col1, row1 - a) - log_den
+    base_prob = math.exp(log_base)
+    cutoff = base_prob + 1e-15
+    cumulative = base_prob
+
+    prob = base_prob
+    x = a
+    tail_shift = total - col1 - row1
+    while x > min_x:
+        ratio = (x * (tail_shift + x)) / ((col1 - x + 1) * (row1 - x + 1))
+        prob *= ratio
+        x -= 1
+        if prob <= cutoff:
+            cumulative += prob
+
+    prob = base_prob
+    x = a
+    while x < max_x:
+        ratio = ((col1 - x) * (row1 - x)) / ((x + 1) * (tail_shift + x + 1))
+        prob *= ratio
+        x += 1
+        if prob <= cutoff:
+            cumulative += prob
+
+    return min(1.0, cumulative)
 
 
 def _fisher_exact_vectorized(
