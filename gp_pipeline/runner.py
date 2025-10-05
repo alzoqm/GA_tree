@@ -278,16 +278,21 @@ class GPFeatureTrainer:
             offspring = self.toolbox.select(population, len(population))
             offspring = list(map(self.toolbox.clone, offspring))
 
-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            for idx in range(1, len(offspring), 2):
                 if random.random() < pop_cfg.crossover_prob:
-                    self.toolbox.mate(child1, child2)
-                    del child1.fitness.values
-                    del child2.fitness.values
+                    first = offspring[idx - 1]
+                    second = offspring[idx]
+                    new_first, new_second = self.toolbox.mate(first, second)
+                    # Replace references so static limits from decorators take effect.
+                    offspring[idx - 1], offspring[idx] = new_first, new_second
+                    del offspring[idx - 1].fitness.values
+                    del offspring[idx].fitness.values
 
-            for mutant in offspring:
+            for idx, mutant in enumerate(offspring):
                 if random.random() < pop_cfg.mutation_prob:
-                    self.toolbox.mutate(mutant)
-                    del mutant.fitness.values
+                    (new_mutant,) = self.toolbox.mutate(mutant)
+                    offspring[idx] = new_mutant
+                    del offspring[idx].fitness.values
 
             population[:] = offspring
 

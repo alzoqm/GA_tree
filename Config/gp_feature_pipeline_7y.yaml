@@ -1,0 +1,147 @@
+# Configuration tuned for GP feature generation on 7-year 5-minute BTCUSDT data
+# Update the data.path below if your file lives elsewhere.
+
+data:
+  path: ../dataset/dataset_test/BTCUSDT_5m_7y.csv
+  target_column: null
+  feature_columns:
+    - Open
+    - High
+    - Low
+    - Close
+    - Volume
+    - Quote asset volume
+    - Number of trades
+    - Taker buy base asset volume
+    - Taker buy quote asset volume
+  max_target_corr: 1.0
+
+feature:
+  mode: numeric # boolean, numeric
+
+timeframe_primitives:
+  enabled: true
+  base_interval_minutes: 5
+  timeframes: [15m, 30m, 1h, 2h, 4h, 12h, 1d, 3d]
+  custom_timeframes: []
+  operators: [high, low, mean, median, std, var, sum, range, ema, lag, diff, pct_change, zscore, skew, kurtosis]
+  dynamic_operators:
+    - name: mean_intraday
+      operator: mean
+      param_kind: bars
+      min_window: 12      # 1 hour
+      max_window: 288     # 1 day
+      allow_partial: false
+    - name: mean_multiday
+      operator: mean
+      param_kind: minutes
+      min_window: 2880    # 10 days
+      max_window: 43200   # 150 days
+      allow_partial: false
+    - name: std_swing
+      operator: std
+      param_kind: bars
+      min_window: 36      # 3 hours
+      max_window: 1008    # 3.5 days
+      allow_partial: false
+    - name: ema_slow
+      operator: ema
+      param_kind: bars
+      min_window: 96      # 8 hours
+      max_window: 2016    # 1 fortnight
+      allow_partial: false
+    - name: high_span
+      operator: high
+      param_kind: minutes
+      min_window: 1440    # 1 day
+      max_window: 10080   # 1 week
+      allow_partial: false
+    - name: range_trend
+      operator: range
+      param_kind: minutes
+      min_window: 720     # 12 hours
+      max_window: 30240   # 21 days
+      allow_partial: false
+  allow_partial_windows: false
+  integers_as_rows: false
+  lag_fill_strategy: edge
+
+population:
+  size: 1400
+  generations: 45
+  min_depth: 2
+  max_depth: 7
+  tournament_size: 7
+  elitism: 80
+  mutation_prob: 0.22
+  crossover_prob: 0.78
+  seed: 42
+
+backend:
+  primary: numexpr
+  fallbacks: [numpy]
+  cache_subtrees: false
+  low_fidelity_ratio: 0.1
+  full_eval_top_k: 0.15
+
+fitness:
+  numeric:
+    metrics: [neg_log_pvalue, effect_size, cliffs_delta, significance_margin, mean_method_effect, effect_stability, pvalue_consistency, min_pvalue]
+    weights: [0.75, 1.35, 1.15, 0.65, 0.85, 1.0, 1.0, 0.55]
+    maximize: [true, true, true, true, true, true, true, false]
+    thresholds:
+      neg_log_pvalue: 2.0
+      effect_size: 0.08
+      cliffs_delta: 0.08
+      significance_margin: 0.0
+      mean_method_effect: 0.04
+      effect_stability: 0.6
+      pvalue_consistency: 0.6
+      min_pvalue: 0.01
+
+  boolean:
+    metrics: [neg_log_pvalue, effect_strength, effect_stability, pvalue_consistency, significance_margin, prop_diff_abs, odds_ratio_abs, cliffs_delta_abs, mutual_information, min_pvalue]
+    weights: [0.75, 1.35, 1.15, 1.0, 0.55, 1.0, 0.75, 1.2, 1.0, 0.55]
+    maximize: [true, true, true, true, true, true, true, true, true, false]
+    thresholds:
+      neg_log_pvalue: 2.0
+      effect_strength: 0.08
+      effect_stability: 0.6
+      pvalue_consistency: 0.6
+      significance_margin: 0.0
+      prop_diff_abs: 0.07
+      odds_ratio_abs: 1.15
+      cliffs_delta_abs: 0.08
+      mutual_information: 0.001
+      min_pvalue: 0.01
+
+validator:
+  enabled: true
+  numeric_kwargs:
+    combine_method: simes
+    min_bars_per_split: 4096
+    screening_methods:
+      spearman:
+        enabled: true
+        cliffs_delta: true
+    verbose: false
+  boolean_kwargs:
+    combine_method: simes
+    alpha: 0.015
+    min_bars_per_split: 4096
+    screening_methods:
+      fisher_exact:
+        enabled: true
+        event_threshold: 0.0005
+      prop_ztest:
+        enabled: true
+        alpha: 0.015
+      mutual_information:
+        enabled: true
+        permutations: 512
+    verbose: false
+
+output:
+  artifacts_dir: ../results/gp_pipeline_numeric/seven_year
+  save_best: 250
+  save_population: true
