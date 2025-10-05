@@ -118,6 +118,13 @@ class GPFeatureTrainer:
         self.cache_subset = EvaluationCache() if cfg.backend.cache_subtrees and self.df_subset is not None else None
         self.history: List[GenerationSummary] = []
         self.best_records: Dict[str, IndividualRecord] = {}
+        self.output_dir = os.fspath(self._ensure_output_dir())
+        self.run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.generation_output_dir = os.path.join(
+            self.output_dir,
+            f"generations_{self.run_timestamp}",
+        )
+        os.makedirs(self.generation_output_dir, exist_ok=True)
         self.metric_goals: Dict[str, bool] = {}
         if dropped_features:
             logger.warning(
@@ -491,6 +498,68 @@ class GPFeatureTrainer:
             best_expression=self._expression_from_individual(best_individual),
         )
         self.history.append(summary)
+        self._persist_generation(population, summary, best_individual)
+
+    def _persist_generation(
+        self,
+        population: Sequence[gp.PrimitiveTree],
+        summary: GenerationSummary,
+        best_individual: gp.PrimitiveTree,
+    ) -> None:
+        filepath = os.path.join(
+            self.generation_output_dir,
+            f"generation_{summary.generation:04d}.json",
+        )
+        try:
+            best_record = asdict(self._individual_to_record(best_individual))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to serialize best individual for generation %s: %s",
+                summary.generation,
+                exc,
+            )
+            best_record = {
+                "index": id(best_individual),
+                "expression": None,
+                "feature_type": getattr(best_individual, "feature_mode", self.feature_mode),
+                "metrics": getattr(best_individual, "metrics", {}),
+                "validator_objectives": getattr(best_individual, "validator_metrics", {}),
+                "validator_goals": getattr(best_individual, "validator_goals", {}),
+                "error": str(exc),
+            }
+
+        population_records: List[Dict[str, object]] = []
+        for individual in population:
+            try:
+                population_records.append(asdict(self._individual_to_record(individual)))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to serialize individual %s in generation %s: %s",
+                    id(individual),
+                    summary.generation,
+                    exc,
+                )
+                population_records.append(
+                    {
+                        "index": id(individual),
+                        "expression": None,
+                        "feature_type": getattr(individual, "feature_mode", self.feature_mode),
+                        "metrics": getattr(individual, "metrics", {}),
+                        "validator_objectives": getattr(individual, "validator_metrics", {}),
+                        "validator_goals": getattr(individual, "validator_goals", {}),
+                        "error": str(exc),
+                    }
+                )
+
+        payload = {
+            "summary": asdict(summary),
+            "best": best_record,
+            "population": population_records,
+            "written_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        with open(filepath, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
 
     def _expression_from_individual(self, individual: gp.PrimitiveTree) -> str:
         ir = tree_to_ir(individual, self.feature_columns)
@@ -537,8 +606,8 @@ class GPFeatureTrainer:
         return path
 
     def _save_artifacts(self, hall_of_fame: tools.HallOfFame, population: Sequence[gp.PrimitiveTree]):
-        output_dir = self._ensure_output_dir()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_dir = self.output_dir
+        timestamp = self.run_timestamp or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         hof_entries = [asdict(self._individual_to_record(ind)) for ind in hall_of_fame]
         hof_path = os.path.join(output_dir, f"hof_{timestamp}.json")
         with open(hof_path, "w", encoding="utf-8") as fh:
@@ -570,6 +639,7 @@ class GPFeatureTrainer:
             "history": history_path,
             "population": population_path,
             "best": best_path,
+            "generations": self.generation_output_dir,
         }
 
     @staticmethod

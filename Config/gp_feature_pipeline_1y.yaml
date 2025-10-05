@@ -17,7 +17,7 @@ data:
   max_target_corr: 1.
 
 feature:
-  mode: boolean
+  mode: numeric # boolean, numeric
 
 timeframe_primitives:
   enabled: true
@@ -56,7 +56,7 @@ timeframe_primitives:
 
 population:
   size: 1200
-  generations: 35
+  generations: 30
   min_depth: 2
   max_depth: 6
   tournament_size: 7
@@ -68,39 +68,41 @@ population:
 backend:
   primary: numexpr
   fallbacks: [numpy]
-  cache_subtrees: true
+  cache_subtrees: false
   low_fidelity_ratio: 0.12
   full_eval_top_k: 0.2
 
 fitness:
   numeric:
     metrics: [neg_log_pvalue, effect_size, cliffs_delta, significance_margin, mean_method_effect, effect_stability, pvalue_consistency, min_pvalue]
-    weights: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 1.0]
+    weights: [0.8, 1.3, 1.2, 0.6, 0.8, 1.0, 1.0, 0.7]
     maximize: [true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 2.0
-      effect_size: 0.05
-      cliffs_delta: 0.05
+      neg_log_pvalue: 2.3
+      effect_size: 0.10
+      cliffs_delta: 0.10
       significance_margin: 0.0
-      mean_method_effect: 0.0
-      effect_stability: 0.6
-      pvalue_consistency: 0.6
-      min_pvalue: 0.02
+      mean_method_effect: 0.05
+      effect_stability: 0.70
+      pvalue_consistency: 0.70
+      min_pvalue: 0.010
+
   boolean:
     metrics: [neg_log_pvalue, effect_strength, effect_stability, pvalue_consistency, significance_margin, prop_diff_abs, odds_ratio_abs, cliffs_delta_abs, mutual_information, min_pvalue]
-    weights: [1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0]
+    weights: [0.8, 1.3, 1.2, 1.0, 0.5, 1.0, 0.7, 1.2, 1.0, 0.7]
     maximize: [true, true, true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 2.0
-      effect_strength: 0.05
-      effect_stability: 0.6
-      pvalue_consistency: 0.6
+      neg_log_pvalue: 2.3
+      effect_strength: 0.10
+      effect_stability: 0.70
+      pvalue_consistency: 0.70
       significance_margin: 0.0
-      prop_diff_abs: 0.02
-      odds_ratio_abs: 1.1
-      cliffs_delta_abs: 0.05
-      mutual_information: 0.0
-      min_pvalue: 0.02
+      prop_diff_abs: 0.08
+      odds_ratio_abs: 1.30
+      cliffs_delta_abs: 0.10
+      mutual_information: 0.001
+      min_pvalue: 0.010
+
 
 validator:
   enabled: true
@@ -129,6 +131,6 @@ validator:
     verbose: false
 
 output:
-  artifacts_dir: ../results/gp_pipeline/one_year
+  artifacts_dir: ../results/gp_pipeline_numeric/one_year
   save_best: 200
   save_population: true
