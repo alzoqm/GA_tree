@@ -195,3 +195,9 @@ Use `pytest -m "not cuda"` when running on machines without a GPU or compiled ke
 - **W&B Optional**: Disable by setting `wandb.enabled: false` or `mode: disabled` when offline.
 
 This README reflects the current codebase; update `Config/` values to suit your market, horizon, and experiment scale.
+
+## GP Feature Pipeline
+- Run GP feature search with the dedicated pipeline:
+  - `python -m gp_pipeline.cli --config Config/gp_feature_pipeline.yaml`
+  - Resume from the latest saved generation with `--resume`.
+- Checkpoints are written to `results/gp_pipeline/checkpoints/gp/` by default and contain the next generation index and the population required to continue. Generation summaries remain under `results/gp_pipeline/generations_YYYYMMDD_HHMMSS/`.

@@ -31,6 +31,7 @@ from .timeframe_ops import (
     register_timeframe_operators,
 )
 from .validators import run_boolean_validator, run_numeric_validator
+from .checkpoint import GPPipelineCheckpointManager
 
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,9 @@ class GenerationSummary:
 
 
 class GPFeatureTrainer:
-    def __init__(self, cfg: GPConfig) -> None:
+    def __init__(self, cfg: GPConfig, *, resume: bool = False) -> None:
         self.cfg = cfg
+        self.resume = bool(resume)
         self._seed(cfg.population.seed)
         self.df_full, feature_columns, dropped_features = self._load_dataframe(cfg)
         if cfg.data.target_column is None:
@@ -125,6 +127,7 @@ class GPFeatureTrainer:
             f"generations_{self.run_timestamp}",
         )
         os.makedirs(self.generation_output_dir, exist_ok=True)
+        self._ckpt = GPPipelineCheckpointManager(self.output_dir)
         self.metric_goals: Dict[str, bool] = {}
         if dropped_features:
             logger.warning(
@@ -255,12 +258,58 @@ class GPFeatureTrainer:
 
     def run(self) -> Dict[str, object]:
         pop_cfg = self.cfg.population
+        # Default: fresh initial population
         population = self.toolbox.population(n=pop_cfg.size)
         hall_of_fame = tools.HallOfFame(self.cfg.output.save_best)
         logbook = tools.Logbook()
         logbook.header = ["gen", "evals"]
 
-        for gen in range(pop_cfg.generations):
+        # Resume support
+        start_gen = 0
+        if self.resume:
+            latest = self._ckpt.find_latest()
+            if latest is not None:
+                try:
+                    payload = self._ckpt.load(latest)
+                    pop_str = payload.get("population_str", [])
+                    if isinstance(pop_str, list) and pop_str:
+                        population = self._ckpt.restore_population(pop_str, self.toolbox.pset)
+                        # Restore bookkeeping
+                        start_gen = int(payload.get("generation_next", 0))
+                        rt = payload.get("run_timestamp")
+                        if isinstance(rt, str) and rt:
+                            self.run_timestamp = rt
+                            self.generation_output_dir = os.path.join(
+                                self.output_dir,
+                                f"generations_{self.run_timestamp}",
+                            )
+                            os.makedirs(self.generation_output_dir, exist_ok=True)
+                        # History and best records
+                        hist = payload.get("history", [])
+                        if isinstance(hist, list):
+                            self.history = [GenerationSummary(**h) for h in hist]  # type: ignore[arg-type]
+                        best_list = payload.get("best_records", [])
+                        if isinstance(best_list, list):
+                            # Rehydrate as mapping by expression
+                            self.best_records = {}
+                            for entry in best_list:
+                                try:
+                                    rec = IndividualRecord(**entry)  # type: ignore[arg-type]
+                                    self.best_records[rec.expression] = rec
+                                except Exception:
+                                    continue
+                        mg = payload.get("metric_goals")
+                        if isinstance(mg, dict):
+                            self.metric_goals.update({str(k): bool(v) for k, v in mg.items()})
+                        # RNG
+                        rng_payload = payload.get("rng")
+                        if isinstance(rng_payload, dict):
+                            self._ckpt.restore_rng(rng_payload, self._subset_rng)
+                except Exception as _exc:  # pragma: no cover - defensive
+                    # On any error, fall back to fresh run
+                    start_gen = 0
+
+        for gen in range(start_gen, pop_cfg.generations):
             eval_count = self._evaluate_population(population, generation=gen)
             eligible = [
                 ind
@@ -295,6 +344,22 @@ class GPFeatureTrainer:
                     del offspring[idx].fitness.values
 
             population[:] = offspring
+
+            # Save checkpoint so we can resume at the start of the next generation
+            try:
+                self._ckpt.save(
+                    generation_next=gen + 1,
+                    run_timestamp=self.run_timestamp,
+                    population=population,
+                    feature_columns=self.feature_columns,
+                    subset_rng=self._subset_rng,
+                    best_records=[asdict(rec) for rec in self.best_records.values()],
+                    history=[asdict(summary) for summary in self.history],
+                    metric_goals=self.metric_goals,
+                )
+            except Exception:  # pragma: no cover - defensive
+                # Non-fatal
+                pass
 
         artifacts = self._save_artifacts(hall_of_fame, population)
         best_list = sorted(
