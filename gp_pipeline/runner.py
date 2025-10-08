@@ -48,6 +48,10 @@ class IndividualRecord:
     metrics: Dict[str, float]
     validator_objectives: Dict[str, float]
     validator_goals: Dict[str, str]
+    signature: Optional[Tuple[int, int]] = None
+    node_count: int = 0
+    tree_height: int = 0
+    expression_length: int = 0
 
 
 @dataclass(slots=True)
@@ -56,6 +60,13 @@ class GenerationSummary:
     best_metrics: Dict[str, Optional[float]]
     mean_metrics: Dict[str, Optional[float]]
     best_expression: str
+
+
+@dataclass(slots=True)
+class SignatureEntry:
+    signature: Tuple[int, int]
+    individual: gp.PrimitiveTree
+    complexity: Tuple[int, int, int]
 
 
 class GPFeatureTrainer:
@@ -120,6 +131,9 @@ class GPFeatureTrainer:
         self.cache_subset = EvaluationCache() if cfg.backend.cache_subtrees and self.df_subset is not None else None
         self.history: List[GenerationSummary] = []
         self.best_records: Dict[str, IndividualRecord] = {}
+        self._best_signature_records: Dict[Tuple[int, int], Tuple[IndividualRecord, Tuple[int, int, int]]] = {}
+        self._subset_signatures: Dict[Tuple[int, int], SignatureEntry] = {}
+        self._full_signatures: Dict[Tuple[int, int], SignatureEntry] = {}
         self.output_dir = os.fspath(self._ensure_output_dir())
         self.run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         self.generation_output_dir = os.path.join(
@@ -292,9 +306,17 @@ class GPFeatureTrainer:
                         if isinstance(best_list, list):
                             # Rehydrate as mapping by expression
                             self.best_records = {}
+                            self._best_signature_records = {}
                             for entry in best_list:
                                 try:
                                     rec = IndividualRecord(**entry)  # type: ignore[arg-type]
+                                    if rec.signature is not None:
+                                        sig_tuple = tuple(rec.signature)
+                                        rec.signature = sig_tuple
+                                        self._best_signature_records[sig_tuple] = (
+                                            rec,
+                                            self._record_complexity(rec),
+                                        )
                                     self.best_records[rec.expression] = rec
                                 except Exception:
                                     continue
@@ -395,27 +417,65 @@ class GPFeatureTrainer:
             data_frame = self.df_subset if self.df_subset is not None else self.df_full
             cache = self.cache_subset if self.df_subset is not None else self.cache_full
             values = self.backend_fn(ir, data_frame, cache)
+            using_subset = self.df_subset is not None and data_frame is self.df_subset
+            signature = self._vector_signature(values)
+            registry = self._subset_signatures if using_subset else self._full_signatures
+            should_eval, replaced = self._register_signature(registry, signature, individual)
+            if replaced is not None and replaced is not individual:
+                self._mark_duplicate(replaced)
+            if not should_eval:
+                if using_subset:
+                    individual.subset_signature = signature
+                else:
+                    individual.full_signature = signature
+                self._mark_duplicate(individual)
+                continue
+            if using_subset:
+                individual.subset_signature = signature
+            else:
+                individual.full_signature = signature
+            individual.is_duplicate = False  # type: ignore[attr-defined]
             validation = self._run_validator(data_frame, values)
             metrics = validation.fitness_objectives
             goals = validation.fitness_goals
             self._assign_fitness(individual, metrics, goals)
             self._register_validator_payload(individual, validation)
             self._maybe_register_best(individual)
-            provisional.append((individual, metrics, goals, ir, values))
+            if using_subset:
+                provisional.append((individual, metrics, goals, ir, values))
             evaluations += 1
 
         progress.close()
 
         if self.df_subset is not None and self.full_eval_top_k > 0 and provisional:
-            k = max(1, int(len(provisional) * self.full_eval_top_k))
+            filtered = [
+                entry for entry in provisional if not getattr(entry[0], "is_duplicate", False)
+            ]
+            if not filtered:
+                return evaluations
+            k = max(1, int(len(filtered) * self.full_eval_top_k))
             ranked = sorted(
-                provisional,
+                filtered,
                 key=lambda x: self._aggregate_for_ranking(x[1]),
                 reverse=True,
             )
             top = ranked[:k]
             for individual, _, _, ir, _ in top:
+                if getattr(individual, "is_duplicate", False):
+                    continue
                 values_full = self.backend_fn(ir, self.df_full, self.cache_full)
+                signature_full = self._vector_signature(values_full)
+                should_eval_full, replaced_full = self._register_signature(
+                    self._full_signatures, signature_full, individual
+                )
+                if replaced_full is not None and replaced_full is not individual:
+                    self._mark_duplicate(replaced_full)
+                if not should_eval_full:
+                    individual.full_signature = signature_full
+                    self._mark_duplicate(individual)
+                    continue
+                individual.full_signature = signature_full
+                individual.is_duplicate = False  # type: ignore[attr-defined]
                 validation_full = self._run_validator(self.df_full, values_full)
                 metrics_full = validation_full.fitness_objectives
                 goals_full = validation_full.fitness_goals
@@ -535,10 +595,32 @@ class GPFeatureTrainer:
         metrics = getattr(individual, "metrics", {})
         if not self._passes_thresholds(metrics):
             return
+        if getattr(individual, "is_duplicate", False):
+            return
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        if signature is None:
+            return
         record = self._individual_to_record(individual)
-        existing = self.best_records.get(record.expression)
-        if existing is None or self._aggregate_for_ranking(record.metrics) > self._aggregate_for_ranking(existing.metrics):
-            self.best_records[record.expression] = record
+        signature = tuple(signature)
+        record.signature = signature
+        complexity = self._individual_complexity(individual)
+        existing_entry = self._best_signature_records.get(signature)
+        if existing_entry is not None:
+            existing_record, existing_complexity = existing_entry
+            if complexity < existing_complexity:
+                self.best_records.pop(existing_record.expression, None)
+            elif complexity == existing_complexity:
+                existing_score = self._aggregate_for_ranking(existing_record.metrics)
+                new_score = self._aggregate_for_ranking(record.metrics)
+                if new_score < existing_score:
+                    return
+                self.best_records.pop(existing_record.expression, None)
+            else:
+                return
+        self._best_signature_records[signature] = (record, complexity)
+        self.best_records[record.expression] = record
 
     def _log_generation(self, population: Sequence[gp.PrimitiveTree], generation: int) -> None:
         metric_names = list(self.mode_metrics)
@@ -656,11 +738,18 @@ class GPFeatureTrainer:
         return f"{node.value}({', '.join(args)})"
 
     def _individual_to_record(self, individual: gp.PrimitiveTree) -> IndividualRecord:
-        expr = self._expression_from_individual(individual)
+        expr = getattr(individual, "_cached_expression", None)
+        if expr is None:
+            expr = self._expression_from_individual(individual)
+            setattr(individual, "_cached_expression", expr)
         metrics = getattr(individual, "metrics", {})
         validator_objectives = getattr(individual, "validator_metrics", {})
         validator_goals = getattr(individual, "validator_goals", {})
         feature_type = getattr(individual, "feature_mode", self.feature_mode)
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        node_count, tree_height, expr_len = self._individual_complexity(individual)
         return IndividualRecord(
             index=id(individual),
             expression=expr,
@@ -668,7 +757,99 @@ class GPFeatureTrainer:
             metrics=metrics,
             validator_objectives=validator_objectives,
             validator_goals=validator_goals,
+            signature=signature,
+            node_count=node_count,
+            tree_height=tree_height,
+            expression_length=expr_len,
         )
+
+    @staticmethod
+    def _record_complexity(record: IndividualRecord) -> Tuple[int, int, int]:
+        node_count = record.node_count or 10**9
+        tree_height = record.tree_height or 10**9
+        expr_len = record.expression_length or len(record.expression)
+        return (node_count, tree_height, expr_len)
+
+    def _individual_complexity(self, individual: gp.PrimitiveTree) -> Tuple[int, int, int]:
+        node_count = len(individual)
+        tree_height = int(getattr(individual, "height", 0))
+        expr = getattr(individual, "_cached_expression", None)
+        if expr is None:
+            expr = self._expression_from_individual(individual)
+            setattr(individual, "_cached_expression", expr)
+        expression_length = len(expr)
+        return (node_count, tree_height, expression_length)
+
+    def _vector_signature(self, values: np.ndarray) -> Tuple[int, int]:
+        if self.feature_mode == "numeric":
+            arr = np.asarray(values, dtype=np.float64)
+            finite_mask = np.isfinite(arr)
+            nonfinite_codes = np.zeros(arr.shape, dtype=np.int8)
+            if not finite_mask.all():
+                posinf = np.isposinf(arr)
+                neginf = np.isneginf(arr)
+                nanmask = np.isnan(arr)
+                if posinf.any():
+                    nonfinite_codes[posinf] = 1
+                if neginf.any():
+                    nonfinite_codes[neginf] = 2
+                if nanmask.any():
+                    nonfinite_codes[nanmask] = 3
+                arr = arr.copy()
+                arr[~finite_mask] = 0.0
+            arr = self._clip_to_float32_bounds(arr).astype(np.float32, copy=False)
+            hash_input = pd.DataFrame(
+                {"value": arr, "nonfinite": nonfinite_codes},
+                copy=False,
+            )
+        else:
+            arr = (np.asarray(values, dtype=np.float64) > 0).astype(np.int8, copy=False)
+            hash_input = pd.DataFrame({"value": arr}, copy=False)
+        hashed = pd.util.hash_pandas_object(hash_input, index=False)
+        if hashed.empty:
+            return (0, 0)
+        hash_values = hashed.to_numpy(dtype=np.uint64, copy=False)
+        signature_sum = int(hash_values.sum(dtype=np.uint64))
+        signature_xor = int(np.bitwise_xor.reduce(hash_values))
+        return (signature_sum, signature_xor)
+
+    def _register_signature(
+        self,
+        registry: Dict[Tuple[int, int], SignatureEntry],
+        signature: Tuple[int, int],
+        individual: gp.PrimitiveTree,
+    ) -> Tuple[bool, Optional[gp.PrimitiveTree]]:
+        complexity = self._individual_complexity(individual)
+        entry = registry.get(signature)
+        if entry is None or entry.individual is individual:
+            registry[signature] = SignatureEntry(signature, individual, complexity)
+            return True, None
+        if complexity < entry.complexity:
+            previous = entry.individual
+            registry[signature] = SignatureEntry(signature, individual, complexity)
+            return True, previous
+        # fall back to keep existing representative
+        return False, None
+
+    def _remove_best_record(self, individual: gp.PrimitiveTree) -> None:
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        if signature is None:
+            return
+        entry = self._best_signature_records.get(signature)
+        if entry is None:
+            return
+        record, _ = entry
+        if record.index != id(individual):
+            return
+        self._best_signature_records.pop(signature, None)
+        self.best_records.pop(record.expression, None)
+
+    def _mark_duplicate(self, individual: gp.PrimitiveTree) -> None:
+        self._remove_best_record(individual)
+        self._assign_fitness(individual, {}, {})
+        individual.is_duplicate = True  # type: ignore[attr-defined]
 
     def _ensure_output_dir(self) -> PathLike:
         path = self.cfg.output.artifacts_dir
