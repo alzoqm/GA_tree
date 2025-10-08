@@ -75,45 +75,46 @@ population:
   elitism: 80
   mutation_prob: 0.22
   crossover_prob: 0.78
-  seed: 42
+  seed: 777
 
 backend:
   primary: numexpr
   fallbacks: [numpy]
-  cache_subtrees: false
+  cache_subtrees: true
   low_fidelity_ratio: 0.1
-  full_eval_top_k: 0.15
+  full_eval_top_k: 0.25
 
 fitness:
   numeric:
     metrics: [neg_log_pvalue, effect_size, cliffs_delta, significance_margin, mean_method_effect, effect_stability, pvalue_consistency, min_pvalue]
-    weights: [0.75, 1.35, 1.15, 0.65, 0.85, 1.0, 1.0, 0.55]
+    # Emphasize effect size and mean method effect; reduce stability/consistency weight.
+    weights: [0.8, 1.8, 1.0, 0.8, 1.3, 0.6, 0.6, 0.8]
     maximize: [true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 2.0
-      effect_size: 0.08
-      cliffs_delta: 0.08
-      significance_margin: 0.0
-      mean_method_effect: 0.04
+      neg_log_pvalue: 1.6
+      effect_size: 0.025
+      cliffs_delta: 0.05
+      significance_margin: 0.008
+      mean_method_effect: 0.02
       effect_stability: 0.6
       pvalue_consistency: 0.6
-      min_pvalue: 0.01
+      min_pvalue: 0.012
 
   boolean:
     metrics: [neg_log_pvalue, effect_strength, effect_stability, pvalue_consistency, significance_margin, prop_diff_abs, odds_ratio_abs, cliffs_delta_abs, mutual_information, min_pvalue]
-    weights: [0.75, 1.35, 1.15, 1.0, 0.55, 1.0, 0.75, 1.2, 1.0, 0.55]
+    weights: [0.6, 1.15, 1.35, 1.25, 0.75, 0.95, 0.8, 1.1, 1.0, 0.8]
     maximize: [true, true, true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 2.0
-      effect_strength: 0.08
+      neg_log_pvalue: 1.7
+      effect_strength: 0.06
       effect_stability: 0.6
       pvalue_consistency: 0.6
-      significance_margin: 0.0
-      prop_diff_abs: 0.07
-      odds_ratio_abs: 1.15
-      cliffs_delta_abs: 0.08
-      mutual_information: 0.001
-      min_pvalue: 0.01
+      significance_margin: 0.008
+      prop_diff_abs: 0.065
+      odds_ratio_abs: 1.1
+      cliffs_delta_abs: 0.06
+      mutual_information: 0.0008
+      min_pvalue: 0.012
 
 validator:
   enabled: true
@@ -124,6 +125,8 @@ validator:
       spearman:
         enabled: true
         cliffs_delta: true
+      xfit_tail_contrast:
+        enabled: true
     verbose: false
   boolean_kwargs:
     combine_method: simes

@@ -115,6 +115,135 @@ def _approx_spearman_pvalue(r: float, n: int) -> float:
     return float(max(0.0, min(1.0, 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(z) / sqrt(2)))))))
 
 
+def _xfit_tail_contrast_direction(
+    select_values: np.ndarray,
+    eval_values: np.ndarray,
+    select_target: np.ndarray,
+    eval_target: np.ndarray,
+    *,
+    epsilon: float = 1e-6,
+    min_samples: int = 8,
+    tanh_clip: float = 8.0,
+) -> Optional[Tuple[float, float, Dict[str, float]]]:
+    """Evaluate one direction of the cross-fitted tail-contrast transform."""
+
+    if select_values.size == 0 or eval_values.size == 0:
+        return None
+
+    select_values = np.asarray(select_values, dtype=np.float32)
+    eval_values = np.asarray(eval_values, dtype=np.float32)
+    select_target = np.asarray(select_target, dtype=np.float32)
+    eval_target = np.asarray(eval_target, dtype=np.float32)
+
+    finite_select = np.isfinite(select_values)
+    if finite_select.sum() < min_samples:
+        return None
+
+    sel_vals = select_values[finite_select].astype(np.float64, copy=False)
+    if sel_vals.size == 0:
+        return None
+
+    mu = float(np.mean(sel_vals, dtype=np.float64))
+    sigma = float(np.std(sel_vals, dtype=np.float64))
+    if not np.isfinite(mu):
+        mu = 0.0
+    if not np.isfinite(sigma):
+        sigma = 0.0
+
+    scale = sigma + float(max(epsilon, 0.0))
+    if scale <= 0.0:
+        scale = epsilon
+
+    z_select = (select_values - mu) / scale
+    z_eval = (eval_values - mu) / scale
+
+    abs_z_select = np.abs(z_select)
+    transform_select = (
+        z_select,
+        np.sign(z_select) * np.maximum(0.0, abs_z_select - 1.0),
+        np.tanh(np.clip(z_select, -tanh_clip, tanh_clip)),
+    )
+    transform_eval = (
+        z_eval,
+        np.sign(z_eval) * np.maximum(0.0, np.abs(z_eval) - 1.0),
+        np.tanh(np.clip(z_eval, -tanh_clip, tanh_clip)),
+    )
+
+    candidate_indices = [0, 1, 2] if sigma > epsilon else [0]
+    valid_candidates: List[Tuple[int, float, int]] = []
+    for idx in candidate_indices:
+        t_sel = np.asarray(transform_select[idx], dtype=np.float32)
+        mask = np.isfinite(t_sel) & np.isfinite(select_target)
+        n = int(mask.sum())
+        if n < min_samples:
+            continue
+        rho_sel = _spearman_corr_single(t_sel[mask], select_target[mask])
+        valid_candidates.append((idx, float(rho_sel), n))
+
+    if not valid_candidates:
+        return None
+
+    chosen_idx, selection_rho, selection_n = max(valid_candidates, key=lambda item: abs(item[1]))
+    t_eval = np.asarray(transform_eval[chosen_idx], dtype=np.float32)
+    mask_eval = np.isfinite(t_eval) & np.isfinite(eval_target)
+    n_eval = int(mask_eval.sum())
+    if n_eval < min_samples:
+        return None
+
+    rho_eval = _spearman_corr_single(t_eval[mask_eval], eval_target[mask_eval])
+    pvalue = _approx_spearman_pvalue(float(rho_eval), n_eval)
+    effect = float(abs(rho_eval))
+
+    finite_z = np.isfinite(z_select)
+    tail_rate = float(np.mean(np.abs(z_select[finite_z]) > 1.0)) if finite_z.any() else 0.0
+    if not np.isfinite(tail_rate):
+        tail_rate = 0.0
+
+    extras = {
+        "chosen_transform": float(chosen_idx + 1),
+        "tail_exposure_rate": float(max(0.0, min(1.0, tail_rate))),
+        "mu": float(mu),
+        "sigma": float(sigma),
+        "rho": float(rho_eval),
+        "selection_rho": float(selection_rho),
+        "selection_n": float(selection_n),
+        "evaluation_n": float(n_eval),
+    }
+
+    return effect, float(pvalue), extras
+
+
+def _xfit_tail_contrast_direction_batch(
+    select_block: np.ndarray,
+    eval_block: np.ndarray,
+    select_target: np.ndarray,
+    eval_target: np.ndarray,
+    *,
+    epsilon: float = 1e-6,
+    min_samples: int = 8,
+    tanh_clip: float = 8.0,
+) -> List[Optional[Tuple[float, float, Dict[str, float]]]]:
+    """Run the tail-contrast direction across all columns in a batch."""
+
+    results: List[Optional[Tuple[float, float, Dict[str, float]]]] = []
+    if select_block.size == 0 or eval_block.size == 0:
+        cols = select_block.shape[1] if select_block.ndim == 2 else 0
+        return [None] * cols
+
+    for j in range(select_block.shape[1]):
+        res = _xfit_tail_contrast_direction(
+            select_block[:, j],
+            eval_block[:, j],
+            select_target,
+            eval_target,
+            epsilon=epsilon,
+            min_samples=min_samples,
+            tanh_clip=tanh_clip,
+        )
+        results.append(res)
+    return results
+
+
 # ==================== Effect size helpers ====================
 
 def _median_or_zero(values: Iterable[float]) -> float:
@@ -1237,6 +1366,29 @@ def screening_out_of_fold(
     per_feature_deltas: Dict[str, Dict[int, float]] = defaultdict(dict)
 
     method_spec = methods or {"spearman": {"enabled": True}}
+    tail_cfg_global: Optional[Dict[str, object]] = None
+    method_items: List[Tuple[str, Dict[str, object]]] = []
+    if isinstance(method_spec, Mapping):
+        for raw_name, spec in method_spec.items():
+            name = str(raw_name).lower()
+            if isinstance(spec, Mapping):
+                cfg = dict(spec)
+            else:
+                cfg = {"enabled": bool(spec)}
+            if not bool(cfg.get("enabled", True)):
+                continue
+            if name == "xfit_tail_contrast":
+                tail_cfg_global = {k: v for k, v in cfg.items() if k != "enabled"}
+                continue
+            method_items.append((name, {k: v for k, v in cfg.items() if k != "enabled"}))
+    else:
+        method_items = [("spearman", {"enabled": True})]
+
+    if not method_items and tail_cfg_global is None:
+        method_items = [("spearman", {"enabled": True})]
+    tail_epsilon = float(tail_cfg_global.get("epsilon", 1e-6)) if tail_cfg_global is not None else 1e-6
+    tail_min_samples = int(tail_cfg_global.get("min_samples", 8)) if tail_cfg_global is not None else 8
+    tail_tanh_clip = float(tail_cfg_global.get("tanh_clip", 8.0)) if tail_cfg_global is not None else 8.0
     rng = default_rng(random_state)
 
     supervision = supervision.lower()
@@ -1278,18 +1430,10 @@ def screening_out_of_fold(
                 continue
 
             # ---- Fold-level method configuration and precomputations ----
-            fold_methods: Dict[str, Dict[str, object]] = {}
-            if isinstance(method_spec, Mapping):
-                for raw_name, spec in method_spec.items():
-                    name = str(raw_name).lower()
-                    if isinstance(spec, Mapping):
-                        cfg = dict(spec)
-                    else:
-                        cfg = {"enabled": bool(spec)}
-                    if not bool(cfg.get("enabled", True)):
-                        continue
-                    fold_methods[name] = cfg
-            if not fold_methods:
+            fold_methods: Dict[str, Dict[str, object]] = {
+                name: dict(cfg) for name, cfg in method_items
+            }
+            if not fold_methods and tail_cfg_global is None:
                 fold_methods = {"spearman": {"enabled": True}}
 
             if hsic_memory_bytes > 0.0:
@@ -1370,6 +1514,24 @@ def screening_out_of_fold(
                 fold_ctx = None
                 delta_masks = None
 
+            xfit_selection_indices: Optional[np.ndarray]
+            xfit_selection_target: Optional[np.ndarray]
+            if (
+                tail_cfg_global is not None
+                and supervised_mode
+                and target_array is not None
+            ):
+                other_indices = split.inner_train_b if fold_label == "A" else split.inner_train_a
+                if other_indices.size >= min_bars:
+                    xfit_selection_indices = other_indices
+                    xfit_selection_target = _as_float32(target_array[other_indices])
+                else:
+                    xfit_selection_indices = None
+                    xfit_selection_target = None
+            else:
+                xfit_selection_indices = None
+                xfit_selection_target = None
+
             if not feature_list:
                 continue
 
@@ -1396,7 +1558,49 @@ def screening_out_of_fold(
                 end = min(start + batch_size, len(feature_list))
                 cols = feature_list[start:end]
                 # (n_rows, k)
-                Xb = _as_float32(df[cols].to_numpy(copy=False))[indices, :]
+                block_values = _as_float32(df[cols].to_numpy(copy=False))
+                Xb = block_values[indices, :]
+
+                if (
+                    tail_cfg_global is not None
+                    and supervised_mode
+                    and target_values is not None
+                    and xfit_selection_indices is not None
+                    and xfit_selection_target is not None
+                ):
+                    select_block = block_values[xfit_selection_indices, :]
+                    xfit_results = _xfit_tail_contrast_direction_batch(
+                        select_block,
+                        Xb,
+                        xfit_selection_target,
+                        target_values,
+                        epsilon=tail_epsilon,
+                        min_samples=tail_min_samples,
+                        tanh_clip=tail_tanh_clip,
+                    )
+                    if xfit_results:
+                        method_name = "xfit_tail_contrast"
+                        test_key = (split.outer.combo_id, fold_label, method_name)
+                        test_idx = test_positions.setdefault(test_key, len(test_positions))
+                        for j, feat in enumerate(cols):
+                            outcome = xfit_results[j]
+                            if outcome is None:
+                                continue
+                            effect, pval, extras = outcome
+                            per_feature_effects[feat][test_idx] = effect
+                            per_feature_pvals[feat][test_idx] = pval
+                            executed_methods.add(method_name)
+                            if record_details:
+                                details.append(
+                                    ScreeningDetail(
+                                        fold_id=f"{split.outer.combo_id}_{fold_label}",
+                                        feature=feat,
+                                        method=method_name,
+                                        effect=effect,
+                                        pvalue=pval,
+                                        extras={k: float(v) for k, v in extras.items()},
+                                    )
+                                )
 
                 # Apply default backends per method (do not change user configs)
                 adjusted_methods: Dict[str, Mapping[str, object]] = {}

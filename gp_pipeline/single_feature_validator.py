@@ -424,7 +424,11 @@ def _compose_fitness(
     pooled_pvalues: Sequence[float],
     significant: bool,
 ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float], Dict[str, float | bool]]:
-    min_pvalue_clip = 1e-300
+    # Align numeric p-value clipping scale with boolean validator to avoid
+    # disproportionate dominance of neg_log_pvalue in the fitness aggregation.
+    # This caps max(-log10(p)) at ~16 instead of 300, letting effect metrics
+    # contribute more meaningfully to selection.
+    min_pvalue_clip = 1e-16
     p_clipped = float(np.clip(combined_pvalue, min_pvalue_clip, 1.0))
     neg_log_p = float(-np.log10(p_clipped))
     significance_margin = max(0.0, alpha - combined_pvalue)
