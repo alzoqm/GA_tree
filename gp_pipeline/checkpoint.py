@@ -12,12 +12,13 @@ import json
 import os
 import pickle
 import random
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
-from deap import gp
+from deap import creator, gp
 
 from .ir import IRNode, tree_to_ir
 
@@ -147,11 +148,58 @@ class GPPipelineCheckpointManager:
             return json.load(fh)
 
     def restore_population(self, population_str: Sequence[str], pset: gp.PrimitiveSet) -> List[gp.PrimitiveTree]:
-        # Rebuild individuals from their string representation
+        """Rebuild the GP population using the configured individual creator."""
+
         out: List[gp.PrimitiveTree] = []
+        individual_cls = getattr(creator, "GPIndividual", gp.PrimitiveTree)
+
+        alias_map: Dict[str, str] = {}
+
+        def _needs_alias(name: str) -> bool:
+            return not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name)
+
+        def _make_alias(name: str) -> str:
+            base = re.sub(r"[^0-9A-Za-z_]", "_", name)
+            if not base or not re.match(r"^[A-Za-z_]", base):
+                base = f"sym_{base}"
+            candidate = base
+            suffix = 1
+            while candidate in pset.context and pset.context[candidate] is not pset.context.get(name):
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            return candidate
+
+        for key in list(pset.context.keys()):
+            if not isinstance(key, str):
+                continue
+            if key not in pset.mapping:
+                continue
+            if not _needs_alias(key):
+                continue
+            alias = _make_alias(key)
+            if alias == key:
+                continue
+            if alias not in pset.context:
+                pset.context[alias] = pset.context[key]
+            pset.mapping[alias] = pset.mapping[key]
+            alias_map[key] = alias
+
+        replace_pattern = None
+        if alias_map:
+            replace_pattern = re.compile(
+                "|".join(re.escape(src) for src in sorted(alias_map, key=len, reverse=True))
+            )
+
         for s in population_str:
-            ind = gp.PrimitiveTree.from_string(s, pset)
-            out.append(ind)
+            sanitized = s
+            if replace_pattern is not None:
+                sanitized = replace_pattern.sub(lambda m: alias_map[m.group(0)], sanitized)
+            tree = gp.PrimitiveTree.from_string(sanitized, pset)
+            if individual_cls is gp.PrimitiveTree:
+                individual = tree
+            else:
+                individual = individual_cls(tree)
+            out.append(individual)
         return out
 
     def restore_rng(self, payload: Dict[str, object], subset_rng: np.random.Generator | None) -> None:

@@ -80,7 +80,7 @@ population:
 backend:
   primary: numexpr
   fallbacks: [numpy]
-  cache_subtrees: true
+  cache_subtrees: false
   low_fidelity_ratio: 0.1
   full_eval_top_k: 0.25
 

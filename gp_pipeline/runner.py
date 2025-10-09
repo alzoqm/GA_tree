@@ -283,53 +283,91 @@ class GPFeatureTrainer:
         if self.resume:
             latest = self._ckpt.find_latest()
             if latest is not None:
+                payload: Dict[str, object]
                 try:
                     payload = self._ckpt.load(latest)
-                    pop_str = payload.get("population_str", [])
-                    if isinstance(pop_str, list) and pop_str:
-                        population = self._ckpt.restore_population(pop_str, self.toolbox.pset)
-                        # Restore bookkeeping
-                        start_gen = int(payload.get("generation_next", 0))
-                        rt = payload.get("run_timestamp")
-                        if isinstance(rt, str) and rt:
-                            self.run_timestamp = rt
-                            self.generation_output_dir = os.path.join(
-                                self.output_dir,
-                                f"generations_{self.run_timestamp}",
-                            )
-                            os.makedirs(self.generation_output_dir, exist_ok=True)
-                        # History and best records
-                        hist = payload.get("history", [])
-                        if isinstance(hist, list):
-                            self.history = [GenerationSummary(**h) for h in hist]  # type: ignore[arg-type]
-                        best_list = payload.get("best_records", [])
-                        if isinstance(best_list, list):
-                            # Rehydrate as mapping by expression
-                            self.best_records = {}
-                            self._best_signature_records = {}
-                            for entry in best_list:
-                                try:
-                                    rec = IndividualRecord(**entry)  # type: ignore[arg-type]
-                                    if rec.signature is not None:
-                                        sig_tuple = tuple(rec.signature)
-                                        rec.signature = sig_tuple
-                                        self._best_signature_records[sig_tuple] = (
-                                            rec,
-                                            self._record_complexity(rec),
-                                        )
-                                    self.best_records[rec.expression] = rec
-                                except Exception:
-                                    continue
-                        mg = payload.get("metric_goals")
-                        if isinstance(mg, dict):
-                            self.metric_goals.update({str(k): bool(v) for k, v in mg.items()})
-                        # RNG
-                        rng_payload = payload.get("rng")
-                        if isinstance(rng_payload, dict):
-                            self._ckpt.restore_rng(rng_payload, self._subset_rng)
-                except Exception as _exc:  # pragma: no cover - defensive
-                    # On any error, fall back to fresh run
-                    start_gen = 0
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to load GP checkpoint '{latest}': {exc}") from exc
+
+                pop_str = payload.get("population_str", [])
+                if not (isinstance(pop_str, list) and pop_str):
+                    raise RuntimeError(
+                        f"Checkpoint '{latest.name}' does not contain a population. "
+                        "Cannot resume; remove --resume to start a fresh run."
+                    )
+
+                checkpoint_features = payload.get("feature_columns")
+                if checkpoint_features:
+                    ckpt_features = [str(name) for name in checkpoint_features]
+                    current_features = [str(name) for name in self.feature_columns]
+                    if set(ckpt_features) != set(current_features):
+                        missing = sorted(set(ckpt_features) - set(current_features))
+                        extra = sorted(set(current_features) - set(ckpt_features))
+                        details: List[str] = []
+                        if missing:
+                            details.append(f"missing in config: {', '.join(missing)}")
+                        if extra:
+                            details.append(f"not present in checkpoint: {', '.join(extra)}")
+                        detail_msg = "; ".join(details) if details else "feature set mismatch"
+                        raise RuntimeError(
+                            f"Checkpoint '{latest.name}' uses feature_columns incompatible with the current "
+                            f"configuration ({detail_msg}). Ensure the config matches the checkpoint or rerun without --resume."
+                        )
+
+                try:
+                    population = self._ckpt.restore_population(pop_str, self.toolbox.pset)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to reconstruct population from checkpoint '{latest.name}': {exc}"
+                    ) from exc
+
+                if len(population) != pop_cfg.size:
+                    logger.warning(
+                        "Restored population size %d differs from configured size %d; proceeding with checkpoint population.",
+                        len(population),
+                        pop_cfg.size,
+                    )
+
+                # Restore bookkeeping
+                start_gen = int(payload.get("generation_next", 0))
+                rt = payload.get("run_timestamp")
+                if isinstance(rt, str) and rt:
+                    self.run_timestamp = rt
+                    self.generation_output_dir = os.path.join(
+                        self.output_dir,
+                        f"generations_{self.run_timestamp}",
+                    )
+                    os.makedirs(self.generation_output_dir, exist_ok=True)
+                # History and best records
+                hist = payload.get("history", [])
+                if isinstance(hist, list):
+                    self.history = [GenerationSummary(**h) for h in hist]  # type: ignore[arg-type]
+                best_list = payload.get("best_records", [])
+                if isinstance(best_list, list):
+                    # Rehydrate as mapping by expression
+                    self.best_records = {}
+                    self._best_signature_records = {}
+                    for entry in best_list:
+                        try:
+                            rec = IndividualRecord(**entry)  # type: ignore[arg-type]
+                            if rec.signature is not None:
+                                sig_tuple = tuple(rec.signature)
+                                rec.signature = sig_tuple
+                                self._best_signature_records[sig_tuple] = (
+                                    rec,
+                                    self._record_complexity(rec),
+                                )
+                            self.best_records[rec.expression] = rec
+                        except Exception:
+                            continue
+                mg = payload.get("metric_goals")
+                if isinstance(mg, dict):
+                    self.metric_goals.update({str(k): bool(v) for k, v in mg.items()})
+                # RNG
+                rng_payload = payload.get("rng")
+                if isinstance(rng_payload, dict):
+                    self._ckpt.restore_rng(rng_payload, self._subset_rng)
+                logger.info("Resuming GP pipeline from checkpoint '%s' (generation %d)", latest.name, start_gen)
 
         for gen in range(start_gen, pop_cfg.generations):
             eval_count = self._evaluate_population(population, generation=gen)
