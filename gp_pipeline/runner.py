@@ -31,6 +31,7 @@ from .timeframe_ops import (
     register_timeframe_operators,
 )
 from .validators import run_boolean_validator, run_numeric_validator
+from .checkpoint import GPPipelineCheckpointManager
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,10 @@ class IndividualRecord:
     metrics: Dict[str, float]
     validator_objectives: Dict[str, float]
     validator_goals: Dict[str, str]
+    signature: Optional[Tuple[int, int]] = None
+    node_count: int = 0
+    tree_height: int = 0
+    expression_length: int = 0
 
 
 @dataclass(slots=True)
@@ -57,9 +62,17 @@ class GenerationSummary:
     best_expression: str
 
 
+@dataclass(slots=True)
+class SignatureEntry:
+    signature: Tuple[int, int]
+    individual: gp.PrimitiveTree
+    complexity: Tuple[int, int, int]
+
+
 class GPFeatureTrainer:
-    def __init__(self, cfg: GPConfig) -> None:
+    def __init__(self, cfg: GPConfig, *, resume: bool = False) -> None:
         self.cfg = cfg
+        self.resume = bool(resume)
         self._seed(cfg.population.seed)
         self.df_full, feature_columns, dropped_features = self._load_dataframe(cfg)
         if cfg.data.target_column is None:
@@ -118,6 +131,17 @@ class GPFeatureTrainer:
         self.cache_subset = EvaluationCache() if cfg.backend.cache_subtrees and self.df_subset is not None else None
         self.history: List[GenerationSummary] = []
         self.best_records: Dict[str, IndividualRecord] = {}
+        self._best_signature_records: Dict[Tuple[int, int], Tuple[IndividualRecord, Tuple[int, int, int]]] = {}
+        self._subset_signatures: Dict[Tuple[int, int], SignatureEntry] = {}
+        self._full_signatures: Dict[Tuple[int, int], SignatureEntry] = {}
+        self.output_dir = os.fspath(self._ensure_output_dir())
+        self.run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.generation_output_dir = os.path.join(
+            self.output_dir,
+            f"generations_{self.run_timestamp}",
+        )
+        os.makedirs(self.generation_output_dir, exist_ok=True)
+        self._ckpt = GPPipelineCheckpointManager(self.output_dir)
         self.metric_goals: Dict[str, bool] = {}
         if dropped_features:
             logger.warning(
@@ -248,12 +272,104 @@ class GPFeatureTrainer:
 
     def run(self) -> Dict[str, object]:
         pop_cfg = self.cfg.population
+        # Default: fresh initial population
         population = self.toolbox.population(n=pop_cfg.size)
         hall_of_fame = tools.HallOfFame(self.cfg.output.save_best)
         logbook = tools.Logbook()
         logbook.header = ["gen", "evals"]
 
-        for gen in range(pop_cfg.generations):
+        # Resume support
+        start_gen = 0
+        if self.resume:
+            latest = self._ckpt.find_latest()
+            if latest is not None:
+                payload: Dict[str, object]
+                try:
+                    payload = self._ckpt.load(latest)
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to load GP checkpoint '{latest}': {exc}") from exc
+
+                pop_str = payload.get("population_str", [])
+                if not (isinstance(pop_str, list) and pop_str):
+                    raise RuntimeError(
+                        f"Checkpoint '{latest.name}' does not contain a population. "
+                        "Cannot resume; remove --resume to start a fresh run."
+                    )
+
+                checkpoint_features = payload.get("feature_columns")
+                if checkpoint_features:
+                    ckpt_features = [str(name) for name in checkpoint_features]
+                    current_features = [str(name) for name in self.feature_columns]
+                    if set(ckpt_features) != set(current_features):
+                        missing = sorted(set(ckpt_features) - set(current_features))
+                        extra = sorted(set(current_features) - set(ckpt_features))
+                        details: List[str] = []
+                        if missing:
+                            details.append(f"missing in config: {', '.join(missing)}")
+                        if extra:
+                            details.append(f"not present in checkpoint: {', '.join(extra)}")
+                        detail_msg = "; ".join(details) if details else "feature set mismatch"
+                        raise RuntimeError(
+                            f"Checkpoint '{latest.name}' uses feature_columns incompatible with the current "
+                            f"configuration ({detail_msg}). Ensure the config matches the checkpoint or rerun without --resume."
+                        )
+
+                try:
+                    population = self._ckpt.restore_population(pop_str, self.toolbox.pset)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to reconstruct population from checkpoint '{latest.name}': {exc}"
+                    ) from exc
+
+                if len(population) != pop_cfg.size:
+                    logger.warning(
+                        "Restored population size %d differs from configured size %d; proceeding with checkpoint population.",
+                        len(population),
+                        pop_cfg.size,
+                    )
+
+                # Restore bookkeeping
+                start_gen = int(payload.get("generation_next", 0))
+                rt = payload.get("run_timestamp")
+                if isinstance(rt, str) and rt:
+                    self.run_timestamp = rt
+                    self.generation_output_dir = os.path.join(
+                        self.output_dir,
+                        f"generations_{self.run_timestamp}",
+                    )
+                    os.makedirs(self.generation_output_dir, exist_ok=True)
+                # History and best records
+                hist = payload.get("history", [])
+                if isinstance(hist, list):
+                    self.history = [GenerationSummary(**h) for h in hist]  # type: ignore[arg-type]
+                best_list = payload.get("best_records", [])
+                if isinstance(best_list, list):
+                    # Rehydrate as mapping by expression
+                    self.best_records = {}
+                    self._best_signature_records = {}
+                    for entry in best_list:
+                        try:
+                            rec = IndividualRecord(**entry)  # type: ignore[arg-type]
+                            if rec.signature is not None:
+                                sig_tuple = tuple(rec.signature)
+                                rec.signature = sig_tuple
+                                self._best_signature_records[sig_tuple] = (
+                                    rec,
+                                    self._record_complexity(rec),
+                                )
+                            self.best_records[rec.expression] = rec
+                        except Exception:
+                            continue
+                mg = payload.get("metric_goals")
+                if isinstance(mg, dict):
+                    self.metric_goals.update({str(k): bool(v) for k, v in mg.items()})
+                # RNG
+                rng_payload = payload.get("rng")
+                if isinstance(rng_payload, dict):
+                    self._ckpt.restore_rng(rng_payload, self._subset_rng)
+                logger.info("Resuming GP pipeline from checkpoint '%s' (generation %d)", latest.name, start_gen)
+
+        for gen in range(start_gen, pop_cfg.generations):
             eval_count = self._evaluate_population(population, generation=gen)
             eligible = [
                 ind
@@ -271,18 +387,39 @@ class GPFeatureTrainer:
             offspring = self.toolbox.select(population, len(population))
             offspring = list(map(self.toolbox.clone, offspring))
 
-            for child1, child2 in zip(offspring[::2], offspring[1::2]):
+            for idx in range(1, len(offspring), 2):
                 if random.random() < pop_cfg.crossover_prob:
-                    self.toolbox.mate(child1, child2)
-                    del child1.fitness.values
-                    del child2.fitness.values
+                    first = offspring[idx - 1]
+                    second = offspring[idx]
+                    new_first, new_second = self.toolbox.mate(first, second)
+                    # Replace references so static limits from decorators take effect.
+                    offspring[idx - 1], offspring[idx] = new_first, new_second
+                    del offspring[idx - 1].fitness.values
+                    del offspring[idx].fitness.values
 
-            for mutant in offspring:
+            for idx, mutant in enumerate(offspring):
                 if random.random() < pop_cfg.mutation_prob:
-                    self.toolbox.mutate(mutant)
-                    del mutant.fitness.values
+                    (new_mutant,) = self.toolbox.mutate(mutant)
+                    offspring[idx] = new_mutant
+                    del offspring[idx].fitness.values
 
             population[:] = offspring
+
+            # Save checkpoint so we can resume at the start of the next generation
+            try:
+                self._ckpt.save(
+                    generation_next=gen + 1,
+                    run_timestamp=self.run_timestamp,
+                    population=population,
+                    feature_columns=self.feature_columns,
+                    subset_rng=self._subset_rng,
+                    best_records=[asdict(rec) for rec in self.best_records.values()],
+                    history=[asdict(summary) for summary in self.history],
+                    metric_goals=self.metric_goals,
+                )
+            except Exception:  # pragma: no cover - defensive
+                # Non-fatal
+                pass
 
         artifacts = self._save_artifacts(hall_of_fame, population)
         best_list = sorted(
@@ -318,27 +455,65 @@ class GPFeatureTrainer:
             data_frame = self.df_subset if self.df_subset is not None else self.df_full
             cache = self.cache_subset if self.df_subset is not None else self.cache_full
             values = self.backend_fn(ir, data_frame, cache)
+            using_subset = self.df_subset is not None and data_frame is self.df_subset
+            signature = self._vector_signature(values)
+            registry = self._subset_signatures if using_subset else self._full_signatures
+            should_eval, replaced = self._register_signature(registry, signature, individual)
+            if replaced is not None and replaced is not individual:
+                self._mark_duplicate(replaced)
+            if not should_eval:
+                if using_subset:
+                    individual.subset_signature = signature
+                else:
+                    individual.full_signature = signature
+                self._mark_duplicate(individual)
+                continue
+            if using_subset:
+                individual.subset_signature = signature
+            else:
+                individual.full_signature = signature
+            individual.is_duplicate = False  # type: ignore[attr-defined]
             validation = self._run_validator(data_frame, values)
             metrics = validation.fitness_objectives
             goals = validation.fitness_goals
             self._assign_fitness(individual, metrics, goals)
             self._register_validator_payload(individual, validation)
             self._maybe_register_best(individual)
-            provisional.append((individual, metrics, goals, ir, values))
+            if using_subset:
+                provisional.append((individual, metrics, goals, ir, values))
             evaluations += 1
 
         progress.close()
 
         if self.df_subset is not None and self.full_eval_top_k > 0 and provisional:
-            k = max(1, int(len(provisional) * self.full_eval_top_k))
+            filtered = [
+                entry for entry in provisional if not getattr(entry[0], "is_duplicate", False)
+            ]
+            if not filtered:
+                return evaluations
+            k = max(1, int(len(filtered) * self.full_eval_top_k))
             ranked = sorted(
-                provisional,
+                filtered,
                 key=lambda x: self._aggregate_for_ranking(x[1]),
                 reverse=True,
             )
             top = ranked[:k]
             for individual, _, _, ir, _ in top:
+                if getattr(individual, "is_duplicate", False):
+                    continue
                 values_full = self.backend_fn(ir, self.df_full, self.cache_full)
+                signature_full = self._vector_signature(values_full)
+                should_eval_full, replaced_full = self._register_signature(
+                    self._full_signatures, signature_full, individual
+                )
+                if replaced_full is not None and replaced_full is not individual:
+                    self._mark_duplicate(replaced_full)
+                if not should_eval_full:
+                    individual.full_signature = signature_full
+                    self._mark_duplicate(individual)
+                    continue
+                individual.full_signature = signature_full
+                individual.is_duplicate = False  # type: ignore[attr-defined]
                 validation_full = self._run_validator(self.df_full, values_full)
                 metrics_full = validation_full.fitness_objectives
                 goals_full = validation_full.fitness_goals
@@ -458,10 +633,32 @@ class GPFeatureTrainer:
         metrics = getattr(individual, "metrics", {})
         if not self._passes_thresholds(metrics):
             return
+        if getattr(individual, "is_duplicate", False):
+            return
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        if signature is None:
+            return
         record = self._individual_to_record(individual)
-        existing = self.best_records.get(record.expression)
-        if existing is None or self._aggregate_for_ranking(record.metrics) > self._aggregate_for_ranking(existing.metrics):
-            self.best_records[record.expression] = record
+        signature = tuple(signature)
+        record.signature = signature
+        complexity = self._individual_complexity(individual)
+        existing_entry = self._best_signature_records.get(signature)
+        if existing_entry is not None:
+            existing_record, existing_complexity = existing_entry
+            if complexity < existing_complexity:
+                self.best_records.pop(existing_record.expression, None)
+            elif complexity == existing_complexity:
+                existing_score = self._aggregate_for_ranking(existing_record.metrics)
+                new_score = self._aggregate_for_ranking(record.metrics)
+                if new_score < existing_score:
+                    return
+                self.best_records.pop(existing_record.expression, None)
+            else:
+                return
+        self._best_signature_records[signature] = (record, complexity)
+        self.best_records[record.expression] = record
 
     def _log_generation(self, population: Sequence[gp.PrimitiveTree], generation: int) -> None:
         metric_names = list(self.mode_metrics)
@@ -491,6 +688,68 @@ class GPFeatureTrainer:
             best_expression=self._expression_from_individual(best_individual),
         )
         self.history.append(summary)
+        self._persist_generation(population, summary, best_individual)
+
+    def _persist_generation(
+        self,
+        population: Sequence[gp.PrimitiveTree],
+        summary: GenerationSummary,
+        best_individual: gp.PrimitiveTree,
+    ) -> None:
+        filepath = os.path.join(
+            self.generation_output_dir,
+            f"generation_{summary.generation:04d}.json",
+        )
+        try:
+            best_record = asdict(self._individual_to_record(best_individual))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to serialize best individual for generation %s: %s",
+                summary.generation,
+                exc,
+            )
+            best_record = {
+                "index": id(best_individual),
+                "expression": None,
+                "feature_type": getattr(best_individual, "feature_mode", self.feature_mode),
+                "metrics": getattr(best_individual, "metrics", {}),
+                "validator_objectives": getattr(best_individual, "validator_metrics", {}),
+                "validator_goals": getattr(best_individual, "validator_goals", {}),
+                "error": str(exc),
+            }
+
+        population_records: List[Dict[str, object]] = []
+        for individual in population:
+            try:
+                population_records.append(asdict(self._individual_to_record(individual)))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to serialize individual %s in generation %s: %s",
+                    id(individual),
+                    summary.generation,
+                    exc,
+                )
+                population_records.append(
+                    {
+                        "index": id(individual),
+                        "expression": None,
+                        "feature_type": getattr(individual, "feature_mode", self.feature_mode),
+                        "metrics": getattr(individual, "metrics", {}),
+                        "validator_objectives": getattr(individual, "validator_metrics", {}),
+                        "validator_goals": getattr(individual, "validator_goals", {}),
+                        "error": str(exc),
+                    }
+                )
+
+        payload = {
+            "summary": asdict(summary),
+            "best": best_record,
+            "population": population_records,
+            "written_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        with open(filepath, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
 
     def _expression_from_individual(self, individual: gp.PrimitiveTree) -> str:
         ir = tree_to_ir(individual, self.feature_columns)
@@ -517,11 +776,18 @@ class GPFeatureTrainer:
         return f"{node.value}({', '.join(args)})"
 
     def _individual_to_record(self, individual: gp.PrimitiveTree) -> IndividualRecord:
-        expr = self._expression_from_individual(individual)
+        expr = getattr(individual, "_cached_expression", None)
+        if expr is None:
+            expr = self._expression_from_individual(individual)
+            setattr(individual, "_cached_expression", expr)
         metrics = getattr(individual, "metrics", {})
         validator_objectives = getattr(individual, "validator_metrics", {})
         validator_goals = getattr(individual, "validator_goals", {})
         feature_type = getattr(individual, "feature_mode", self.feature_mode)
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        node_count, tree_height, expr_len = self._individual_complexity(individual)
         return IndividualRecord(
             index=id(individual),
             expression=expr,
@@ -529,7 +795,99 @@ class GPFeatureTrainer:
             metrics=metrics,
             validator_objectives=validator_objectives,
             validator_goals=validator_goals,
+            signature=signature,
+            node_count=node_count,
+            tree_height=tree_height,
+            expression_length=expr_len,
         )
+
+    @staticmethod
+    def _record_complexity(record: IndividualRecord) -> Tuple[int, int, int]:
+        node_count = record.node_count or 10**9
+        tree_height = record.tree_height or 10**9
+        expr_len = record.expression_length or len(record.expression)
+        return (node_count, tree_height, expr_len)
+
+    def _individual_complexity(self, individual: gp.PrimitiveTree) -> Tuple[int, int, int]:
+        node_count = len(individual)
+        tree_height = int(getattr(individual, "height", 0))
+        expr = getattr(individual, "_cached_expression", None)
+        if expr is None:
+            expr = self._expression_from_individual(individual)
+            setattr(individual, "_cached_expression", expr)
+        expression_length = len(expr)
+        return (node_count, tree_height, expression_length)
+
+    def _vector_signature(self, values: np.ndarray) -> Tuple[int, int]:
+        if self.feature_mode == "numeric":
+            arr = np.asarray(values, dtype=np.float64)
+            finite_mask = np.isfinite(arr)
+            nonfinite_codes = np.zeros(arr.shape, dtype=np.int8)
+            if not finite_mask.all():
+                posinf = np.isposinf(arr)
+                neginf = np.isneginf(arr)
+                nanmask = np.isnan(arr)
+                if posinf.any():
+                    nonfinite_codes[posinf] = 1
+                if neginf.any():
+                    nonfinite_codes[neginf] = 2
+                if nanmask.any():
+                    nonfinite_codes[nanmask] = 3
+                arr = arr.copy()
+                arr[~finite_mask] = 0.0
+            arr = self._clip_to_float32_bounds(arr).astype(np.float32, copy=False)
+            hash_input = pd.DataFrame(
+                {"value": arr, "nonfinite": nonfinite_codes},
+                copy=False,
+            )
+        else:
+            arr = (np.asarray(values, dtype=np.float64) > 0).astype(np.int8, copy=False)
+            hash_input = pd.DataFrame({"value": arr}, copy=False)
+        hashed = pd.util.hash_pandas_object(hash_input, index=False)
+        if hashed.empty:
+            return (0, 0)
+        hash_values = hashed.to_numpy(dtype=np.uint64, copy=False)
+        signature_sum = int(hash_values.sum(dtype=np.uint64))
+        signature_xor = int(np.bitwise_xor.reduce(hash_values))
+        return (signature_sum, signature_xor)
+
+    def _register_signature(
+        self,
+        registry: Dict[Tuple[int, int], SignatureEntry],
+        signature: Tuple[int, int],
+        individual: gp.PrimitiveTree,
+    ) -> Tuple[bool, Optional[gp.PrimitiveTree]]:
+        complexity = self._individual_complexity(individual)
+        entry = registry.get(signature)
+        if entry is None or entry.individual is individual:
+            registry[signature] = SignatureEntry(signature, individual, complexity)
+            return True, None
+        if complexity < entry.complexity:
+            previous = entry.individual
+            registry[signature] = SignatureEntry(signature, individual, complexity)
+            return True, previous
+        # fall back to keep existing representative
+        return False, None
+
+    def _remove_best_record(self, individual: gp.PrimitiveTree) -> None:
+        signature = getattr(individual, "full_signature", None)
+        if signature is None:
+            signature = getattr(individual, "subset_signature", None)
+        if signature is None:
+            return
+        entry = self._best_signature_records.get(signature)
+        if entry is None:
+            return
+        record, _ = entry
+        if record.index != id(individual):
+            return
+        self._best_signature_records.pop(signature, None)
+        self.best_records.pop(record.expression, None)
+
+    def _mark_duplicate(self, individual: gp.PrimitiveTree) -> None:
+        self._remove_best_record(individual)
+        self._assign_fitness(individual, {}, {})
+        individual.is_duplicate = True  # type: ignore[attr-defined]
 
     def _ensure_output_dir(self) -> PathLike:
         path = self.cfg.output.artifacts_dir
@@ -537,8 +895,8 @@ class GPFeatureTrainer:
         return path
 
     def _save_artifacts(self, hall_of_fame: tools.HallOfFame, population: Sequence[gp.PrimitiveTree]):
-        output_dir = self._ensure_output_dir()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_dir = self.output_dir
+        timestamp = self.run_timestamp or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         hof_entries = [asdict(self._individual_to_record(ind)) for ind in hall_of_fame]
         hof_path = os.path.join(output_dir, f"hof_{timestamp}.json")
         with open(hof_path, "w", encoding="utf-8") as fh:
@@ -570,6 +928,7 @@ class GPFeatureTrainer:
             "history": history_path,
             "population": population_path,
             "best": best_path,
+            "generations": self.generation_output_dir,
         }
 
     @staticmethod

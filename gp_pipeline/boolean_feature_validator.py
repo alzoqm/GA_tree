@@ -588,26 +588,61 @@ def _run_mutual_information_test(
     n = binary_feature.size
     if n == 0:
         return None
-    mi = _binary_mutual_information(binary_feature, binary_target)
+    # Ensure compact uint8 representation for fast bitwise arithmetic.
+    binary_feature = binary_feature.astype(np.uint8, copy=False)
+    binary_target = binary_target.astype(np.uint8, copy=False)
+
+    total = int(n)
+    feature_pos = int(np.sum(binary_feature, dtype=np.int64))
+    target_pos = int(np.sum(binary_target, dtype=np.int64))
+    joint11 = int(np.sum(binary_feature & binary_target, dtype=np.int64))
+    joint10 = feature_pos - joint11
+    joint01 = target_pos - joint11
+    joint00 = total - joint11 - joint10 - joint01
+    mi = _binary_mutual_information_from_counts(joint00, joint01, joint10, joint11)
+
     permutations = int(cfg.get("permutations", 256))
-    if permutations <= 0:
+    if permutations <= 0 or feature_pos == 0 or feature_pos == total or target_pos == 0 or target_pos == total:
+        extras = {
+            "mi": float(mi),
+            "mi_null_mean": float(mi),
+            "mi_null_std": 0.0,
+            "mi_z": 0.0,
+            "permutations": float(max(permutations, 0)),
+        }
         return FoldEvaluation(
             fold_id=fold_id,
             feature=feature,
             method=method,
             effect=float(mi),
             pvalue=1.0,
-            extras={"mi": float(mi), "permutations": 0},
+            extras=extras,
         )
 
-    null_samples = np.zeros(permutations, dtype=np.float64)
+    feature_indices = np.flatnonzero(binary_feature)
+    permuted_target = binary_target.copy()
+    null_samples = np.empty(permutations, dtype=np.float64)
+
     for i in range(permutations):
-        shuffled = rng.permutation(binary_target)
-        null_samples[i] = _binary_mutual_information(binary_feature, shuffled)
+        rng.shuffle(permuted_target)
+        if feature_indices.size:
+            perm_joint11 = int(np.sum(permuted_target[feature_indices], dtype=np.int64))
+        else:
+            perm_joint11 = 0
+        perm_joint10 = feature_pos - perm_joint11
+        perm_joint01 = target_pos - perm_joint11
+        perm_joint00 = total - perm_joint11 - perm_joint10 - perm_joint01
+        null_samples[i] = _binary_mutual_information_from_counts(
+            perm_joint00,
+            perm_joint01,
+            perm_joint10,
+            perm_joint11,
+        )
+
     mu = float(np.mean(null_samples))
     sigma = float(np.std(null_samples) + 1e-12)
     z = (mi - mu) / sigma
-    greater = int(np.sum(null_samples >= mi))
+    greater = int(np.count_nonzero(null_samples >= mi))
     pvalue = (greater + 1.0) / (permutations + 1.0)
     extras = {
         "mi": float(mi),
@@ -1075,22 +1110,38 @@ def _prepare_binary_arrays(
     return feature_arr, target_bin
 
 
+def _binary_mutual_information_from_counts(
+    joint00: int,
+    joint01: int,
+    joint10: int,
+    joint11: int,
+) -> float:
+    total = joint00 + joint01 + joint10 + joint11
+    if total <= 0:
+        return 0.0
+    joint = np.array(
+        [[joint00, joint01], [joint10, joint11]],
+        dtype=np.float64,
+    )
+    joint /= float(total)
+    px = joint.sum(axis=1, keepdims=True)
+    py = joint.sum(axis=0, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ratio = np.where(joint > 0.0, np.log(joint) - np.log(px) - np.log(py), 0.0)
+    mi = float(np.sum(joint * log_ratio))
+    return max(mi, 0.0)
+
+
 def _binary_mutual_information(x: np.ndarray, y: np.ndarray) -> float:
     if x.size == 0 or y.size == 0:
         return 0.0
     x = x.astype(np.uint8, copy=False)
     y = y.astype(np.uint8, copy=False)
-    joint = np.zeros((2, 2), dtype=np.float64)
-    for xi, yi in zip(x, y):
-        joint[int(xi), int(yi)] += 1.0
-    joint /= joint.sum()
-    px = joint.sum(axis=1, keepdims=True)
-    py = joint.sum(axis=0, keepdims=True)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = joint / (px @ py)
-        contribution = joint * np.log(np.where(ratio > 0, ratio, 1.0))
-    mi = float(np.nansum(contribution))
-    return max(mi, 0.0)
+    joint11 = int(np.sum(x & y, dtype=np.int64))
+    joint10 = int(np.sum(x, dtype=np.int64)) - joint11
+    joint01 = int(np.sum(y, dtype=np.int64)) - joint11
+    joint00 = x.size - joint11 - joint10 - joint01
+    return _binary_mutual_information_from_counts(joint00, joint01, joint10, joint11)
 
 
 def _chi2_sf_df1(value: float) -> float:

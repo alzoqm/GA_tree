@@ -44,13 +44,13 @@ wandb:
 data:
   symbol: "BTCUSDT"
   interval: "5m"
-  days_to_fetch: 365
+  days_to_fetch: 2555
   train_ratio: 0.8 # 학습 데이터 비율
-  merged_csv_path: "BTCUSDT_5m_30d.csv"
+  merged_csv_path: "BTCUSDT_5m_7y.csv"
   final_features_path: "final_test_features.csv"
   model_config_path: "model_test_config.yaml"
   feature_engineering:
-    target_timeframes: ['5m', '30m']
+    target_timeframes: ['5m', '30m', '1h', '4h', '1d']
     config_yaml_path: "Config/feature_config.yaml"
 
 # 3. GA 핵심 파라미터

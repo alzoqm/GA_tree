@@ -1,3 +1,4 @@
+import math
 import warnings
 
 import numpy as np
@@ -64,3 +65,32 @@ def test_boolean_stats_emits_no_math_utils_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         compute_boolean_feature_stats(df, target, ["f_bool"], bootstrap=None)
+
+
+def test_fisher_exact_matches_naive_small_tables():
+    def naive(a: int, b: int, c: int, d: int) -> float:
+        total = a + b + c + d
+        if total == 0:
+            return 1.0
+        row1 = a + b
+        col1 = a + c
+        min_x = max(0, row1 + col1 - total)
+        max_x = min(row1, col1)
+        if min_x == max_x:
+            return 1.0
+        denom = math.comb(total, row1)
+        observed = math.comb(col1, a) * math.comb(total - col1, row1 - a) / denom
+        s = 0.0
+        for x in range(min_x, max_x + 1):
+            prob = math.comb(col1, x) * math.comb(total - col1, row1 - x) / denom
+            if prob <= observed + 1e-15:
+                s += prob
+        return min(1.0, s)
+
+    rng = np.random.default_rng(2024)
+    for _ in range(200):
+        table = rng.integers(0, 20, size=4)
+        a, b, c, d = map(int, table)
+        result = _fisher_exact(a, b, c, d)
+        expected = naive(a, b, c, d)
+        assert math.isclose(result, expected, rel_tol=1e-12, abs_tol=1e-12)

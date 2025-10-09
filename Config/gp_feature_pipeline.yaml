@@ -56,7 +56,7 @@ population:
   size: 1000
   generations: 20
   min_depth: 1
-  max_depth: 3
+  max_depth: 5
   tournament_size: 5
   elitism: 100
   mutation_prob: 0.2
