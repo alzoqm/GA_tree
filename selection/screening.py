@@ -1190,7 +1190,217 @@ def _run_method_test(
         effect, pval = _distance_correlation_test(x, y, cfg, method_rng)
         return float(effect), float(pval), {}
 
+    if method in {"rdc", "randomized_dependence"}:
+        effect, pval = _rdc_test(x, y, cfg, method_rng)
+        return float(effect), float(pval), {}
+
+    if method in {"biweight_midcorrelation", "bicor"}:
+        effect, pval, extras = _biweight_midcorrelation_test(x, y, cfg)
+        return float(effect), float(pval), extras
+
+    if method in {"quantile_tail_corr", "tail_quantile_corr"}:
+        outcome = _quantile_tail_corr_test(x, y, cfg)
+        if outcome is not None:
+            return outcome
+        return float(0.0), float(1.0), {}
+
     return None
+
+
+def _rdc_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: Mapping[str, object],
+    rng: Generator,
+) -> Tuple[float, float]:
+    proj_dim = int(cfg.get("proj_dim", cfg.get("k", 20)))
+    scale = float(cfg.get("scale", cfg.get("s", 1.0 / 6.0)))
+    proj_dim = max(1, proj_dim)
+    sample = x.size
+    if sample < 8:
+        return 0.0, 1.0
+
+    def _copula_transform(values: np.ndarray) -> np.ndarray:
+        ranks = _rankdata_average_1d_nb(_as_float32(values))
+        denom = float(sample + 1)
+        uniform = ranks / denom
+        uniform = np.clip(uniform, 1e-6, 1.0 - 1e-6)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            transformed = np.log(uniform / (1.0 - uniform))
+        transformed = np.nan_to_num(transformed, nan=0.0, posinf=0.0, neginf=0.0)
+        return transformed.reshape(-1, 1)
+
+    Xc = _copula_transform(x)
+    Yc = _copula_transform(y)
+
+    Wx = rng.normal(loc=0.0, scale=1.0, size=(1, proj_dim))
+    Wy = rng.normal(loc=0.0, scale=1.0, size=(1, proj_dim))
+    bx = rng.uniform(-np.pi, np.pi, size=(proj_dim,))
+    by = rng.uniform(-np.pi, np.pi, size=(proj_dim,))
+
+    proj_x = scale * (Xc @ Wx) + bx
+    proj_y = scale * (Yc @ Wy) + by
+
+    Fx = np.concatenate([np.sin(proj_x), np.cos(proj_x)], axis=1)
+    Fy = np.concatenate([np.sin(proj_y), np.cos(proj_y)], axis=1)
+
+    Fx = np.concatenate([Fx, np.ones((sample, 1), dtype=np.float64)], axis=1)
+    Fy = np.concatenate([Fy, np.ones((sample, 1), dtype=np.float64)], axis=1)
+
+    Fx = Fx - Fx.mean(axis=0, keepdims=True)
+    Fy = Fy - Fy.mean(axis=0, keepdims=True)
+
+    denom = float(max(sample - 1, 1))
+    cross = (Fx.T @ Fy) / denom
+    try:
+        singular_values = np.linalg.svd(cross, compute_uv=False)
+    except np.linalg.LinAlgError:
+        return 0.0, 1.0
+    rho = float(np.clip(singular_values[0] if singular_values.size else 0.0, 0.0, 0.999999))
+    z = rho * np.sqrt(sample)
+    pval = float(np.clip(2.0 * (1.0 - _normal_cdf(z)), 0.0, 1.0))
+    return rho, pval
+
+
+def _biweight_midcorrelation_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: Mapping[str, object],
+) -> Tuple[float, float, Dict[str, float]]:
+    sample = x.size
+    if sample < 8:
+        return 0.0, 1.0, {"effective_n": float(sample)}
+    tuning = float(cfg.get("tuning_constant", cfg.get("c", 9.0)))
+    if tuning <= 0.0:
+        tuning = 9.0
+
+    def _weights(values: np.ndarray) -> Tuple[float, np.ndarray, float]:
+        median = float(np.nanmedian(values))
+        mad = float(np.nanmedian(np.abs(values - median)))
+        if not np.isfinite(mad) or mad < 1e-12:
+            return median, np.zeros_like(values, dtype=np.float64), mad
+        u = (values - median) / (tuning * mad)
+        weights = np.zeros_like(values, dtype=np.float64)
+        mask = np.abs(u) < 1.0
+        if np.any(mask):
+            weights[mask] = (1.0 - u[mask] ** 2) ** 2
+        return median, weights, mad
+
+    x = x.astype(np.float64, copy=False)
+    y = y.astype(np.float64, copy=False)
+
+    mx, wx, mad_x = _weights(x)
+    my, wy, mad_y = _weights(y)
+    mask = (wx > 0.0) & (wy > 0.0)
+    effective_n = int(mask.sum())
+    if effective_n < 8:
+        return 0.0, 1.0, {"effective_n": float(effective_n)}
+
+    wx_sum = float(wx.sum())
+    wy_sum = float(wy.sum())
+    x_loc = float(np.sum(wx * x) / wx_sum) if wx_sum > 0 else mx
+    y_loc = float(np.sum(wy * y) / wy_sum) if wy_sum > 0 else my
+
+    x_dev = (x - x_loc) * wx
+    y_dev = (y - y_loc) * wy
+    numerator = float(np.sum(x_dev * y_dev))
+    denom_x = float(np.sqrt(np.sum(((x - x_loc) ** 2) * (wx ** 2))))
+    denom_y = float(np.sqrt(np.sum(((y - y_loc) ** 2) * (wy ** 2))))
+    if denom_x <= 0.0 or denom_y <= 0.0:
+        return 0.0, 1.0, {"effective_n": float(effective_n)}
+
+    bicor = float(np.clip(numerator / (denom_x * denom_y), -1.0, 1.0))
+    effect = abs(bicor)
+    z = effect * np.sqrt(max(effective_n, 1))
+    pval = float(np.clip(2.0 * (1.0 - _normal_cdf(z)), 0.0, 1.0))
+    return effect, pval, {"bicor": bicor, "effective_n": float(effective_n)}
+
+
+def _quantile_tail_corr_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: Mapping[str, object],
+) -> Optional[Tuple[float, float, Dict[str, float]]]:
+    sample = x.size
+    if sample < 16:
+        return None
+
+    quantiles_raw = cfg.get("quantiles", (0.1, 0.25))
+    if isinstance(quantiles_raw, (int, float)):
+        quantiles_iter = [quantiles_raw]
+    else:
+        quantiles_iter = list(quantiles_raw)
+    processed: List[float] = []
+    for q in quantiles_iter:
+        try:
+            q_val = float(q)
+        except (TypeError, ValueError):
+            continue
+        if q_val <= 0.0 or q_val >= 1.0:
+            continue
+        q_norm = q_val if q_val <= 0.5 else 1.0 - q_val
+        if q_norm <= 0.0 or q_norm >= 0.5:
+            continue
+        processed.append(q_norm)
+    if not processed:
+        processed = [0.1, 0.25]
+    processed = sorted(set(processed))
+
+    min_count = int(cfg.get("min_count", max(8, int(sample * 0.02))))
+    x = x.astype(np.float64, copy=False)
+    y = y.astype(np.float64, copy=False)
+
+    best_effect = 0.0
+    best_pval = 1.0
+    best_meta: Optional[Dict[str, float]] = None
+    bucket_codes = {
+        "both_low": 0.0,
+        "both_high": 1.0,
+        "x_low": 2.0,
+        "x_high": 3.0,
+        "y_low": 4.0,
+        "y_high": 5.0,
+    }
+
+    for q in processed:
+        x_low = float(np.nanquantile(x, q))
+        x_high = float(np.nanquantile(x, 1.0 - q))
+        y_low = float(np.nanquantile(y, q))
+        y_high = float(np.nanquantile(y, 1.0 - q))
+
+        masks = [
+            ("both_low", (x <= x_low) & (y <= y_low)),
+            ("both_high", (x >= x_high) & (y >= y_high)),
+            ("x_low", x <= x_low),
+            ("x_high", x >= x_high),
+            ("y_low", y <= y_low),
+            ("y_high", y >= y_high),
+        ]
+
+        for bucket, mask in masks:
+            count = int(np.count_nonzero(mask))
+            if count < min_count:
+                continue
+            sub_x = x[mask]
+            sub_y = y[mask]
+            rho = _spearman_corr_single(sub_x, sub_y)
+            effect = abs(rho)
+            z = effect * np.sqrt(max(count, 1))
+            pval = float(np.clip(2.0 * (1.0 - _normal_cdf(z)), 0.0, 1.0))
+            if effect > best_effect or (abs(effect - best_effect) <= 1e-12 and pval < best_pval):
+                best_effect = effect
+                best_pval = pval
+                best_meta = {
+                    "quantile": float(q),
+                    "bucket_code": bucket_codes.get(bucket, -1.0),
+                    "count": float(count),
+                    "rho": float(rho),
+                }
+
+    if best_meta is None:
+        return None
+
+    return float(best_effect), float(best_pval), best_meta
 
 
 def _spearman_corr_single(x: np.ndarray, y: np.ndarray, *, y_ctx: Optional[Tuple[np.ndarray, float]] = None) -> float:

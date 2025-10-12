@@ -12,11 +12,12 @@ import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from itertools import count
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 from deap import gp, tools
+from deap.tools.emo import assignCrowdingDist, sortNondominated
 from tqdm.auto import tqdm
 
 from data.target import compute_target
@@ -492,12 +493,46 @@ class GPFeatureTrainer:
             if not filtered:
                 return evaluations
             k = max(1, int(len(filtered) * self.full_eval_top_k))
-            ranked = sorted(
-                filtered,
-                key=lambda x: self._aggregate_for_ranking(x[1]),
-                reverse=True,
-            )
-            top = ranked[:k]
+            entry_map: Dict[int, Tuple[gp.PrimitiveTree, Any, Any, Any, Any]] = {}
+            individuals: List[gp.PrimitiveTree] = []
+            for entry in filtered:
+                individual = entry[0]
+                key = id(individual)
+                if key in entry_map:
+                    continue
+                entry_map[key] = entry
+                individuals.append(individual)
+            fronts = sortNondominated(individuals, len(individuals), first_front_only=False)
+
+            selected_inds: List[gp.PrimitiveTree] = []
+            for front in fronts:
+                assignCrowdingDist(front)
+                front_sorted = sorted(
+                    front,
+                    key=lambda ind: getattr(ind.fitness, "crowding_dist", float("inf")),
+                    reverse=True,
+                )
+                for ind in front_sorted:
+                    if len(selected_inds) >= k:
+                        break
+                    if ind not in selected_inds:
+                        selected_inds.append(ind)
+                if len(selected_inds) >= k:
+                    break
+
+            if len(selected_inds) < k:
+                # Fallback: fill up with remaining individuals preserving iteration order.
+                for ind in individuals:
+                    if len(selected_inds) >= k:
+                        break
+                    if ind not in selected_inds:
+                        selected_inds.append(ind)
+
+            top = []
+            for ind in selected_inds[:k]:
+                mapped = entry_map.get(id(ind))
+                if mapped is not None:
+                    top.append(mapped)
             for individual, _, _, ir, _ in top:
                 if getattr(individual, "is_duplicate", False):
                     continue
