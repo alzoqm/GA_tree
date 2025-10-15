@@ -45,10 +45,11 @@ PathLike = os.PathLike[str] | str
 class IndividualRecord:
     index: int
     expression: str
-    feature_type: str
-    metrics: Dict[str, float]
-    validator_objectives: Dict[str, float]
-    validator_goals: Dict[str, str]
+    binary_expression: Optional[str] = None
+    feature_type: str = "numeric"
+    metrics: Dict[str, float] = None  # type: ignore[assignment]
+    validator_objectives: Dict[str, float] = None  # type: ignore[assignment]
+    validator_goals: Dict[str, str] = None  # type: ignore[assignment]
     signature: Optional[Tuple[int, int]] = None
     node_count: int = 0
     tree_height: int = 0
@@ -177,6 +178,26 @@ class GPFeatureTrainer:
         self.toolbox.decorate("mate", size_limit)
         self.toolbox.decorate("mutate", height_limit)
         self.toolbox.decorate("mutate", size_limit)
+
+    @staticmethod
+    def _sanitize_mapping_for_json(mapping: Dict[str, object]) -> Dict[str, object]:
+        """Create a JSON-safe copy of a flat mapping.
+
+        Converts NaN/Inf/-Inf float-like values to None to avoid emitting
+        non-standard JSON numbers. Other values are passed through unchanged.
+        """
+        clean: Dict[str, object] = {}
+        for k, v in mapping.items():
+            try:
+                fv = float(v)  # type: ignore[arg-type]
+            except Exception:
+                clean[k] = v
+                continue
+            if not np.isfinite(fv):
+                clean[k] = None
+            else:
+                clean[k] = fv
+        return clean
 
     def _seed(self, seed: Optional[int]) -> None:
         # Initialize the generator used for low-fidelity sampling first so it always exists.
@@ -372,11 +393,7 @@ class GPFeatureTrainer:
 
         for gen in range(start_gen, pop_cfg.generations):
             eval_count = self._evaluate_population(population, generation=gen)
-            eligible = [
-                ind
-                for ind in population
-                if self._passes_thresholds(getattr(ind, "metrics", {}))
-            ]
+            eligible = [ind for ind in population if self._passes_thresholds(ind)]
             if eligible:
                 hall_of_fame.update(eligible)
             logbook.record(gen=gen, evals=eval_count)
@@ -395,6 +412,9 @@ class GPFeatureTrainer:
                     new_first, new_second = self.toolbox.mate(first, second)
                     # Replace references so static limits from decorators take effect.
                     offspring[idx - 1], offspring[idx] = new_first, new_second
+                    # Invalidate cached representations/signatures after structural changes
+                    self._invalidate_individual_cache(offspring[idx - 1])
+                    self._invalidate_individual_cache(offspring[idx])
                     del offspring[idx - 1].fitness.values
                     del offspring[idx].fitness.values
 
@@ -402,6 +422,8 @@ class GPFeatureTrainer:
                 if random.random() < pop_cfg.mutation_prob:
                     (new_mutant,) = self.toolbox.mutate(mutant)
                     offspring[idx] = new_mutant
+                    # Invalidate cached representations/signatures after structural changes
+                    self._invalidate_individual_cache(offspring[idx])
                     del offspring[idx].fitness.values
 
             population[:] = offspring
@@ -435,6 +457,20 @@ class GPFeatureTrainer:
             "history": self.history,
             "eligible_best": best_list,
         }
+
+    def _invalidate_individual_cache(self, individual: gp.PrimitiveTree) -> None:
+        """Clear cached expression/signature state after genetic edits.
+
+        Cloning and genetic operators copy attributes like `_cached_expression` and
+        previously computed signatures. If not cleared after structural changes,
+        saved generation files can show repeated or mismatched expressions.
+        """
+        for attr in ("_cached_expression", "subset_signature", "full_signature", "is_duplicate"):
+            if hasattr(individual, attr):
+                try:
+                    delattr(individual, attr)
+                except Exception:
+                    pass
 
     def _evaluate_population(self, population: Sequence[gp.PrimitiveTree], generation: int) -> int:
         evaluations = 0
@@ -644,7 +680,8 @@ class GPFeatureTrainer:
             score += val * weight
         return score
 
-    def _passes_thresholds(self, metrics: Dict[str, float]) -> bool:
+    def _passes_thresholds(self, individual: gp.PrimitiveTree) -> bool:
+        metrics = getattr(individual, "metrics", {})
         if not metrics:
             return False
         thresholds = self.mode_thresholds
@@ -662,11 +699,21 @@ class GPFeatureTrainer:
             else:
                 if value > threshold:
                     return False
+
+        # For boolean features, enforce exposure bounds as a hard constraint.
+        if self.feature_mode == "boolean":
+            constraints = getattr(getattr(individual, "validator_result", None), "constraints", {})
+            try:
+                ok = bool(constraints.get("exposure_rate_within_bounds", True))
+            except Exception:
+                ok = True
+            if not ok:
+                return False
         return True
 
     def _maybe_register_best(self, individual: gp.PrimitiveTree) -> None:
         metrics = getattr(individual, "metrics", {})
-        if not self._passes_thresholds(metrics):
+        if not self._passes_thresholds(individual):
             return
         if getattr(individual, "is_duplicate", False):
             return
@@ -747,8 +794,10 @@ class GPFeatureTrainer:
                 "index": id(best_individual),
                 "expression": None,
                 "feature_type": getattr(best_individual, "feature_mode", self.feature_mode),
-                "metrics": getattr(best_individual, "metrics", {}),
-                "validator_objectives": getattr(best_individual, "validator_metrics", {}),
+                "metrics": self._sanitize_mapping_for_json(dict(getattr(best_individual, "metrics", {}))),
+                "validator_objectives": self._sanitize_mapping_for_json(
+                    dict(getattr(best_individual, "validator_metrics", {}))
+                ),
                 "validator_goals": getattr(best_individual, "validator_goals", {}),
                 "error": str(exc),
             }
@@ -769,8 +818,10 @@ class GPFeatureTrainer:
                         "index": id(individual),
                         "expression": None,
                         "feature_type": getattr(individual, "feature_mode", self.feature_mode),
-                        "metrics": getattr(individual, "metrics", {}),
-                        "validator_objectives": getattr(individual, "validator_metrics", {}),
+                        "metrics": self._sanitize_mapping_for_json(dict(getattr(individual, "metrics", {}))),
+                        "validator_objectives": self._sanitize_mapping_for_json(
+                            dict(getattr(individual, "validator_metrics", {}))
+                        ),
                         "validator_goals": getattr(individual, "validator_goals", {}),
                         "error": str(exc),
                     }
@@ -815,17 +866,23 @@ class GPFeatureTrainer:
         if expr is None:
             expr = self._expression_from_individual(individual)
             setattr(individual, "_cached_expression", expr)
-        metrics = getattr(individual, "metrics", {})
-        validator_objectives = getattr(individual, "validator_metrics", {})
+        metrics_raw = getattr(individual, "metrics", {})
+        validator_objectives_raw = getattr(individual, "validator_metrics", {})
+        metrics = self._sanitize_mapping_for_json(dict(metrics_raw))
+        validator_objectives = self._sanitize_mapping_for_json(dict(validator_objectives_raw))
         validator_goals = getattr(individual, "validator_goals", {})
         feature_type = getattr(individual, "feature_mode", self.feature_mode)
         signature = getattr(individual, "full_signature", None)
         if signature is None:
             signature = getattr(individual, "subset_signature", None)
         node_count, tree_height, expr_len = self._individual_complexity(individual)
+        binary_expr = None
+        if feature_type == "boolean":
+            binary_expr = f"({expr}) > 0"
         return IndividualRecord(
             index=id(individual),
             expression=expr,
+            binary_expression=binary_expr,
             feature_type=feature_type,
             metrics=metrics,
             validator_objectives=validator_objectives,
@@ -943,7 +1000,7 @@ class GPFeatureTrainer:
         qualifying_population = [
             self._individual_to_record(ind)
             for ind in population
-            if self._passes_thresholds(getattr(ind, "metrics", {}))
+            if self._passes_thresholds(ind)
         ]
         if self.cfg.output.save_population and qualifying_population:
             population_path = os.path.join(output_dir, f"population_{timestamp}.json")

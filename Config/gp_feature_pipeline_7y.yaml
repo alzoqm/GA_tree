@@ -17,7 +17,7 @@ data:
   max_target_corr: 0.995
 
 feature:
-  mode: numeric # boolean, numeric
+  mode: boolean # boolean, numeric
 
 timeframe_primitives:
   enabled: true
@@ -131,6 +131,15 @@ validator:
       spearman:
         enabled: true
         cliffs_delta: true
+      threshold_sweep:
+        enabled: true
+        # additive 모드: Spearman 유지 + 상위 일부만 스윕 (시간/메모리 상한 보장)
+        replace_spearman: false
+        quantiles: [0.1, 0.25]
+        min_count: 128         # 폴드 내 구간 최소 표본 수 (대용량 기준)
+        direction: both        # 양쪽 테일 모두 탐색
+        top_k: 256             # 스피어만 기준 상위 피처만 스윕
+        max_extra_seconds_per_fold: 0.2  # 폴드당 추가 시간 상한(초)
       xfit_tail_contrast:
         enabled: true
       rdc:
@@ -161,6 +170,6 @@ validator:
     verbose: false
 
 output:
-  artifacts_dir: ../results/gp_pipeline_numeric/seven_year
+  artifacts_dir: ../results/gp_pipeline_boolean/seven_year
   save_best: 250
   save_population: true

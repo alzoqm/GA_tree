@@ -933,6 +933,29 @@ def _aggregate_method_stats(
         extra_summary[f"{key}_max"] = float(np.max(arr))
         extra_summary[f"{key}_min"] = float(np.min(arr))
 
+        # For contingency metrics, compute symmetric magnitude so protection (x<1)
+        # and risk (x>1) are treated on the same scale. We also winsorize the
+        # magnitude's upper tail mildly to avoid unstable domination in summaries.
+        if key in {"odds_ratio", "relative_risk"}:
+            clipped = np.clip(arr, 1e-12, 1e12)
+            log_abs = np.abs(np.log(clipped))
+            mag = np.exp(log_abs)
+            # Mild winsorization at 99.5 percentile
+            try:
+                hi = float(np.quantile(mag, 0.995))
+            except Exception:
+                hi = float(np.max(mag)) if mag.size else 1.0
+            mag_w = np.clip(mag, 1.0, max(1.0, hi))
+            # Overload the historical "_abs_*" summary keys to now represent
+            # symmetric magnitude statistics to keep downstream compatibility.
+            extra_summary[f"{key}_abs_mean"] = float(np.mean(mag_w))
+            extra_summary[f"{key}_abs_std"] = float(np.std(mag_w))
+            extra_summary[f"{key}_abs_max"] = float(np.max(mag_w))
+            extra_summary[f"{key}_abs_min"] = float(np.min(mag_w))
+            # Also expose log-scale magnitude as auxiliary metrics
+            extra_summary[f"{key}_log_abs_mean"] = float(np.mean(log_abs))
+            extra_summary[f"{key}_log_abs_std"] = float(np.std(log_abs))
+
     return method_stats, pooled_effects, pooled_pvalues, extra_summary
 
 

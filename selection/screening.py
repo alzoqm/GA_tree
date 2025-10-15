@@ -19,6 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from math import erf, erfc, sqrt, pi
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import time
 
 import logging
 import numpy as np
@@ -1403,6 +1404,190 @@ def _quantile_tail_corr_test(
     return float(best_effect), float(best_pval), best_meta
 
 
+def _xfit_threshold_sweep_single(
+    select_values: np.ndarray,
+    eval_values: np.ndarray,
+    select_target: np.ndarray,
+    eval_target: np.ndarray,
+    *,
+    quantiles: Sequence[float],
+    min_count: int,
+    direction: str = "both",
+) -> Optional[Tuple[float, float, Dict[str, float]]]:
+    """Cross-fit threshold sweep on a single feature column.
+
+    - In the selection fold, try candidate thresholds at provided quantiles.
+      For each q in (0, 0.5], evaluate low side (<= q) and/or high side (>= 1-q)
+      depending on `direction`.
+    - Choose the candidate with maximum |rho| on selection split.
+    - Evaluate the chosen candidate on the evaluation split, returning
+      (effect=|rho_eval|, pvalue_eval) and metadata.
+    """
+    if select_values.size == 0 or eval_values.size == 0:
+        return None
+
+    x_sel = _as_float32(select_values)
+    y_sel = _as_float32(select_target)
+    x_eval = _as_float32(eval_values)
+    y_eval = _as_float32(eval_target)
+
+    # Finite masks
+    sel_finite = np.isfinite(x_sel) & np.isfinite(y_sel)
+    eval_finite = np.isfinite(x_eval) & np.isfinite(y_eval)
+    if not sel_finite.any() or not eval_finite.any():
+        return None
+
+    x_sel_f = x_sel[sel_finite].astype(np.float32, copy=False)
+    y_sel_f = y_sel[sel_finite].astype(np.float32, copy=False)
+    x_eval_f = x_eval[eval_finite].astype(np.float32, copy=False)
+    y_eval_f = y_eval[eval_finite].astype(np.float32, copy=False)
+
+    n_sel = int(x_sel_f.size)
+    n_eval = int(x_eval_f.size)
+    if n_sel < 8 or n_eval < 8:
+        return None
+
+    # Dynamic minimum count fallback if unspecified
+    mc = int(min_count) if int(min_count) > 0 else max(8, int(round(n_sel * 0.02)))
+
+    best = None  # (effect_sel, side, q, cut, coverage_sel, rho_sel)
+
+    # Compute cuts per q; robust to NaNs
+    qs: List[float] = []
+    for q in quantiles:
+        try:
+            qf = float(q)
+        except Exception:
+            continue
+        if qf <= 0.0 or qf >= 1.0:
+            continue
+        qn = qf if qf <= 0.5 else 1.0 - qf
+        if qn <= 0.0 or qn >= 0.5:
+            continue
+        qs.append(qn)
+    if not qs:
+        qs = [0.1, 0.25]
+
+    # Pre-sort for quantile stability if many ties
+    # Use numpy nanquantile which ignores NaNs and is deterministic given x_sel_f
+    allow_low = (direction in {"both", "low"})
+    allow_high = (direction in {"both", "high"})
+
+    for q in qs:
+        low_cut = float(np.nanquantile(x_sel_f, q))
+        high_cut = float(np.nanquantile(x_sel_f, 1.0 - q))
+
+        if allow_low:
+            m = x_sel_f <= low_cut
+            cnt = int(np.count_nonzero(m))
+            if cnt >= mc:
+                rho = _spearman_corr_single(x_sel_f[m], y_sel_f[m])
+                eff = abs(rho)
+                cov = cnt / float(n_sel)
+                cand = (eff, "low", q, low_cut, cov, rho)
+                if best is None or cand[0] > best[0]:
+                    best = cand
+
+        if allow_high:
+            m = x_sel_f >= high_cut
+            cnt = int(np.count_nonzero(m))
+            if cnt >= mc:
+                rho = _spearman_corr_single(x_sel_f[m], y_sel_f[m])
+                eff = abs(rho)
+                cov = cnt / float(n_sel)
+                cand = (eff, "high", q, high_cut, cov, rho)
+                if best is None or cand[0] > best[0]:
+                    best = cand
+
+    if best is None:
+        return None
+
+    _, side, q, cut, cov_sel, rho_sel = best
+    if side == "low":
+        me = x_eval_f <= cut
+    else:
+        me = x_eval_f >= cut
+    cnt_eval = int(np.count_nonzero(me))
+    if cnt_eval < mc:
+        return None
+
+    rho_eval = _spearman_corr_single(x_eval_f[me], y_eval_f[me])
+    pval = _approx_spearman_pvalue(float(rho_eval), cnt_eval)
+    effect = abs(float(rho_eval))
+
+    extras = {
+        "quantile": float(q),
+        "side": 0.0 if side == "low" else 1.0,
+        "cut_value": float(cut),
+        "coverage_select": float(cov_sel),
+        "coverage_evaluation": float(cnt_eval / float(n_eval)),
+        "selection_rho": float(rho_sel),
+        "evaluation_rho": float(rho_eval),
+        "selection_n": float(n_sel),
+        "evaluation_n": float(cnt_eval),
+    }
+    return effect, float(pval), extras
+
+
+def _xfit_threshold_sweep_batch(
+    select_block: np.ndarray,
+    eval_block: np.ndarray,
+    select_target: np.ndarray,
+    eval_target: np.ndarray,
+    *,
+    quantiles: np.ndarray,
+    min_count: int,
+    direction: str = "both",
+    top_k_effects: Optional[np.ndarray] = None,
+    time_budget_sec: float = 0.0,
+) -> List[Optional[Tuple[float, float, Dict[str, float]]]]:
+    """Apply threshold sweep to each column with optional Top-K gating and time budget.
+
+    Args:
+        select_block: (n, k) selection-fold feature values
+        eval_block: (n, k) evaluation-fold feature values
+        select_target: (n,) selection-fold target
+        eval_target: (n,) evaluation-fold target
+        quantiles: 1D array of quantiles in (0, 0.5]
+        min_count: minimum samples required per side
+        direction: 'both' | 'low' | 'high'
+        top_k_effects: if provided, process only indices of top-k effects (True mask or indices)
+        time_budget_sec: if >0, stop when elapsed exceeds budget
+    """
+    k = select_block.shape[1] if select_block.ndim == 2 else 0
+    results: List[Optional[Tuple[float, float, Dict[str, float]]]] = [None] * k
+    if k == 0:
+        return results
+
+    start = time.perf_counter()
+
+    # Determine feature indices to evaluate
+    if top_k_effects is None:
+        feat_indices = range(k)
+    else:
+        # Accept a boolean mask or indices
+        if top_k_effects.dtype == np.bool_ and top_k_effects.size == k:
+            feat_indices = np.nonzero(top_k_effects)[0]
+        else:
+            feat_indices = np.asarray(top_k_effects, dtype=int)
+
+    for j in feat_indices:
+        if time_budget_sec > 0.0 and (time.perf_counter() - start) >= time_budget_sec:
+            break
+        res = _xfit_threshold_sweep_single(
+            select_block[:, j],
+            eval_block[:, j],
+            select_target,
+            eval_target,
+            quantiles=quantiles.tolist(),
+            min_count=min_count,
+            direction=direction,
+        )
+        results[j] = res
+
+    return results
+
+
 def _spearman_corr_single(x: np.ndarray, y: np.ndarray, *, y_ctx: Optional[Tuple[np.ndarray, float]] = None) -> float:
     """Spearman's rho single-feature (kept for fallback & exactness)."""
     if x.size <= 1 or y.size <= 1:
@@ -1577,6 +1762,7 @@ def screening_out_of_fold(
 
     method_spec = methods or {"spearman": {"enabled": True}}
     tail_cfg_global: Optional[Dict[str, object]] = None
+    thresh_cfg_global: Optional[Dict[str, object]] = None
     method_items: List[Tuple[str, Dict[str, object]]] = []
     if isinstance(method_spec, Mapping):
         for raw_name, spec in method_spec.items():
@@ -1590,6 +1776,9 @@ def screening_out_of_fold(
             if name == "xfit_tail_contrast":
                 tail_cfg_global = {k: v for k, v in cfg.items() if k != "enabled"}
                 continue
+            if name == "threshold_sweep":
+                thresh_cfg_global = {k: v for k, v in cfg.items() if k != "enabled"}
+                continue
             method_items.append((name, {k: v for k, v in cfg.items() if k != "enabled"}))
     else:
         method_items = [("spearman", {"enabled": True})]
@@ -1599,6 +1788,35 @@ def screening_out_of_fold(
     tail_epsilon = float(tail_cfg_global.get("epsilon", 1e-6)) if tail_cfg_global is not None else 1e-6
     tail_min_samples = int(tail_cfg_global.get("min_samples", 8)) if tail_cfg_global is not None else 8
     tail_tanh_clip = float(tail_cfg_global.get("tanh_clip", 8.0)) if tail_cfg_global is not None else 8.0
+
+    # threshold_sweep global config (regime-aware thresholding)
+    if thresh_cfg_global is not None:
+        raw_q = thresh_cfg_global.get("quantiles", (0.1, 0.25))
+        if isinstance(raw_q, (int, float)):
+            ts_quantiles = [float(raw_q)]
+        else:
+            ts_quantiles = [float(q) for q in list(raw_q)]
+        try:
+            ts_min_count_cfg = int(thresh_cfg_global.get("min_count", 0))
+        except Exception:
+            ts_min_count_cfg = 0
+        ts_direction = str(thresh_cfg_global.get("direction", "both")).lower()
+        try:
+            ts_top_k = int(thresh_cfg_global.get("top_k", 0))
+        except Exception:
+            ts_top_k = 0
+        try:
+            ts_time_budget = float(thresh_cfg_global.get("max_extra_seconds_per_fold", 0.0))
+        except Exception:
+            ts_time_budget = 0.0
+        ts_replace_spearman = bool(thresh_cfg_global.get("replace_spearman", False))
+    else:
+        ts_quantiles = []
+        ts_min_count_cfg = 0
+        ts_direction = "both"
+        ts_top_k = 0
+        ts_time_budget = 0.0
+        ts_replace_spearman = False
     rng = default_rng(random_state)
 
     supervision = supervision.lower()
@@ -1727,7 +1945,7 @@ def screening_out_of_fold(
             xfit_selection_indices: Optional[np.ndarray]
             xfit_selection_target: Optional[np.ndarray]
             if (
-                tail_cfg_global is not None
+                (tail_cfg_global is not None or thresh_cfg_global is not None)
                 and supervised_mode
                 and target_array is not None
             ):
@@ -1818,6 +2036,9 @@ def screening_out_of_fold(
                     mname_l = str(mname).lower()
                     cfg = dict(spec) if isinstance(spec, Mapping) else {"enabled": bool(spec)}
                     if not bool(cfg.get("enabled", True)):
+                        continue
+                    if ts_replace_spearman and mname_l in {"spearman", "spearman_rho"}:
+                        # If threshold_sweep is replacing spearman, do not include it here
                         continue
                     if mname_l.startswith("hsic") and "backend" not in cfg:
                         cfg["backend"] = hsic_default_backend
@@ -1915,6 +2136,77 @@ def screening_out_of_fold(
                             per_feature_pvals[feat][test_idx] = pval
                             if "cliffs_delta" in extras:
                                 per_feature_deltas[feat][test_idx] = abs(extras["cliffs_delta"])
+                            executed_methods.add(method_name)
+                            if record_details:
+                                details.append(
+                                    ScreeningDetail(
+                                        fold_id=f"{split.outer.combo_id}_{fold_label}",
+                                        feature=feat,
+                                        method=method_name,
+                                        effect=effect,
+                                        pvalue=pval,
+                                        extras={k: float(v) for k, v in extras.items()},
+                                    )
+                                )
+
+                # ---- Regime-aware cross-fit threshold sweep (optional) ----
+                if (
+                    thresh_cfg_global is not None
+                    and supervised_mode
+                    and target_values is not None
+                    and xfit_selection_indices is not None
+                    and xfit_selection_target is not None
+                ):
+                    select_block = block_values[xfit_selection_indices, :]
+                    # Dynamic min_count if not provided
+                    if ts_min_count_cfg > 0:
+                        ts_min_count = int(ts_min_count_cfg)
+                    else:
+                        ts_min_count = max(8, int(round(select_block.shape[0] * 0.02)))
+
+                    # Optional Top-K gating using Spearman effects
+                    topk_mask = None
+                    if ts_top_k > 0:
+                        # Try to reuse precomputed Spearman; compute quickly if not available
+                        if fold_ctx is not None and "spearman" in fold_ctx:
+                            ry_centered, denom_y = fold_ctx["spearman"]
+                            base_effects, _ = _evaluate_spearman_batch(Xb, ry_centered, denom_y, {})
+                        else:
+                            # Fallback: compute ranks of target and use batch path
+                            ry = _rankdata_average_1d_nb(target_values)
+                            ry_centered = ry - ry.mean(dtype=np.float32)
+                            denom_y = float(np.sqrt(np.sum(ry_centered * ry_centered, dtype=np.float64)))
+                            base_effects, _ = _evaluate_spearman_batch(Xb, ry_centered, denom_y, {})
+                        if ts_top_k < base_effects.size:
+                            idx = np.argpartition(-base_effects, ts_top_k - 1)[:ts_top_k]
+                            mask = np.zeros(base_effects.size, dtype=np.bool_)
+                            mask[idx] = True
+                            topk_mask = mask
+                        else:
+                            topk_mask = np.ones(base_effects.size, dtype=np.bool_)
+
+                    ts_results = _xfit_threshold_sweep_batch(
+                        select_block,
+                        Xb,
+                        xfit_selection_target,
+                        target_values,
+                        quantiles=np.asarray(ts_quantiles if ts_quantiles else [0.1, 0.25], dtype=np.float32),
+                        min_count=ts_min_count,
+                        direction=ts_direction,
+                        top_k_effects=topk_mask,
+                        time_budget_sec=float(max(0.0, ts_time_budget)),
+                    )
+                    if ts_results:
+                        method_name = "threshold_sweep"
+                        test_key = (split.outer.combo_id, fold_label, method_name)
+                        test_idx = test_positions.setdefault(test_key, len(test_positions))
+                        for j, feat in enumerate(cols):
+                            outcome = ts_results[j]
+                            if outcome is None:
+                                continue
+                            effect, pval, extras = outcome
+                            per_feature_effects[feat][test_idx] = effect
+                            per_feature_pvals[feat][test_idx] = pval
                             executed_methods.add(method_name)
                             if record_details:
                                 details.append(
