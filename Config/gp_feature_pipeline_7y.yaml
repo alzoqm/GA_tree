@@ -14,10 +14,10 @@ data:
     - Number of trades
     - Taker buy base asset volume
     - Taker buy quote asset volume
-  max_target_corr: 1.0
+  max_target_corr: 0.995
 
 feature:
-  mode: numeric # boolean, numeric
+  mode: boolean # boolean, numeric
 
 timeframe_primitives:
   enabled: true
@@ -30,37 +30,43 @@ timeframe_primitives:
       operator: mean
       param_kind: bars
       min_window: 12      # 1 hour
-      max_window: 288     # 1 day
+      max_window: 144     # 12 hours
       allow_partial: false
     - name: mean_multiday
       operator: mean
       param_kind: minutes
-      min_window: 2880    # 10 days
-      max_window: 43200   # 150 days
+      min_window: 1440    # 1 day
+      max_window: 20160   # 14 days
       allow_partial: false
     - name: std_swing
       operator: std
       param_kind: bars
-      min_window: 36      # 3 hours
-      max_window: 1008    # 3.5 days
+      min_window: 24      # 2 hours
+      max_window: 480     # 40 hours
+      allow_partial: false
+    - name: ema_fast
+      operator: ema
+      param_kind: bars
+      min_window: 24      # 2 hours
+      max_window: 120     # 10 hours
       allow_partial: false
     - name: ema_slow
       operator: ema
       param_kind: bars
       min_window: 96      # 8 hours
-      max_window: 2016    # 1 fortnight
+      max_window: 720     # 5 days
       allow_partial: false
     - name: high_span
       operator: high
       param_kind: minutes
-      min_window: 1440    # 1 day
-      max_window: 10080   # 1 week
+      min_window: 720     # 12 hours
+      max_window: 10080   # 7 days
       allow_partial: false
     - name: range_trend
       operator: range
       param_kind: minutes
-      min_window: 720     # 12 hours
-      max_window: 30240   # 21 days
+      min_window: 360     # 6 hours
+      max_window: 2880    # 2 days
       allow_partial: false
   allow_partial_windows: false
   integers_as_rows: false
@@ -68,21 +74,21 @@ timeframe_primitives:
 
 population:
   size: 1400
-  generations: 45
+  generations: 40
   min_depth: 2
   max_depth: 7
   tournament_size: 7
   elitism: 80
-  mutation_prob: 0.22
-  crossover_prob: 0.78
+  mutation_prob: 0.24
+  crossover_prob: 0.76
   seed: 777
 
 backend:
   primary: numexpr
   fallbacks: [numpy]
   cache_subtrees: false
-  low_fidelity_ratio: 0.1
-  full_eval_top_k: 0.25
+  low_fidelity_ratio: 0.15
+  full_eval_top_k: 0.2
 
 fitness:
   numeric:
@@ -91,30 +97,30 @@ fitness:
     weights: [0.8, 1.8, 1.0, 0.8, 1.3, 0.6, 0.6, 0.8]
     maximize: [true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 1.6
-      effect_size: 0.025
-      cliffs_delta: 0.05
-      significance_margin: 0.008
-      mean_method_effect: 0.02
-      effect_stability: 0.6
-      pvalue_consistency: 0.6
-      min_pvalue: 0.012
+      neg_log_pvalue: 0.9
+      effect_size: 0.01
+      cliffs_delta: 0.02
+      significance_margin: 0.002
+      mean_method_effect: 0.01
+      effect_stability: 0.45
+      pvalue_consistency: 0.45
+      min_pvalue: 0.05
 
   boolean:
     metrics: [neg_log_pvalue, effect_strength, effect_stability, pvalue_consistency, significance_margin, prop_diff_abs, odds_ratio_abs, cliffs_delta_abs, mutual_information, min_pvalue]
     weights: [0.6, 1.15, 1.35, 1.25, 0.75, 0.95, 0.8, 1.1, 1.0, 0.8]
     maximize: [true, true, true, true, true, true, true, true, true, false]
     thresholds:
-      neg_log_pvalue: 1.7
-      effect_strength: 0.06
-      effect_stability: 0.6
-      pvalue_consistency: 0.6
-      significance_margin: 0.008
-      prop_diff_abs: 0.065
-      odds_ratio_abs: 1.1
-      cliffs_delta_abs: 0.06
-      mutual_information: 0.0008
-      min_pvalue: 0.012
+      neg_log_pvalue: 1.35
+      effect_strength: 0.045
+      effect_stability: 0.55
+      pvalue_consistency: 0.55
+      significance_margin: 0.005
+      prop_diff_abs: 0.045
+      odds_ratio_abs: 1.06
+      cliffs_delta_abs: 0.045
+      mutual_information: 0.0006
+      min_pvalue: 0.03
 
 validator:
   enabled: true
@@ -125,8 +131,27 @@ validator:
       spearman:
         enabled: true
         cliffs_delta: true
+      threshold_sweep:
+        enabled: true
+        # additive 모드: Spearman 유지 + 상위 일부만 스윕 (시간/메모리 상한 보장)
+        replace_spearman: false
+        quantiles: [0.1, 0.25]
+        min_count: 128         # 폴드 내 구간 최소 표본 수 (대용량 기준)
+        direction: both        # 양쪽 테일 모두 탐색
+        top_k: 256             # 스피어만 기준 상위 피처만 스윕
+        max_extra_seconds_per_fold: 0.2  # 폴드당 추가 시간 상한(초)
       xfit_tail_contrast:
         enabled: true
+      rdc:
+        enabled: true
+        proj_dim: 24
+        scale: 0.18
+      biweight_midcorrelation:
+        enabled: true
+      quantile_tail_corr:
+        enabled: true
+        quantiles: [0.05, 0.1, 0.25, 0.4]
+        min_count: 96
     verbose: false
   boolean_kwargs:
     combine_method: simes
@@ -145,6 +170,6 @@ validator:
     verbose: false
 
 output:
-  artifacts_dir: ../results/gp_pipeline_numeric/seven_year
+  artifacts_dir: ../results/gp_pipeline_boolean/seven_year
   save_best: 250
   save_population: true

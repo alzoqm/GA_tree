@@ -336,6 +336,28 @@ def validate_numeric_feature(
         screening_result.details, feature
     )
 
+    # Regime-aware metrics from threshold_sweep details, if present
+    regime_details = [
+        d for d in screening_result.details if d.feature == feature and d.method == "threshold_sweep"
+    ]
+    regime_effect = 0.0
+    regime_pval = 1.0
+    regime_cov = 0.0
+    if regime_details:
+        effs = [float(d.effect) for d in regime_details if np.isfinite(d.effect)]
+        pvs = [float(d.pvalue) for d in regime_details if np.isfinite(d.pvalue)]
+        covs = [
+            float(d.extras.get("coverage_evaluation", np.nan))
+            for d in regime_details
+            if d.extras and np.isfinite(d.extras.get("coverage_evaluation", np.nan))
+        ]
+        if effs:
+            regime_effect = float(np.median(np.asarray(effs, dtype=float)))
+        if pvs:
+            regime_pval = float(_combine_pvalues(pvs, method="simes"))
+        if covs:
+            regime_cov = float(np.mean(np.asarray(covs, dtype=float)))
+
     fitness_objectives, fitness_goals, fitness_metrics, constraints = _compose_fitness(
         combined_pvalue=combined_pvalue,
         alpha=alpha,
@@ -344,6 +366,9 @@ def validate_numeric_feature(
         pooled_effects=pooled_effects,
         pooled_pvalues=pooled_pvalues,
         significant=significant,
+        regime_effect=regime_effect,
+        regime_pvalue=regime_pval,
+        regime_coverage=regime_cov,
     )
 
     result = FeatureValidationResult(
@@ -423,6 +448,9 @@ def _compose_fitness(
     pooled_effects: Sequence[float],
     pooled_pvalues: Sequence[float],
     significant: bool,
+    regime_effect: float = 0.0,
+    regime_pvalue: float = 1.0,
+    regime_coverage: float = 0.0,
 ) -> Tuple[Dict[str, float], Dict[str, str], Dict[str, float], Dict[str, float | bool]]:
     # Align numeric p-value clipping scale with boolean validator to avoid
     # disproportionate dominance of neg_log_pvalue in the fitness aggregation.
@@ -462,6 +490,14 @@ def _compose_fitness(
         "effect_stability": effect_stability,
         "pvalue_consistency": pvalue_consistency,
     }
+    # Inject regime-aware metrics if meaningful
+    if np.isfinite(regime_effect) and regime_effect > 0.0:
+        rp = float(np.clip(regime_pvalue, 1e-16, 1.0))
+        fitness_objectives["regime_effect"] = float(regime_effect)
+        fitness_objectives["regime_neg_log_pvalue"] = float(-np.log10(rp))
+        fitness_objectives["regime_significance_margin"] = float(max(0.0, alpha - regime_pvalue))
+        if np.isfinite(regime_coverage) and regime_coverage > 0.0:
+            fitness_objectives["regime_coverage"] = float(np.clip(regime_coverage, 0.0, 1.0))
     fitness_goals: Dict[str, str] = {
         "min_pvalue": "minimize",
         "neg_log_pvalue": "maximize",
@@ -472,6 +508,12 @@ def _compose_fitness(
         "effect_stability": "maximize",
         "pvalue_consistency": "maximize",
     }
+    if "regime_neg_log_pvalue" in fitness_objectives:
+        fitness_goals["regime_effect"] = "maximize"
+        fitness_goals["regime_neg_log_pvalue"] = "maximize"
+        fitness_goals["regime_significance_margin"] = "maximize"
+        if "regime_coverage" in fitness_objectives:
+            fitness_goals["regime_coverage"] = "maximize"
     fitness_metrics: Dict[str, float] = {
         "mean_method_pvalue": pvalue_mean,
         "pvalue_std": pvalue_std,
@@ -479,12 +521,46 @@ def _compose_fitness(
         "neg_log_pvalue": neg_log_p,
         "significance_margin": significance_margin,
     }
+    if "regime_neg_log_pvalue" in fitness_objectives:
+        fitness_metrics["regime_neg_log_pvalue"] = fitness_objectives["regime_neg_log_pvalue"]
+        fitness_metrics["regime_significance_margin"] = fitness_objectives["regime_significance_margin"]
+        if "regime_coverage" in fitness_objectives:
+            fitness_metrics["regime_coverage"] = fitness_objectives["regime_coverage"]
     constraints: Dict[str, float | bool] = {
         "significant": significant,
         "alpha": alpha,
         "combined_pvalue": combined_pvalue,
     }
     return fitness_objectives, fitness_goals, fitness_metrics, constraints
+
+
+def _combine_pvalues(pvalues: Sequence[float], method: str = "simes") -> float:
+    pvals = [float(p) for p in pvalues if np.isfinite(p) and float(p) >= 0.0]
+    if not pvals:
+        return 1.0
+    pvals = [min(max(p, 1e-320), 1.0 - 1e-16) for p in pvals]
+    m = len(pvals)
+    method = str(method).lower()
+    if method in {"simes", "simes_hc"}:
+        ordered = np.sort(np.asarray(pvals, dtype=float))
+        idx = np.arange(1, m + 1, dtype=float)
+        adjusted = ordered * (m / idx)
+        return float(np.clip(np.minimum(adjusted, 1.0).min(), 0.0, 1.0))
+    if method in {"fisher", "chi2"}:
+        stat = -2.0 * float(np.sum(np.log(pvals)))
+        # Approximate tail with df=2m via Wilson–Hilferty (avoid SciPy dep)
+        df = 2.0 * m
+        z = (np.power(stat / df, 1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / np.sqrt(2.0 / (9.0 * df))
+        # two-sided normal tail
+        return float(np.clip(2.0 * (1.0 - 0.5 * (1.0 + np.math.erf(abs(z) / np.sqrt(2.0)))), 0.0, 1.0))
+    if method in {"sidak", "sidak_min"}:
+        min_p = float(np.min(pvals))
+        return float(1.0 - (1.0 - min_p) ** m)
+    # default
+    ordered = np.sort(np.asarray(pvals, dtype=float))
+    idx = np.arange(1, m + 1, dtype=float)
+    adjusted = ordered * (m / idx)
+    return float(np.clip(np.minimum(adjusted, 1.0).min(), 0.0, 1.0))
 
 
 def _build_fallback_split(
