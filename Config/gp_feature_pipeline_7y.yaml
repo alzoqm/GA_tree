@@ -170,6 +170,7 @@ validator:
     verbose: false
 
 output:
-  artifacts_dir: ../results/gp_pipeline_boolean/seven_year
+  artifacts_dir_numeric: ../results/gp_pipeline_numeric/seven_year
+  artifacts_dir_boolean: ../results/gp_pipeline_boolean/seven_year
   save_best: 250
   save_population: true

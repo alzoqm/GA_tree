@@ -137,6 +137,9 @@ class DataConfig:
 @dataclass(slots=True)
 class OutputConfig:
     artifacts_dir: Path = Path("results/gp_pipeline")
+    # Optional per-mode artifact directories. If not set, falls back to artifacts_dir.
+    artifacts_dir_numeric: Optional[Path] = None
+    artifacts_dir_boolean: Optional[Path] = None
     save_best: int = 5
     save_population: bool = False
 
@@ -197,6 +200,11 @@ class GPConfig:
         base = base_path or Path.cwd()
         self.data.path = (base / self.data.path).resolve()
         self.output.artifacts_dir = (base / self.output.artifacts_dir).resolve()
+        # Resolve optional per-mode artifact directories if provided
+        if self.output.artifacts_dir_numeric is not None:
+            self.output.artifacts_dir_numeric = (base / self.output.artifacts_dir_numeric).resolve()
+        if self.output.artifacts_dir_boolean is not None:
+            self.output.artifacts_dir_boolean = (base / self.output.artifacts_dir_boolean).resolve()
         return self
 
 
