@@ -982,7 +982,13 @@ class GPFeatureTrainer:
         individual.is_duplicate = True  # type: ignore[attr-defined]
 
     def _ensure_output_dir(self) -> PathLike:
-        path = self.cfg.output.artifacts_dir
+        # Prefer per-mode directories when configured; otherwise, fall back to the default.
+        if self.feature_mode == "numeric" and getattr(self.cfg.output, "artifacts_dir_numeric", None):
+            path = self.cfg.output.artifacts_dir_numeric  # type: ignore[assignment]
+        elif self.feature_mode == "boolean" and getattr(self.cfg.output, "artifacts_dir_boolean", None):
+            path = self.cfg.output.artifacts_dir_boolean  # type: ignore[assignment]
+        else:
+            path = self.cfg.output.artifacts_dir
         os.makedirs(path, exist_ok=True)
         return path
 

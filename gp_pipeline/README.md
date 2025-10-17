@@ -23,7 +23,7 @@
   - `data.feature_columns`: 특성 컬럼 목록
   - `data.target_column`: 타깃 컬럼. 값을 비우면 자동 생성(비율/위험 조정된 다중 지평 타깃)
   - `data.max_target_corr`: 타깃과 상관 높은 특성 제거 임계값(선택)
-- 경로 해석 주의: `output.artifacts_dir`와 같은 경로들은 “설정 파일이 위치한 디렉터리” 기준으로 해석됩니다.
+- 경로 해석 주의: `output.artifacts_dir`, `output.artifacts_dir_numeric`, `output.artifacts_dir_boolean` 등 경로들은 “설정 파일이 위치한 디렉터리” 기준으로 해석됩니다.
 
 ## 실행 옵션 (CLI)
 - `--config PATH`: 설정 파일 경로
@@ -47,11 +47,13 @@
 - `validator`
   - `enabled: true` 시 통계적 유의성/강건성 지표 평가 수행
 - `output`
-  - `artifacts_dir`: 결과 저장 디렉터리(기본 `results/gp_pipeline`)
+  - `artifacts_dir`: 기본 결과 저장 디렉터리(기본 `results/gp_pipeline`)
+  - `artifacts_dir_numeric`: 숫자형(`feature.mode: numeric`)일 때 사용할 디렉터리(설정 시 우선 사용)
+  - `artifacts_dir_boolean`: 불리언(`feature.mode: boolean`)일 때 사용할 디렉터리(설정 시 우선 사용)
   - `save_best`, `save_population`: 최적/개체군 저장 옵션
 
 ## 체크포인트 & 재개
-- 저장 위치: `<artifacts_dir>/checkpoints/gp/gp_gen_XXXX.json`
+- 저장 위치: 선택된 아티팩트 디렉터리(모드별 설정이 있으면 해당 경로)/`checkpoints/gp/gp_gen_XXXX.json`
 - 저장 시점: 각 세대의 재생산(offspring) 후 저장 → 재개 시 “다음 세대”부터 평가 시작
 - 포함 정보: 다음 세대 인덱스, population(문자열 표현), run_timestamp, RNG 상태(python/numpy/subset_rng), 누적 history, best_records, metric_goals
 - 재개 방법: `--resume` 플래그 사용 시 최신 체크포인트 자동 탐색/복원
@@ -59,7 +61,7 @@
 - 주의: 설정/프리미티브 구성이 크게 바뀌면 복원이 실패할 수 있으며, 이 경우 자동으로 새 실행으로 폴백됩니다.
 
 ## 출력 아티팩트
-- 세대별 요약: `<artifacts_dir>/generations_YYYYMMDD_HHMMSS/generation_0000.json` 등
+- 세대별 요약: 선택된 아티팩트 디렉터리(모드별 설정이 있으면 해당 경로)/`generations_YYYYMMDD_HHMMSS/generation_0000.json` 등
 - 집계 결과(러너 종료 시 저장)
   - `hof_<timestamp>.json`: Hall of Fame(임계 통과 개체 중 상위)
   - `history_<timestamp>.json`: 세대별 최고/평균 메트릭 요약
